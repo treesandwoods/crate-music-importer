@@ -152,3 +152,33 @@ export function dependencyStatus(): Promise<DependencyResult> {
 export function dependencyUpdate(planId: string): Promise<DependencyResult> {
   return runJson(["dependencies", "update", "--confirm-plan", planId], 2_700_000);
 }
+
+export interface HealthIssue {
+  id: string;
+  severity: "critical" | "warning" | "informational";
+  category: string;
+  ownership: "importer_owned" | "importer_referenced" | "user_owned" | "untracked" | "ambiguous";
+  title: string;
+  detail: string;
+  persistentIds: string[];
+  recordingIds: string[];
+  paths: string[];
+  tracks: Array<{ artist: string; title: string; album: string; persistent_id: string }>;
+  evidence: unknown;
+  suggestedAction: string;
+  suggestedNextStep: string;
+}
+
+export interface HealthResult {
+  schemaVersion: number;
+  checkedAt: string;
+  status: "healthy" | "attention" | "failed";
+  error?: string;
+  summary: Record<string, number>;
+  checks: Record<string, string>;
+  issues: HealthIssue[];
+}
+
+export function libraryHealth(deepAll = false): Promise<HealthResult> {
+  return runJson(["health", "--confirm-read-only-scan", "--json", ...(deepAll ? ["--deep-all"] : [])], 43_200_000);
+}

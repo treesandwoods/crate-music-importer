@@ -25,7 +25,7 @@ def _tool(name: str) -> str:
 	for candidate in (shutil.which(name), f"/opt/homebrew/bin/{name}", f"/usr/local/bin/{name}"):
 		if candidate and Path(candidate).is_file():
 			return str(candidate)
-	raise MediaError(f"{name} is required. Install the prerequisites in the README, then run Update Dependencies in Raycast.")
+	raise MediaError(f"{name} is required. Install the prerequisites in the README, then run Library Health & Updates in Raycast.")
 
 
 def check_tools() -> dict[str, str]:

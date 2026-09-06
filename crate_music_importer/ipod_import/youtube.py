@@ -27,7 +27,7 @@ def ytdlp_path() -> str:
 	for candidate in (shutil.which("yt-dlp"), "/opt/homebrew/bin/yt-dlp", "/usr/local/bin/yt-dlp"):
 		if candidate and Path(candidate).is_file():
 			return str(candidate)
-	raise YouTubeError("yt-dlp is required. Install the prerequisites in the README, then run Update Dependencies in Raycast.")
+	raise YouTubeError("yt-dlp is required. Install the prerequisites in the README, then run Library Health & Updates in Raycast.")
 
 
 def _run_json(arguments: list[str], *, timeout: float = 120) -> dict[str, Any]:

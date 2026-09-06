@@ -20,7 +20,7 @@ Install the external prerequisites after installing Homebrew:
 brew install python node yt-dlp ffmpeg deno
 ```
 
-This initial installation is separate from **Update Dependencies**, which never installs or upgrades Python or application packages.
+This initial installation is separate from **Library Health & Updates**, which never installs or upgrades Python or application packages.
 
 ## Install from source
 
@@ -72,7 +72,7 @@ Run **Rebuild Music Library Cache** once and confirm the read-only scan. Allow R
 - **Playlist Link Import**: preview a public Spotify playlist URL and confirm its import.
 - **Review Activity & Problems**: follow durable jobs, resolve ambiguous Music/YouTube matches, retry failed work, or cancel incomplete progress.
 - **Rebuild Music Library Cache**: deliberately refresh the saved index after changes outside the importer.
-- **Update Dependencies**: review and confirm downloader updates as described below.
+- **Library Health & Updates**: automatically run a read-only library health audit and stable downloader update check; review findings or confirm eligible updates.
 
 Previews use the persistent cache. Final Music writes revalidate exact persistent IDs. The importer preserves user-owned tracks and playlist memberships. Reusing an importer-owned playlist recording in a real album can update that same Music item in place when ownership is proven; ambiguous ownership or conflicting real albums stop for review.
 
@@ -104,9 +104,13 @@ The optional reconciliation CLI also accepts `legacyAlbumsDirectory`, `musicLibr
 
 Managed storage contains `tracks/` and `.state/` with manifests, caches, jobs, logs, and reconciliation journals. Never publish these or downloaded media. Changing the configured path selects another library; it does **not** migrate or merge existing content. Preserve the complete folder when moving it deliberately.
 
-## Manual downloader updates
+## Library health and stable downloader updates
 
-Open **Update Dependencies**, then **Check Dependency Versions**. Review each resolved executable, its installation method, installed and available stable versions, proposed command, and skipped tools. **Review and Confirm Updates** requires explicit confirmation before changing tools.
+Open **Library Health & Updates** to start two independent checks concurrently. Library findings remain visible if update checks fail, and dependency results remain visible if Music access fails. Review each executable, installation method, installed and latest stable version, and any skip reason. **Update N Stable Dependencies…** appears only when safe, stable updates exist and both checks have finished. Confirmation lists the exact version transitions and commands. Current, unsafe, and failed checks do not offer an update action. After updating, dependency availability refreshes while the existing health report and update/validation results remain visible.
+
+The health audit deliberately reads the full Music library (persistent IDs, locations, comments, duration, tags), the configured manifest, and the existing Music cache. It checks registered managed files even when absent from Music, and reads local files for existence, readability, nonzero size, SHA-256 and FFprobe duration. Automatic full FFmpeg decoding is limited to importer-owned recordings; **Deep Check All Local Music** explicitly includes other local files. Cloud-only entries are informational. Exact byte duplicates and possible artist/title/version/duration matches are separate findings. Metadata and MP3 artwork comparisons apply only to unambiguous importer-owned recordings, honor playlist/album metadata profiles, and use the existing duration tolerances. Artwork bytes are decoded locally; Music's displayed artwork and remote artwork URLs are not fetched.
+
+Each finding includes severity, ownership, track metadata, persistent and recording IDs, paths, evidence and a suggested manual review step. Ordinary user-owned tracks need no manifest entry. Findings offer diagnostic copying and Reveal in Finder, with no repair, delete or rewrite actions. The latest report is written atomically to `<managed directory>/.state/health-last-result.json`, including failed scans. This diagnostic contains local paths and track metadata; treat it as private. The scan does not write Music, media, playlists, manifests, the Music cache, or Finder/iPod settings. Existing preview/cache and migration behavior is unchanged. Health and dependency checks hold shared dependency locks; updates require the exclusive lock. Lock conflicts are reported, never bypassed.
 
 Only the active Homebrew-owned `yt-dlp`, `ffmpeg`/`ffprobe`, and installed Deno are eligible. Missing Deno is reported when required by the active Homebrew yt-dlp formula; install it separately. Unknown, pip, standalone, custom-tap, and unpaired installations are skipped rather than overwritten. Existing lookup order is preserved: PATH, Apple Silicon Homebrew, then Intel Homebrew. A higher-priority executable is never silently replaced by another installation.
 
@@ -119,6 +123,9 @@ After an update attempt, the command resolves the actual executables again, chec
 Equivalent CLI commands:
 
 ```sh
+crate-music-importer health --confirm-read-only-scan --json
+# Optional: also fully decode user-owned local files
+crate-music-importer health --confirm-read-only-scan --deep-all --json
 crate-music-importer dependencies status
 crate-music-importer dependencies update --confirm-plan PLAN_ID_FROM_STATUS
 ```
