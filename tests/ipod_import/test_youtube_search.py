@@ -21,6 +21,32 @@ class MatchingTests(unittest.TestCase):
 		for title in ["Artist & Guest - Beautiful Song", "Artist feat. Guest - Beautiful Song", "Beautiful Song (feat. Guest)"]:
 			with self.subTest(title=title): self.assertTrue(evaluate_candidate(track, candidate(title=title, uploader="Artist"))["automatic_eligible"])
 
+	def test_slash_aliases_are_primary_artist_evidence(self):
+		track = dict(TRACK, title="Pop Star", artists="Yusuf / Cat Stevens", duration_ms=253000)
+		result = evaluate_candidate(track, candidate(
+			title="Pop Star (Remastered 2020)",
+			track="Pop Star",
+			artist="Yusuf / Cat Stevens",
+			uploader="Yusuf / Cat Stevens",
+			duration_s=253,
+		))
+		self.assertTrue(result["automatic_eligible"])
+		self.assertEqual(result["matching_evidence"]["artist_evidence"], 1.0)
+		self.assertEqual(result["reasons"], [])
+
+	def test_exact_combined_uploader_is_strong_artist_evidence(self):
+		track = dict(TRACK, artists="Yusuf / Cat Stevens")
+		result = evaluate_candidate(track, candidate(title="Beautiful Song", uploader="Yusuf / Cat Stevens"))
+		self.assertTrue(result["automatic_eligible"])
+		self.assertEqual(result["matching_evidence"]["artist_evidence"], 0.90)
+
+	def test_secondary_collaborator_alone_remains_review_only(self):
+		track = dict(TRACK, artists="Artist, Guest")
+		result = evaluate_candidate(track, candidate(title="Guest - Beautiful Song", uploader="Guest"))
+		self.assertTrue(result["review_relevant"])
+		self.assertFalse(result["automatic_eligible"])
+		self.assertIn("Only part of the artist name matches", result["reasons"][0])
+
 	def test_structured_label_upload(self):
 		self.assertTrue(evaluate_candidate(TRACK, candidate(title="Beautiful Song", artist="Artist", track="Beautiful Song"))["automatic_eligible"])
 		self.assertFalse(evaluate_candidate(TRACK, candidate(title="Beautiful Song"))["review_relevant"])

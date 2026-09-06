@@ -120,7 +120,7 @@ function candidateDetail(candidate: ResolverCandidate, problem: ResolverProblem)
 **Expected:** ${markdownText(problem.artists)} — ${markdownText(problem.title)} (${seconds(problem.durationSeconds)})  
 **Uploader:** ${markdownText(candidate.uploader || "Unknown")}  
 **Candidate duration:** ${seconds(candidate.durationSeconds)} (${delta >= 0 ? "+" : ""}${delta}s vs Spotify)  
-**Ranking score (not a probability):** ${score(candidate)}  
+**Ranking score:** ${score(candidate)}${"  "}
 **Automatic eligibility:** ${candidate.automaticEligible ? "Eligible" : "Review only"}
 
 ### Why it needs review

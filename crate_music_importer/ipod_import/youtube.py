@@ -105,10 +105,15 @@ def evaluate_candidate(track: dict[str, Any], candidate: dict[str, Any]) -> dict
 	raw = str(item.get("title") or "")
 	clean = _clean_candidate_title(str(item.get("track") or raw), str(track.get("artists") or ""))
 	title = _similarity(wanted, clean, recording_title=True)
-	artists = normalized_artists(track.get("artists"))
+	artist_credit = str(track.get("artists") or "")
+	artists = normalized_artists(artist_credit)
 	uploader = normalize_text(re.sub(r"\s*(?:-\s*topic|vevo|official)\s*$", "", str(item.get("uploader") or ""), flags=re.I))
 	structured = normalized_artists(item.get("artist"))
-	primary = normalize_text(re.split(r",|;|\bfeat\.?\s", str(track.get("artists") or ""), maxsplit=1)[0])
+	primary_credit = re.split(r"\s*(?:,|;|\bfeat\.?(?=\s|$)|\bfeaturing\b|\bwith\b|\bx\b)\s*", artist_credit, maxsplit=1, flags=re.I)[0]
+	# A slash can be part of one Spotify artist's canonical name, such as
+	# "Yusuf / Cat Stevens". Every alias in that primary credit is primary;
+	# comma/feature-separated collaborators remain secondary evidence.
+	primary_artists = set(normalized_artists(primary_credit))
 	def artist_evidence(a: str) -> float:
 		if a in structured: value = 1.0
 		elif _contains(normalize_text(raw), a): value = 0.94
@@ -117,8 +122,12 @@ def evaluate_candidate(track: dict[str, Any], candidate: dict[str, Any]) -> dict
 			# Group-name variants support review, never automatic selection.
 			alias = re.sub(r"^(?:the )| (?:band|quartet)$", "", a).strip()
 			value = 0.85 if len(alias.split()) >= 2 and alias == uploader else 0.0
-		return value if a == primary else min(value, 0.82)
+		return value if a in primary_artists else min(value, 0.82)
 	artist = max((artist_evidence(a) for a in artists), default=0.0)
+	# Some YouTube uploads omit structured artist metadata but use the complete
+	# Spotify artist credit verbatim as the uploader/channel name.
+	if uploader and uploader == normalize_text(artist_credit):
+		artist = max(artist, 0.90)
 	# Remove the actual requested name first: 'Live and Let Die' and artist
 	# names such as Live must not manufacture a recording-version conflict.
 	context = normalize_text(_clean_candidate_title(raw, str(track.get("artists") or "")))
@@ -154,14 +163,25 @@ def evaluate_candidate(track: dict[str, Any], candidate: dict[str, Any]) -> dict
 	verified = bool(item.get("metadata_verified") and seconds > 0 and raw and item.get("video_id"))
 	automatic = relevant and score > YOUTUBE_CONFIDENCE_MIN and title >= 0.92 and artist >= 0.90 and verified and delta is not None and abs(delta) <= 7
 	reasons = []
-	if title < 0.92 or (short and title != 1): reasons.append(f"title similarity {title:.2f}" + ("; short titles require an exact match" if short else ""))
-	if artist < 0.80: reasons.append("no meaningful artist evidence")
-	elif artist < 0.90: reasons.append("partial artist/group-name evidence; review only")
-	if conflict: reasons.append("incompatible recording version")
-	if bad: reasons.append("undesired cover/altered recording: " + ", ".join(bad))
-	if delta is None: reasons.append("duration missing")
-	elif abs(delta) > 7: reasons.append(f"duration differs by {delta:+.1f}s; review only")
-	if not verified: reasons.append("full metadata unverified or incomplete; review only")
+	if short and title != 1:
+		reasons.append(f"This short song title is not an exact match to Spotify ({title:.0%} title match).")
+	elif title < 0.92:
+		reasons.append(f"The video title is not close enough to the Spotify title ({title:.0%} title match).")
+	if artist < 0.80:
+		reasons.append("The uploader, video title, and YouTube artist metadata do not clearly match the Spotify artist.")
+	elif artist < 0.90:
+		reasons.append("Only part of the artist name matches the uploader, video title, or YouTube artist metadata.")
+	if conflict:
+		reasons.append("The video appears to be a different version than the Spotify track, such as live, acoustic, remix, or edit.")
+	if bad:
+		reasons.append("The video appears to be an unwanted alternate recording: " + ", ".join(bad) + ".")
+	if delta is None:
+		reasons.append("YouTube did not provide a usable duration, so Crate Music Importer could not compare its length with Spotify.")
+	elif abs(delta) > 7:
+		direction = "longer" if delta > 0 else "shorter"
+		reasons.append(f"The video is {abs(delta):.1f} seconds {direction} than the Spotify track; automatic matches must be within 7 seconds.")
+	if not verified:
+		reasons.append("Crate Music Importer could not verify the video's full YouTube metadata, so it cannot select it automatically.")
 	item.update(score=round(score, 4), reasons=reasons, automatic_eligible=automatic, review_relevant=relevant,
 		matching_evidence={"title_similarity": title, "artist_evidence": artist, "duration_difference_s": delta, "version_agreement": not conflict, "metadata_verified": verified})
 	return item
