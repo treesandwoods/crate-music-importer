@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crate-music-importer"
+version = "1.7.0"
+description = "Local Spotify album and playlist importer for Music.app and Raycast"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+dependencies = ["mutagen>=1.47.0"]
+
+[project.scripts]
+crate-music-importer = "crate_music_importer.ipod_import.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["crate_music_importer", "crate_music_importer.ipod_import"]
+namespaces = true

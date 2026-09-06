@@ -1,0 +1,46 @@
+{
+  "id": "48a7rOjTzpD1zzJAteeveE",
+  "name": "Visions",
+  "url": "https://open.spotify.com/album/48a7rOjTzpD1zzJAteeveE",
+  "source_type": "album",
+  "album_artist": "Grimes",
+  "release_year": 2012,
+  "total_count": 2,
+  "complete": true,
+  "tracks": [
+    {
+      "position": 1,
+      "title": "Infinite Love Without Fulfilment",
+      "artists": "Grimes",
+      "album": "Visions",
+      "album_artist": "Grimes",
+      "duration_ms": 116000,
+      "sp_id": "spotifytrackfixture010",
+      "isrc": "CA21O1100041",
+      "cover_url": "https://example.test/visions.jpg",
+      "track_no": 1,
+      "track_total": 2,
+      "disc_no": 1,
+      "disc_total": 1,
+      "release_year": 2012,
+      "album_id": "48a7rOjTzpD1zzJAteeveE"
+    },
+    {
+      "position": 2,
+      "title": "Genesis",
+      "artists": "Grimes",
+      "album": "Visions",
+      "album_artist": "Grimes",
+      "duration_ms": 255000,
+      "sp_id": "spotifytrackfixture002",
+      "isrc": "CA21O1100042",
+      "cover_url": "https://example.test/visions.jpg",
+      "track_no": 2,
+      "track_total": 2,
+      "disc_no": 1,
+      "disc_total": 1,
+      "release_year": 2012,
+      "album_id": "48a7rOjTzpD1zzJAteeveE"
+    }
+  ]
+}

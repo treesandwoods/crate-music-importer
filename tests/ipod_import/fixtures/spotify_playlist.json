@@ -1,0 +1,49 @@
+{
+  "id": "37i9dQZF1DXTESTFIXTURE1",
+  "name": "Fixture Road Trip",
+  "url": "https://open.spotify.com/playlist/37i9dQZF1DXTESTFIXTURE1",
+  "total_count": 4,
+  "complete": true,
+  "tracks": [
+    {
+      "position": 1,
+      "title": "Midnight City",
+      "artists": "M83",
+      "album": "Hurry Up, We're Dreaming",
+      "duration_ms": 244000,
+      "sp_id": "spotifytrackfixture001",
+      "isrc": "FRS711100740",
+      "cover_url": null
+    },
+    {
+      "position": 2,
+      "title": "Genesis",
+      "artists": "Grimes",
+      "album": "Visions",
+      "duration_ms": 255000,
+      "sp_id": "spotifytrackfixture002",
+      "isrc": "CA21O1100042",
+      "cover_url": null
+    },
+    {
+      "position": 3,
+      "title": "The Test Song (Live)",
+      "artists": "Fixture Artist",
+      "album": "Live Source Album",
+      "duration_ms": 201000,
+      "sp_id": "spotifytrackfixture003",
+      "isrc": null,
+      "cover_url": null
+    },
+    {
+      "position": 4,
+      "title": "Genesis",
+      "artists": "Grimes",
+      "album": "Visions",
+      "duration_ms": 255000,
+      "sp_id": "spotifytrackfixture002",
+      "isrc": "CA21O1100042",
+      "cover_url": null
+    }
+  ]
+}

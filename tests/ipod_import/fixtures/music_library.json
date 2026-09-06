@@ -1,0 +1,32 @@
+[
+  {
+    "title": "Midnight City",
+    "artist": "M83",
+    "album": "Hurry Up, We're Dreaming",
+    "duration_s": 244.2,
+    "persistent_id": "A1B2C3D4E5F60001",
+    "database_id": "1001",
+    "location": "/Music/Media/M83/Midnight City.m4a",
+    "comment": ""
+  },
+  {
+    "title": "Genesis (Live)",
+    "artist": "Grimes",
+    "album": "Live Bootleg",
+    "duration_s": 255.0,
+    "persistent_id": "A1B2C3D4E5F60002",
+    "database_id": "1002",
+    "location": "/Music/Media/Grimes/Genesis Live.m4a",
+    "comment": ""
+  },
+  {
+    "title": "The Test Song",
+    "artist": "Fixture Artist",
+    "album": "Studio Source Album",
+    "duration_s": 201.0,
+    "persistent_id": "A1B2C3D4E5F60003",
+    "database_id": "1003",
+    "location": "/Music/Media/Fixture Artist/The Test Song.m4a",
+    "comment": ""
+  }
+]

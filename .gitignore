@@ -1,0 +1,53 @@
+# Virtual environments
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Build artifacts
+build/
+build-*/
+dist/
+dist-*/
+release-*/
+local-test-*/
+*.egg-info/
+tmp_ytdlp_test/
+
+# Test and local agent caches
+.pytest_cache/
+.agents/
+AGENTS.md
+raycast-extension/node_modules/
+
+# Executables and binaries
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Logs and reports
+*.log
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Private configuration, media, and working-library state
+.env
+.env.*
+!.env.example
+config.local.json
+.state/
+*.mp3
+*.m4a
+*.opus
+*.flac
+*.wav
+*.musiclibrary/
+validation/
+raycast-extension/assets/backend/
+raycast-extension/raycast-env.d.ts

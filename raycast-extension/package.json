@@ -1,0 +1,114 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "type": "module",
+  "name": "crate-music-importer",
+  "title": "Crate Music Importer",
+  "description": "Search albums, import playlist links, and monitor Spotify-to-Music jobs.",
+  "icon": "icon.png",
+  "author": "elijahsanner",
+  "license": "MIT",
+  "platforms": [
+    "macOS"
+  ],
+  "categories": [
+    "Media"
+  ],
+  "commands": [
+    {
+      "name": "browse-import-albums",
+      "title": "Albums Browse & Import",
+      "subtitle": "Crate Music Importer",
+      "description": "Search Spotify, preview album tracks, and queue a confirmed Music import.",
+      "mode": "view"
+    },
+    {
+      "name": "import-playlist-link",
+      "title": "Playlist Link Import",
+      "subtitle": "Crate Music Importer",
+      "description": "Preview a public Spotify playlist link before downloading and adding it to Music.",
+      "mode": "view"
+    },
+    {
+      "name": "import-activity-problems",
+      "title": "Review Activity & Problems",
+      "subtitle": "Crate Music Importer",
+      "description": "Monitor durable import progress and resolve tracks that need attention.",
+      "mode": "view"
+    },
+    {
+      "name": "rebuild-music-cache",
+      "title": "Rebuild Music Library Cache",
+      "subtitle": "Crate Music Importer",
+      "description": "Deliberately perform one read-only Music-library scan for fast, duplicate-safe previews.",
+      "mode": "view"
+    },
+    {
+      "name": "update-dependencies",
+      "title": "Update Dependencies",
+      "subtitle": "Crate Music Importer",
+      "description": "Check and deliberately update Homebrew downloader tools.",
+      "mode": "view"
+    }
+  ],
+  "scripts": {
+    "build": "npm run prepare-backend && ray build -e dist",
+    "dev": "npm run prepare-backend && ray develop",
+    "lint": "eslint src && prettier --check 'src/**/*.{ts,tsx}'",
+    "test": "node --import tsx --test src/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "prepare-backend": "node scripts/prepare-backend.mjs"
+  },
+  "dependencies": {
+    "@raycast/api": "^2.1.2",
+    "@raycast/utils": "^2.3.0"
+  },
+  "devDependencies": {
+    "@raycast/eslint-config": "^2.2.0",
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.1.0",
+    "@types/react-test-renderer": "^19.1.0",
+    "esbuild": "^0.28.2",
+    "eslint": "^9.39.0",
+    "prettier": "^3.6.0",
+    "react-test-renderer": "^19.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "preferences": [
+    {
+      "name": "spotifyClientId",
+      "type": "textfield",
+      "title": "Spotify Client ID",
+      "description": "Your own Spotify developer-app Client ID. Required for album search; see README for redirect setup.",
+      "required": false
+    },
+    {
+      "name": "managedMusicDirectory",
+      "type": "textfield",
+      "title": "Managed Music Directory",
+      "description": "Default: ~/Music/mp3 Music. Keep the same folder for existing imports.",
+      "required": false
+    },
+    {
+      "name": "repositoryPath",
+      "type": "textfield",
+      "title": "Repository Folder",
+      "description": "Optional development checkout. By default the extension uses its bundled backend.",
+      "required": false
+    },
+    {
+      "name": "cliPath",
+      "type": "textfield",
+      "title": "CLI Executable",
+      "description": "Optional absolute path to an installed crate-music-importer CLI; must support --raycast.",
+      "required": false
+    },
+    {
+      "name": "pythonPath",
+      "type": "textfield",
+      "title": "Python Executable",
+      "description": "Python 3.10+ with mutagen installed. Auto-discovers Homebrew Python if blank.",
+      "required": false
+    }
+  ]
+}
