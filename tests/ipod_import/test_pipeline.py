@@ -396,10 +396,57 @@ class PipelineTests(unittest.TestCase):
 				result = apply_album_to_music(manifest, "album-id", paths, [])
 			self.assertEqual(result["new_imports"], 1)
 			self.assertEqual(result["recovered_imports"], 0)
-			imported.assert_called_once_with(managed_path)
+			imported.assert_called_once_with(managed_path, key)
 			updated_music.assert_not_called()
 			self.assertEqual(recording["music"]["source"], "managed_album_import")
 			self.assertNotIn("music_import_pending", recording)
+
+	def test_album_apply_recovers_a_new_music_addition_that_disappears_before_completion(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory))
+			paths.create()
+			manifest = new_manifest(paths)
+			track = {
+				"position": 1, "track_no": 1, "track_total": 1, "disc_no": 1, "disc_total": 1,
+				"title": "Album Song", "artists": "Artist", "album": "Album", "album_artist": "Artist",
+				"album_id": "album-id", "duration_ms": 180000, "sp_id": "track-id",
+			}
+			key, recording = upsert_recording(manifest, track, source_type="album")
+			relative = managed_relative_path(recording)
+			managed_path = paths.root / relative
+			managed_path.parent.mkdir(parents=True)
+			managed_path.write_bytes(b"album-mp3")
+			recording["managed_file"] = {"relative_path": relative, "tool_owned": True, "metadata_profile": "album"}
+			recording["active_reference"] = {"kind": "managed_file", "relative_path": relative}
+			set_album(
+				manifest,
+				{"id": "album-id", "name": "Album", "album_artist": "Artist", "url": "url", "total_count": 1},
+				[{"position": 1, "track_no": 1, "disc_no": 1, "recording_id": key, "spotify_id": "track-id", "status": "managed_ready"}],
+			)
+			verification_results = iter(({}, {"RETRY-PID": {"persistent_id": "RETRY-PID"}}))
+			cache_updates = []
+			removed = []
+			with patch("crate_music_importer.ipod_import.pipeline.extract_embedded_artwork", return_value=paths.staging / "art.jpg"), \
+				patch("crate_music_importer.ipod_import.pipeline.import_managed_file", side_effect=(
+					{"persistent_id": "FIRST-PID", "database_id": "2", "location": str(managed_path)},
+					{"persistent_id": "RETRY-PID", "database_id": "3", "location": str(managed_path)},
+				)) as imported:
+				result = apply_album_to_music(
+					manifest,
+					"album-id",
+					paths,
+					[],
+					cache_updater=cache_updates.append,
+					cache_remover=lambda persistent_ids: removed.append(persistent_ids) or len(persistent_ids),
+					owned_lookup=lambda _recording_id: None,
+					verify_music=lambda _persistent_ids: next(verification_results),
+				)
+			self.assertEqual(result["stability_recoveries"], 1)
+			self.assertEqual(recording["music"]["persistent_id"], "RETRY-PID")
+			self.assertEqual(imported.call_args_list[0].args, (managed_path, key))
+			self.assertEqual(imported.call_args_list[1].args, (managed_path, key))
+			self.assertEqual(removed, [{"FIRST-PID"}])
+			self.assertEqual([value["persistent_id"] for value in cache_updates], ["FIRST-PID", "RETRY-PID"])
 
 	def test_album_apply_adopts_a_partial_import_by_managed_comment_without_duplication(self):
 		with tempfile.TemporaryDirectory() as directory:
@@ -759,7 +806,7 @@ class PipelineTests(unittest.TestCase):
 				patch("crate_music_importer.ipod_import.pipeline.sync_music_playlist", return_value="PLAYLIST-PID") as synced:
 				result = apply_to_music(manifest, "playlist", paths, music)
 			self.assertEqual(result["new_imports"], 1)
-			imported.assert_called_once_with(managed_path)
+			imported.assert_called_once_with(managed_path, managed_key)
 			synced.assert_called_once_with("Order", None, ["PID-EXISTING", "PID-MANAGED", "PID-MANAGED"])
 
 	def test_apply_refuses_unowned_name_collision_before_import(self):

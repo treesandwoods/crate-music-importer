@@ -632,6 +632,7 @@ export default function Command(props: LaunchProps<{ launchContext: ActivityCont
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
   const shownNotifications = useRef(new Set<string>());
+  const refreshInFlight = useRef(false);
 
   const showPending = useCallback(async (values: ImportJob[]) => {
     for (const job of values) {
@@ -644,6 +645,8 @@ export default function Command(props: LaunchProps<{ launchContext: ActivityCont
 
   const refresh = useCallback(
     async (showNotifications = true, showLoading = true) => {
+      if (refreshInFlight.current) return;
+      refreshInFlight.current = true;
       if (showLoading) setLoading(true);
       try {
         const [nextSnapshot, nextJobs] = await Promise.all([loadSnapshot(), loadJobs()]);
@@ -654,6 +657,7 @@ export default function Command(props: LaunchProps<{ launchContext: ActivityCont
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : String(caught));
       } finally {
+        refreshInFlight.current = false;
         if (showLoading) setLoading(false);
       }
     },

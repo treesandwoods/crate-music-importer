@@ -11,11 +11,12 @@ from typing import Any, Callable
 from crate_music_importer.ipod_import.constants import MANAGED_ROOT
 from crate_music_importer.ipod_import.manifest import ManagedPaths, load_manifest
 from crate_music_importer.ipod_import.media import check_tools
-from crate_music_importer.ipod_import.music import load_music_fixture, lookup_music_track, relink_music_file_track, relink_music_file_tracks, scan_music_library
+from crate_music_importer.ipod_import.music import load_music_fixture, lookup_importer_owned_music_track, lookup_music_track, relink_music_file_track, relink_music_file_tracks, scan_music_library, verify_music_tracks
 from crate_music_importer.ipod_import.music_cache import (
 	load_music_cache,
 	mark_music_cache_entry_stale,
 	music_cache_tracks,
+	remove_music_cache_tracks,
 	rebuild_music_cache,
 	upsert_music_cache_track,
 )
@@ -449,10 +450,14 @@ def _run(
 			exact_lookup=lookup_music_track,
 			cache_updater=lambda track: upsert_music_cache_track(paths, track),
 			mark_stale=lambda persistent_id, reason: mark_music_cache_entry_stale(paths, persistent_id, reason),
+			cache_remover=lambda persistent_ids: remove_music_cache_tracks(paths, persistent_ids),
+			owned_lookup=lookup_importer_owned_music_track,
+			verify_music=verify_music_tracks,
 		)
 		print(
 			f"Music album updated: {result['track_count']} tracks; {result['new_imports']} new imports; "
-			f"{result['updated_tracks']} importer-owned playlist items upgraded in place; {result['reused_tracks']} existing album tracks reused."
+			f"{result['updated_tracks']} importer-owned playlist items upgraded in place; {result['reused_tracks']} existing album tracks reused; "
+			f"{result.get('stability_recoveries', 0)} Music additions recovered by Crate Music Importer."
 		)
 		print("No album playlist was created. Existing Spotify playlists keep using the same Music track IDs. Finder/iPod sync settings were not touched.")
 		return 0
