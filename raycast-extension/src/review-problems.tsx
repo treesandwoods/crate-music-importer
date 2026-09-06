@@ -497,7 +497,7 @@ function jobIcon(job: ImportJob): { source: Icon; tintColor: Color } {
 
 function jobDetail(job: ImportJob): string {
   const current = job.currentTrack?.title
-    ? `\n**Current track:** ${markdownText(job.currentTrack.artists ? `${job.currentTrack.artists} — ${job.currentTrack.title}` : job.currentTrack.title)}\n`
+    ? `\n\n**Current track:** ${markdownText(job.currentTrack.artists ? `${job.currentTrack.artists} — ${job.currentTrack.title}` : job.currentTrack.title)}`
     : "";
   const tracks = job.tracks.length
     ? job.tracks
@@ -510,7 +510,7 @@ function jobDetail(job: ImportJob): string {
     : "Track details will appear after Spotify metadata loads.";
   const error = job.errorSummary ? `\n\n### Attention\n\n${markdownText(job.errorSummary)}` : "";
   const progress = jobProgressSummary(job);
-  const summary = job.status === "complete" || !progress ? "" : `  \n${progress}`;
+  const summary = job.status === "complete" || !progress ? "" : `\n\n${progress}`;
   return `# ${markdownText(job.source.name)}
 
 **${job.source.type === "album" ? "Album" : "Playlist"} · ${jobPhaseLabel(job)}**${summary}${current}
