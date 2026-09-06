@@ -438,6 +438,10 @@ function ProblemActions({ problem, refresh }: { problem: ResolverProblem; refres
     problem.kind === "music_ambiguity" ||
     problem.kind === "album_conflict" ||
     problem.kind === "album_duplicate_conflict";
+  const sourceTypeCounts = problem.sources.reduce<Record<SourceReference["type"], number>>(
+    (counts, source) => ({ ...counts, [source.type]: counts[source.type] + 1 }),
+    { album: 0, playlist: 0 },
+  );
   return (
     <ActionPanel>
       {problem.state === "needs_choice" && youtubeProblem ? (
@@ -454,7 +458,7 @@ function ProblemActions({ problem, refresh }: { problem: ResolverProblem; refres
           target={<MusicCandidates problem={problem} onResolved={refresh} />}
         />
       ) : null}
-      {problem.state === "retryable" && problem.hasChosenYouTube ? (
+      {problem.state === "retryable" && problem.hasChosenYouTube && problem.canChooseDifferentYouTube ? (
         <Action.Push
           title="Choose a Different Recording"
           icon={Icon.Video}
@@ -466,7 +470,7 @@ function ProblemActions({ problem, refresh }: { problem: ResolverProblem; refres
             <ContinueSourceAction
               key={`${source.type}-${source.id}`}
               source={source}
-              title={`Retry ${source.type === "album" ? "Album" : "Playlist"}`}
+              title={`Retry ${source.type === "album" ? "Album" : "Playlist"}${sourceTypeCounts[source.type] > 1 ? `: ${source.name}` : ""}`}
               onQueued={refresh}
             />
           ))
@@ -474,7 +478,7 @@ function ProblemActions({ problem, refresh }: { problem: ResolverProblem; refres
       {problem.sources.map((source) => (
         <Action.OpenInBrowser
           key={`open-${source.type}-${source.id}`}
-          title={`Open ${source.type === "album" ? "Album" : "Playlist"} in Spotify`}
+          title={`Open ${source.type === "album" ? "Album" : "Playlist"}${sourceTypeCounts[source.type] > 1 ? `: ${source.name}` : ""} in Spotify`}
           url={source.url}
         />
       ))}

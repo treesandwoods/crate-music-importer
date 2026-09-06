@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from crate_music_importer.ipod_import.manifest import ManagedPaths, file_sha256, new_manifest, upsert_recording
-from crate_music_importer.ipod_import.media import _run, download_recording, has_tcmp, retag_managed_recording_artwork
+from crate_music_importer.ipod_import.media import MediaError, _run, audio_sha256, download_recording, has_tcmp, retag_managed_recording_artwork
 
 
 class MediaFixtureTests(unittest.TestCase):
@@ -99,6 +99,7 @@ class MediaFixtureTests(unittest.TestCase):
 			self.assertTrue(has_tcmp(target))
 			self.assertAlmostEqual(managed["duration_ms"], 1200, delta=100)
 			self.assertAlmostEqual(managed["source_duration_ms"], 1200, delta=100)
+			self.assertEqual(managed["audio_sha256"], audio_sha256(target))
 			probe = subprocess.run([
 				shutil.which("ffprobe"), "-v", "error", "-show_entries", "format_tags:stream=codec_name,width,height,disposition",
 				"-of", "json", str(target),
@@ -140,6 +141,7 @@ class MediaFixtureTests(unittest.TestCase):
 				"-f", "lavfi", "-i", "color=c=red:s=800x600", "-frames:v", "1", str(staging / "source--unused-fixture.jpg"),
 			], check=True)
 			recording["managed_file"] = download_recording(recording, paths)
+			original_audio_sha = recording["managed_file"]["audio_sha256"]
 			recording["source_metadata"]["cover_url"] = "https://example.test/correct-album.jpg"
 			new_cover = paths.staging / "correct-album.jpg"
 			subprocess.run([
@@ -155,6 +157,7 @@ class MediaFixtureTests(unittest.TestCase):
 				managed = retag_managed_recording_artwork(recording, paths)
 			target = paths.root / managed["relative_path"]
 			self.assertEqual(managed["artwork_source_url"], "https://example.test/correct-album.jpg")
+			self.assertEqual(managed["audio_sha256"], original_audio_sha)
 			self.assertTrue(has_tcmp(target))
 			probe = subprocess.run([
 				shutil.which("ffprobe"), "-v", "error", "-show_entries", "format_tags:stream=codec_name,width,height",
@@ -165,6 +168,92 @@ class MediaFixtureTests(unittest.TestCase):
 			self.assertEqual(data["format"]["tags"]["album_artist"], "Various Artists")
 			art = next(stream for stream in data["streams"] if stream.get("codec_name") == "mjpeg")
 			self.assertEqual((art["width"], art["height"]), (600, 600))
+
+	@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg/ffprobe required")
+	def test_legacy_retag_accepts_tag_drift_only_after_matching_saved_source_audio(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory))
+			paths.create()
+			manifest = new_manifest(paths)
+			_, recording = upsert_recording(manifest, {
+				"title": "Legacy Fixture",
+				"artists": "Fixture Artist",
+				"album": "Original Fixture Album",
+				"duration_ms": 1200,
+				"sp_id": "legacy-fixture-track",
+				"cover_url": None,
+			})
+			recording["youtube"] = {"url": "https://www.youtube.com/watch?v=legacy-fixture", "video_id": "legacy-fixture"}
+			staging = paths.staging / recording["recording_id"]
+			staging.mkdir(parents=True)
+			subprocess.run([
+				shutil.which("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error",
+				"-f", "lavfi", "-i", "sine=frequency=440:duration=1.2", str(staging / "source--legacy-fixture.wav"),
+			], check=True)
+			subprocess.run([
+				shutil.which("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error",
+				"-f", "lavfi", "-i", "color=c=red:s=800x600", "-frames:v", "1", str(staging / "source--legacy-fixture.jpg"),
+			], check=True)
+			recording["managed_file"] = download_recording(recording, paths)
+			target = paths.root / recording["managed_file"]["relative_path"]
+			recorded_sha = recording["managed_file"]["sha256"]
+			recording["managed_file"].pop("audio_sha256")
+			drifted = target.with_suffix(".drifted.mp3")
+			subprocess.run([
+				shutil.which("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error",
+				"-i", str(target), "-map", "0", "-c", "copy",
+				"-metadata", f"comment=Managed by Spotify iPod Importer; recording_id={recording['recording_id']}",
+				"-id3v2_version", "3", str(drifted),
+			], check=True)
+			drifted.replace(target)
+			self.assertNotEqual(file_sha256(target), recorded_sha)
+			recording["source_metadata"]["cover_url"] = "https://example.test/correct-album.jpg"
+			new_cover = staging / "correct-album.jpg"
+			subprocess.run([
+				shutil.which("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error",
+				"-f", "lavfi", "-i", "color=c=blue:s=900x700", "-frames:v", "1", str(new_cover),
+			], check=True)
+
+			with patch("crate_music_importer.ipod_import.media._download_cover", side_effect=lambda _url, path: path.write_bytes(new_cover.read_bytes()) and path):
+				managed = retag_managed_recording_artwork(recording, paths)
+			self.assertEqual(managed["audio_sha256"], audio_sha256(target))
+			self.assertEqual(managed["artwork_source_url"], "https://example.test/correct-album.jpg")
+
+	@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg/ffprobe required")
+	def test_legacy_retag_still_refuses_changed_audio(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory))
+			paths.create()
+			manifest = new_manifest(paths)
+			_, recording = upsert_recording(manifest, {
+				"title": "Changed Audio",
+				"artists": "Fixture Artist",
+				"duration_ms": 1200,
+				"sp_id": "changed-audio-track",
+				"cover_url": "https://example.test/cover.jpg",
+			})
+			recording["youtube"] = {"url": "https://www.youtube.com/watch?v=changed-audio", "video_id": "changed-audio"}
+			staging = paths.staging / recording["recording_id"]
+			staging.mkdir(parents=True)
+			subprocess.run([
+				shutil.which("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error",
+				"-f", "lavfi", "-i", "sine=frequency=440:duration=1.2", str(staging / "source--changed-audio.wav"),
+			], check=True)
+			target = paths.root / "tracks" / "changed-audio.mp3"
+			target.parent.mkdir(parents=True, exist_ok=True)
+			subprocess.run([
+				shutil.which("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error",
+				"-f", "lavfi", "-i", "sine=frequency=880:duration=1.2", "-metadata",
+				f"comment=Managed by Crate Music Importer; recording_id={recording['recording_id']}", str(target),
+			], check=True)
+			recording["managed_file"] = {
+				"relative_path": "tracks/changed-audio.mp3",
+				"sha256": "0" * 64,
+				"tool_owned": True,
+				"metadata_profile": "playlist",
+			}
+			with self.assertRaisesRegex(MediaError, "Managed file hash changed"):
+				retag_managed_recording_artwork(recording, paths)
 
 	@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg/ffprobe required")
 	def test_registered_truncated_mp3_is_rebuilt_from_staging(self):

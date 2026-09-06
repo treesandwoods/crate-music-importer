@@ -27,6 +27,24 @@ CHOICE_REVIEW_KINDS = {"youtube_missing", "youtube_ambiguity", "music_ambiguity"
 STALE_AUTOMATCH_ERROR = "No YouTube result scored strictly above 0.87."
 
 
+def _youtube_choice_can_resolve(recording: dict[str, Any]) -> bool:
+	review_kind = str((recording.get("review") or {}).get("kind") or "")
+	if review_kind in ("youtube_missing", "youtube_ambiguity"):
+		return True
+	error = str(recording.get("last_error") or "").casefold()
+	if not error and not (recording.get("youtube") or {}).get("url"):
+		return True
+	return bool(error) and (
+		error.startswith("youtube rejected the download")
+		or error.startswith("the selected youtube video")
+		or error.startswith("youtube requested sign-in")
+		or error.startswith("yt-dlp failed")
+		or error == "no reviewed youtube source is available for this recording."
+		or error == "yt-dlp finished but no source audio was found."
+		or error.startswith("generated mp3 duration")
+	)
+
+
 def _recording_key(manifest: dict[str, Any], value: str) -> str:
 	text = str(value or "").strip()
 	if text in manifest["recordings"]:
@@ -161,6 +179,15 @@ def _problem_row(manifest: dict[str, Any], key: str, recording: dict[str, Any], 
 		return None
 	kind = str(review.get("kind") or "retryable_failure")
 	sources = _recording_sources(manifest, recording)
+	failure_source = recording.get("last_error_source") or {}
+	if kind == "retryable_failure" and failure_source.get("type") and failure_source.get("id"):
+		scoped_sources = [
+			source
+			for source in sources
+			if source["type"] == failure_source["type"] and source["id"] == failure_source["id"]
+		]
+		if scoped_sources:
+			sources = scoped_sources
 	if kind in ("album_conflict", "album_release_conflict", "album_duplicate_conflict"):
 		sources = [source for source in sources if source["type"] == "album"]
 	album_names = {
@@ -206,6 +233,7 @@ def _problem_row(manifest: dict[str, Any], key: str, recording: dict[str, Any], 
 		"searchSummary": review.get("search_summary"),
 		"defaultSearchQuery": f"{metadata.get('artists', '')} {metadata.get('title', '')}".strip(),
 		"hasChosenYouTube": bool((recording.get("youtube") or {}).get("url")),
+		"canChooseDifferentYouTube": _youtube_choice_can_resolve(recording),
 	}
 
 
@@ -347,6 +375,8 @@ def resolve_youtube(
 	key = _recording_key(manifest, recording_id)
 	recording = manifest["recordings"][key]
 	previous_kind = str((recording.get("review") or {}).get("kind") or "")
+	if not _youtube_choice_can_resolve(recording):
+		raise ValueError("Choosing another YouTube recording cannot resolve this managed-file failure.")
 	if previous_kind in BLOCKED_REVIEW_KINDS or previous_kind == "album_duplicate_conflict":
 		raise ValueError("This album conflict cannot be resolved with a YouTube recording under the no-duplicate policy.")
 	if previous_kind == "music_ambiguity" and not allow_music_override:
@@ -362,6 +392,8 @@ def resolve_youtube(
 		latest_key = _recording_key(latest, key)
 		latest_recording = latest["recordings"][latest_key]
 		latest_kind = str((latest_recording.get("review") or {}).get("kind") or "")
+		if not _youtube_choice_can_resolve(latest_recording):
+			raise ValueError("Choosing another YouTube recording cannot resolve this managed-file failure.")
 		if latest_kind in BLOCKED_REVIEW_KINDS or latest_kind == "album_duplicate_conflict":
 			raise ValueError("This album conflict cannot be resolved with a YouTube recording under the no-duplicate policy.")
 		if latest_kind == "music_ambiguity" and not allow_music_override:
@@ -369,6 +401,7 @@ def resolve_youtube(
 		latest_recording["youtube"] = copy.deepcopy(candidate)
 		latest_recording.pop("review", None)
 		latest_recording.pop("last_error", None)
+		latest_recording.pop("last_error_source", None)
 		latest.setdefault("manual_youtube_overrides", {})[latest_key] = copy.deepcopy(candidate)
 
 	update_manifest(paths, apply)

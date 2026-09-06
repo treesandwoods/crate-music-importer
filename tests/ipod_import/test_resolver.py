@@ -126,6 +126,48 @@ class ResolverTests(unittest.TestCase):
 			self.assertEqual(saved["youtube"]["video_id"], "chosen")
 			self.assertNotIn("review", saved)
 
+	def test_manual_youtube_override_cannot_erase_a_managed_file_failure(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory) / "managed")
+			manifest = new_manifest(paths)
+			key, recording = upsert_recording(manifest, source_track())
+			recording["youtube"] = {"url": "https://www.youtube.com/watch?v=chosen", "video_id": "chosen", "selected_by": "manual_candidate"}
+			recording["last_error"] = "Managed file hash changed; refusing to retag it: /managed/song.mp3"
+			recording["last_error_source"] = {"type": "playlist", "id": "playlist-id"}
+			manifest["manual_youtube_overrides"][key] = dict(recording["youtube"])
+			add_playlist(manifest, key)
+			save_manifest(paths, manifest)
+
+			saved = load_manifest(paths)["recordings"][key]
+			self.assertIn("Managed file hash changed", saved["last_error"])
+			self.assertEqual(saved["last_error_source"], {"type": "playlist", "id": "playlist-id"})
+			problem = resolver_snapshot(paths)["problems"][0]
+			self.assertFalse(problem["canChooseDifferentYouTube"])
+			with self.assertRaisesRegex(ValueError, "cannot resolve"):
+				resolve_youtube(key, "https://www.youtube.com/watch?v=other", paths=paths, inspect=lambda _url: {})
+
+	def test_retryable_failure_is_scoped_to_the_playlist_that_failed(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory) / "managed")
+			manifest = new_manifest(paths)
+			key, recording = upsert_recording(manifest, source_track())
+			recording["last_error"] = "Download failed"
+			recording["last_error_source"] = {"type": "playlist", "id": "second-playlist"}
+			set_playlist(manifest, {
+				"id": "first-playlist", "name": "First", "url": "https://open.spotify.com/playlist/first-playlist",
+				"tracks": [], "complete": True, "total_count": 1,
+			}, [{"position": 1, "recording_id": key, "spotify_id": "track-id", "status": "managed_ready"}])
+			set_playlist(manifest, {
+				"id": "second-playlist", "name": "Second", "url": "https://open.spotify.com/playlist/second-playlist",
+				"tracks": [], "complete": True, "total_count": 1,
+			}, [{"position": 1, "recording_id": key, "spotify_id": "track-id", "status": "failed"}])
+			save_manifest(paths, manifest)
+
+			snapshot = resolver_snapshot(paths)
+			self.assertEqual([(source["type"], source["id"]) for source in snapshot["problems"][0]["sources"]], [("playlist", "second-playlist")])
+			states = {source["id"]: source["state"] for source in snapshot["sources"]}
+			self.assertEqual(states, {"first-playlist": "ready", "second-playlist": "retryable"})
+
 	def test_youtube_problem_without_saved_candidates_still_opens_manual_review(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")
