@@ -5,6 +5,17 @@ from crate_music_importer.ipod_import.music import MusicIndex
 
 
 class IdentityTests(unittest.TestCase):
+	def test_leading_artist_article_reuses_album_copy_conservatively(self):
+		track = {"title": "Come And Go Blues", "artists": "Allman Brothers Band", "duration_ms": 295786}
+		candidate = {"title": "Come and Go Blues", "artist": "The Allman Brothers Band", "album": "Brothers and Sisters", "duration_s": 295.128, "persistent_id": "ALBUM"}
+		self.assertEqual(MusicIndex([candidate]).match(track)["status"], "reused")
+		self.assertEqual(MusicIndex([dict(candidate, artist="Allman Brothers Band")]).match(dict(track, artists="The Allman Brothers Band"))["status"], "reused")
+		for changes in ({"duration_s": 0}, {"duration_s": 300}, {"title": "Come and Go Blues (Live)"}, {"artist": "Allman Brothers Tribute Band"}):
+			with self.subTest(changes=changes):
+				self.assertEqual(MusicIndex([dict(candidate, **changes)]).match(track)["status"], "missing")
+		self.assertEqual(MusicIndex([candidate, dict(candidate, persistent_id="SECOND")]).match(track)["status"], "ambiguous")
+		self.assertNotEqual(recording_id(track), recording_id(dict(track, artists="The Allman Brothers Band")))
+
 	def test_release_cleanup_removes_packaging_labels_and_keeps_meaningful_versions(self):
 		self.assertEqual(clean_release_labels("Album (Deluxe Edition)"), "Album")
 		self.assertEqual(clean_release_labels("Album - 40th Anniversary Edition"), "Album")

@@ -185,6 +185,16 @@ def score_music_candidate(track: dict[str, Any], candidate: dict[str, Any]) -> t
 	title_score = _ratio(normalize_recording_title(track.get("title")), normalize_recording_title(candidate.get("title") or candidate.get("name")))
 	artist_score = _artist_score(normalized_artists(track.get("artists")), normalized_artists(candidate.get("artist")))
 	duration = duration_score(int(track.get("duration_ms") or 0), float(candidate.get("duration_s") or candidate.get("duration") or 0))
+	# Music metadata sometimes omits the leading article in a band's name.
+	# Restrict this equivalence to exact titles and known durations within two seconds;
+	# keep persisted recording identities and other provider scoring unchanged.
+	if title_score == 1.0 and duration == 1.0:
+		wanted_artists = normalized_artists(track.get("artists"))
+		found_artists = normalized_artists(candidate.get("artist"))
+		def without_article(artists: tuple[str, ...]) -> set[str]:
+			return {artist[4:] if artist.startswith("the ") else artist for artist in artists}
+		if wanted_artists and found_artists and without_article(wanted_artists) == without_article(found_artists):
+			artist_score = 1.0
 	album_score = _ratio(
 		normalize_text(clean_release_labels(track.get("album"))),
 		normalize_text(clean_release_labels(candidate.get("album"))),
