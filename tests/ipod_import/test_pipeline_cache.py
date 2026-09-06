@@ -137,7 +137,7 @@ class PipelineCacheTests(unittest.TestCase):
 				)
 			self.assertEqual(lookups, ["PID-EXISTING"])
 			self.assertEqual(result["new_imports"], 1)
-			imported.assert_called_once_with(managed_path)
+			imported.assert_called_once_with(managed_path, managed_key)
 			cache = load_music_cache(paths)
 			self.assertEqual(set(cache["tracks"]), {"PID-EXISTING", "PID-UNRELATED", "PID-NEW"})
 			self.assertIn(f"recording_id={managed_key}", cache["tracks"]["PID-NEW"]["comment"])

@@ -31,6 +31,7 @@ TERMINAL_STATES = {"complete", "needs_attention", "ready_to_continue", "failed",
 RAYCAST_EXTENSION = os.environ.get("CRATE_RAYCAST_EXTENSION", "crate-music-importer")
 RAYCAST_ACTIVITY_COMMAND = "import-activity-problems"
 RAYCAST_AUTHOR = os.environ.get("CRATE_RAYCAST_AUTHOR", "elijahsanner")
+RECENT_COMPLETE_JOB_LIMIT = 50
 
 
 def _now() -> str:
@@ -982,6 +983,15 @@ def _same_source(left: dict[str, Any], right: dict[str, Any]) -> bool:
 	return left_source.get("type") == right_source.get("type") and left_source.get("id") == right_source.get("id")
 
 
+def public_job(job: dict[str, Any]) -> dict[str, Any]:
+	"""Remove internal recovery data that the Raycast UI never reads."""
+	value = dict(job)
+	value.pop("cacheBaseline", None)
+	value.pop("runnerPid", None)
+	value.pop("queueSequence", None)
+	return value
+
+
 def reconcile_terminal_jobs(store: JobStore) -> list[dict[str, Any]]:
 	"""Clear resolved attention rows and retire older attempts for the same source."""
 	jobs = store.list()
@@ -1025,11 +1035,13 @@ def reconcile_terminal_jobs(store: JobStore) -> list[dict[str, Any]]:
 def jobs_snapshot(*, root: Path = MANAGED_ROOT) -> dict[str, Any]:
 	store = JobStore(root)
 	jobs = reconcile_terminal_jobs(store)
+	visible = [job for job in jobs if job.get("status") in {"queued", "running", "needs_attention", "ready_to_continue", "failed"}]
+	visible.extend([job for job in jobs if job.get("status") == "complete"][:RECENT_COMPLETE_JOB_LIMIT])
 	return {
 		"version": 1,
 		"managedRoot": str(root),
-		"jobs": jobs,
+		"jobs": [public_job(job) for job in visible],
 		"pendingNotifications": [
-			job for job in jobs if (job.get("notification") or {}).get("pending")
+			public_job(job) for job in jobs if (job.get("notification") or {}).get("pending")
 		],
 	}
