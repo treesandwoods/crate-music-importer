@@ -452,6 +452,7 @@ def build_album_preview(
 			if promotion_transition_ready:
 				recording.pop("review", None)
 				recording.pop("last_error", None)
+				recording.pop("last_error_source", None)
 				status = "managed_existing"
 				detail = "album promotion is ready for final exact Music validation"
 			else:
@@ -721,6 +722,7 @@ def execute_import(
 				if (recording.get("music") or {}).get("persistent_id"):
 					recording["artwork_sync_pending"] = True
 				recording.pop("last_error", None)
+				recording.pop("last_error_source", None)
 				_progress(on_progress, "downloaded", recording_id=key, position=int(item["position"]), title=recording["source_metadata"].get("title") or "", artists=recording["source_metadata"].get("artists") or "")
 				continue
 			if not recording.get("youtube") or recording.get("review", {}).get("kind") == "youtube_ambiguity":
@@ -768,9 +770,11 @@ def execute_import(
 				"relative_path": recording["managed_file"]["relative_path"],
 			}
 			recording.pop("last_error", None)
+			recording.pop("last_error_source", None)
 			_progress(on_progress, "downloaded", recording_id=key, position=int(item["position"]), title=recording["source_metadata"].get("title") or "", artists=recording["source_metadata"].get("artists") or "")
 		except (MediaError, YouTubeError, OSError) as exc:
 			recording["last_error"] = str(exc)
+			recording["last_error_source"] = {"type": "playlist", "id": preview.playlist_id}
 			if on_output:
 				on_output(f"Resumable failure: {recording['source_metadata']['title']}: {exc}")
 			_progress(on_progress, "failed", recording_id=key, position=int(item["position"]), title=recording["source_metadata"].get("title") or "", artists=recording["source_metadata"].get("artists") or "", error=str(exc))
@@ -837,6 +841,7 @@ def execute_album_import(
 					"relative_path": recording["managed_file"]["relative_path"],
 				}
 				recording.pop("last_error", None)
+				recording.pop("last_error_source", None)
 				_progress(on_progress, "downloaded", recording_id=key, position=int(item["position"]), title=recording["source_metadata"].get("title") or "", artists=recording["source_metadata"].get("artists") or "")
 				continue
 			if not recording.get("youtube") or recording.get("review", {}).get("kind") == "youtube_ambiguity":
@@ -884,9 +889,11 @@ def execute_album_import(
 				"relative_path": recording["managed_file"]["relative_path"],
 			}
 			recording.pop("last_error", None)
+			recording.pop("last_error_source", None)
 			_progress(on_progress, "downloaded", recording_id=key, position=int(item["position"]), title=recording["source_metadata"].get("title") or "", artists=recording["source_metadata"].get("artists") or "")
 		except (MediaError, YouTubeError, OSError) as exc:
 			recording["last_error"] = str(exc)
+			recording["last_error_source"] = {"type": "album", "id": preview.album_id}
 			if on_output:
 				on_output(f"Resumable failure: {recording['source_metadata']['title']}: {exc}")
 			_progress(on_progress, "failed", recording_id=key, position=int(item["position"]), title=recording["source_metadata"].get("title") or "", artists=recording["source_metadata"].get("artists") or "", error=str(exc))

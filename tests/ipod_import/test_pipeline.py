@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from crate_music_importer.ipod_import.manifest import ManagedPaths, managed_relative_path, new_manifest, set_album, set_playlist, upsert_recording
+from crate_music_importer.ipod_import.media import MediaError
 from crate_music_importer.ipod_import.music import load_music_fixture
 from crate_music_importer.ipod_import.pipeline import (
 	apply_album_to_music,
@@ -779,6 +780,56 @@ class PipelineTests(unittest.TestCase):
 				result["manifest"]["recordings"][key]["managed_file"]["artwork_source_url"],
 				"https://example.test/correct-album.jpg",
 			)
+
+	def test_manual_youtube_override_does_not_turn_retag_failure_into_success(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory))
+			manifest = new_manifest(paths)
+			key, recording = upsert_recording(manifest, {
+				"title": "Retag Failure",
+				"artists": "Artist",
+				"album": "Original Album",
+				"duration_ms": 180000,
+				"sp_id": "retag-failure-track",
+				"cover_url": "https://example.test/correct-cover.jpg",
+			})
+			recording["youtube"] = {
+				"url": "https://www.youtube.com/watch?v=chosen",
+				"video_id": "chosen",
+				"selected_by": "manual_candidate",
+			}
+			manifest["manual_youtube_overrides"][key] = dict(recording["youtube"])
+			relative = managed_relative_path(recording)
+			target = paths.root / relative
+			target.parent.mkdir(parents=True)
+			target.write_bytes(b"managed-playlist-mp3")
+			recording["managed_file"] = {
+				"relative_path": relative,
+				"tool_owned": True,
+				"metadata_profile": "playlist",
+				"artwork_source_url": "https://example.test/old-cover.jpg",
+			}
+			recording["active_reference"] = {"kind": "managed_file", "relative_path": relative}
+			playlist = {
+				"id": "playlist", "name": "Retag Failure", "url": "https://open.spotify.com/playlist/playlist",
+				"tracks": [{
+					"position": 1, "title": "Retag Failure", "artists": "Artist", "album": "Original Album",
+					"duration_ms": 180000, "sp_id": "retag-failure-track", "cover_url": "https://example.test/correct-cover.jpg",
+				}],
+				"total_count": 1,
+				"complete": True,
+			}
+			with patch("crate_music_importer.ipod_import.pipeline.managed_duration_is_valid", return_value=True):
+				preview = build_preview(playlist, [], manifest, paths)
+			result = execute_import(
+				preview,
+				paths,
+				retag_artwork=lambda *_args, **_kwargs: (_ for _ in ()).throw(MediaError("Managed file hash changed")),
+			)
+			self.assertEqual(result["playlist"]["items"][0]["status"], "failed")
+			saved = result["manifest"]["recordings"][key]
+			self.assertEqual(saved["last_error"], "Managed file hash changed")
+			self.assertEqual(saved["last_error_source"], {"type": "playlist", "id": "playlist"})
 
 	def test_apply_imports_only_new_managed_file_and_preserves_order(self):
 		with tempfile.TemporaryDirectory() as directory:
