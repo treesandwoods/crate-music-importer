@@ -44,9 +44,9 @@
     },
     {
       "name": "update-dependencies",
-      "title": "Update Dependencies",
+      "title": "Library Health & Updates",
       "subtitle": "Crate Music Importer",
-      "description": "Check and deliberately update Homebrew downloader tools.",
+      "description": "Run a read-only library audit and check for safe, stable downloader updates.",
       "mode": "view"
     }
   ],

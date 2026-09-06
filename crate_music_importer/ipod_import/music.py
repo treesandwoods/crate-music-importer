@@ -620,13 +620,15 @@ def _osascript(script: str, args: list[str] | None = None, *, timeout: int = 300
 	return result.stdout.rstrip("\r\n")
 
 
-def _parse_scan_output(output: str) -> list[dict[str, Any]]:
+def _parse_scan_output(output: str, *, deduplicate: bool = True, strict: bool = False) -> list[dict[str, Any]]:
 	tracks: list[dict[str, Any]] = []
 	seen_persistent_ids: set[str] = set()
 	for row in output.split(chr(30)):
 		if not row:
 			continue
 		fields = row.split(chr(31))
+		if strict and len(fields) < 14:
+			raise MusicAutomationError("Music returned an incomplete health scan row; no complete audit can be claimed.")
 		if len(fields) < 8:
 			continue
 		try:
@@ -634,7 +636,7 @@ def _parse_scan_output(output: str) -> list[dict[str, Any]]:
 		except ValueError:
 			duration = 0.0
 		persistent_id = fields[4]
-		if persistent_id and persistent_id in seen_persistent_ids:
+		if deduplicate and persistent_id and persistent_id in seen_persistent_ids:
 			continue
 		if persistent_id:
 			seen_persistent_ids.add(persistent_id)
@@ -681,6 +683,19 @@ def _music_location_to_posix(value: str) -> str | None:
 def scan_music_library() -> list[dict[str, Any]]:
 	return _parse_scan_output(_osascript(_SCAN_SCRIPT, timeout=600))
 
+
+
+def scan_music_library_for_health() -> list[dict[str, Any]]:
+	"""Preserve duplicate IDs and cloud locations as audit evidence without changing normal scans."""
+	script = _SCAN_SCRIPT.replace(
+		"set trackLocation to my clean_field(item trackIndex of trackLocations as text)",
+		"""if item trackIndex of trackLocations is missing value then
+			set trackLocation to ""
+		else
+			set trackLocation to my clean_field(item trackIndex of trackLocations as text)
+		end if""",
+	)
+	return _parse_scan_output(_osascript(script, timeout=600), deduplicate=False, strict=True)
 
 def scan_playlist_imports(persistent_ids: list[str] | None = None) -> list[dict[str, Any]]:
 	"""Read Playlist Imports plus exact saved IDs without enumerating the whole library."""

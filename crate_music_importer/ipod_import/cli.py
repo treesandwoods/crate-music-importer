@@ -11,7 +11,7 @@ from typing import Any, Callable
 from crate_music_importer.ipod_import.constants import MANAGED_ROOT
 from crate_music_importer.ipod_import.manifest import ManagedPaths, load_manifest
 from crate_music_importer.ipod_import.media import check_tools
-from crate_music_importer.ipod_import.music import load_music_fixture, lookup_importer_owned_music_track, lookup_music_track, relink_music_file_track, relink_music_file_tracks, scan_music_library, verify_music_tracks
+from crate_music_importer.ipod_import.music import load_music_fixture, lookup_importer_owned_music_track, lookup_music_track, relink_music_file_track, relink_music_file_tracks, scan_music_library, scan_music_library_for_health, verify_music_tracks
 from crate_music_importer.ipod_import.music_cache import (
 	load_music_cache,
 	mark_music_cache_entry_stale,
@@ -111,6 +111,11 @@ def _parser() -> argparse.ArgumentParser:
 	rebuild_cache = subparsers.add_parser("rebuild-music-cache", help="Perform one deliberate, read-only full Music scan and atomically replace the persistent cache.")
 	rebuild_cache.add_argument("--confirm-read-only-scan", action="store_true", required=True)
 	rebuild_cache.add_argument("--json", action="store_true")
+
+	health = subparsers.add_parser("health", help="Read-only Music library health and local audio diagnostics.")
+	health.add_argument("--confirm-read-only-scan", action="store_true", required=True)
+	health.add_argument("--deep-all", action="store_true", help="Also fully decode user-owned local audio.")
+	health.add_argument("--json", action="store_true")
 
 	library_audit = subparsers.add_parser("library-audit", help="Read and hash the local Music file library without changing Music or media.")
 	library_audit.add_argument("--json", action="store_true")
@@ -356,6 +361,16 @@ def _run(
 		for name, path in check_tools().items():
 			print(f"{name}: {path}")
 		print("Music access: macOS Automation permission for Terminal or Raycast -> Music (requested by preview/apply when used).")
+		return 0
+	if args.command == "health":
+		from crate_music_importer.ipod_import.health import build_health_report, failed_health_report, save_health_report
+		try:
+			manifest = load_manifest(paths)
+			result = build_health_report(paths, manifest, scan_music_library_for_health(), on_progress=on_progress, deep_all=args.deep_all)
+		except Exception as exc:
+			result = failed_health_report(str(exc))
+		save_health_report(paths, result)
+		print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else f"Library health: {result['status']}\n{json.dumps(result, ensure_ascii=False, indent=2)}")
 		return 0
 	manifest = load_manifest(paths)
 	if args.command == "rebuild-music-cache":
