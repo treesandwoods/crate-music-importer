@@ -11,7 +11,7 @@ from typing import Callable
 
 from crate_music_importer.ipod_import import cli
 from crate_music_importer.ipod_import.constants import MANAGED_ROOT
-from crate_music_importer.ipod_import.jobs import JobStore, acknowledge_notification, cancel_incomplete, cancel_source_progress, enqueue, jobs_snapshot, retry_job, run_queue
+from crate_music_importer.ipod_import.jobs import JobStore, acknowledge_notification, cancel_incomplete, cancel_source_progress, enqueue, jobs_snapshot, public_job, retry_job, run_queue
 from crate_music_importer.ipod_import.music import MusicAutomationError
 from crate_music_importer.ipod_import.spotify import SpotifyError, parse_source_url
 
@@ -226,7 +226,7 @@ def main(argv: list[str] | None = None) -> None:
 			url, _ = validated_url(url_argument, _clipboard_when_needed(url_argument, read_clipboard), expected_type=expected_type)
 			assert url is not None
 			job = enqueue(background_action, url, seed=seed)
-			_json(job) if action == "queue-json" else print(f"Queued {job['source']['type']} import {job['jobId']}.")
+			_json(public_job(job)) if action == "queue-json" else print(f"Queued {job['source']['type']} import {job['jobId']}.")
 			raise SystemExit(0)
 		if action == "jobs-json":
 			_json(jobs_snapshot())
@@ -234,12 +234,12 @@ def main(argv: list[str] | None = None) -> None:
 		if action == "job-json":
 			if not values:
 				raise RaycastInputError("Missing job ID.")
-			_json(JobStore().load(values[0]))
+			_json(public_job(JobStore().load(values[0])))
 			raise SystemExit(0)
 		if action == "cancel-job":
 			if not values:
 				raise RaycastInputError("Missing job ID.")
-			_json(cancel_incomplete(values[0]))
+			_json(public_job(cancel_incomplete(values[0])))
 			raise SystemExit(0)
 		if action == "cancel-source":
 			if len(values) < 2:
@@ -249,12 +249,12 @@ def main(argv: list[str] | None = None) -> None:
 		if action == "retry-job":
 			if not values:
 				raise RaycastInputError("Missing job ID.")
-			_json(retry_job(values[0]))
+			_json(public_job(retry_job(values[0])))
 			raise SystemExit(0)
 		if action == "ack-notification":
 			if not values:
 				raise RaycastInputError("Missing job ID.")
-			_json(acknowledge_notification(values[0]))
+			_json(public_job(acknowledge_notification(values[0])))
 			raise SystemExit(0)
 		if action == "__runner":
 			run_queue()

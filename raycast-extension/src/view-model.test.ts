@@ -32,6 +32,7 @@ function snapshot(): ResolverSnapshot {
         sources: [],
         defaultSearchQuery: "Artist Choice",
         hasChosenYouTube: false,
+        canChooseDifferentYouTube: false,
       },
       {
         recordingId: "blocked",
@@ -46,6 +47,7 @@ function snapshot(): ResolverSnapshot {
         sources: [],
         defaultSearchQuery: "Artist Blocked",
         hasChosenYouTube: false,
+        canChooseDifferentYouTube: false,
       },
     ],
     readySources: [],

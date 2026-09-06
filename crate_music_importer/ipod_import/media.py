@@ -199,6 +199,80 @@ def probe_duration_ms(path: Path) -> int:
 		raise MediaError("ffprobe could not verify the MP3 duration.") from exc
 
 
+def audio_sha256(path: Path, *, transcode_to_managed_mp3: bool = False) -> str:
+	"""Hash encoded audio packets without including mutable tags or artwork."""
+	codec_arguments = ["-c:a", "libmp3lame", "-q:a", "0", "-ar", "44100", "-ac", "2"] if transcode_to_managed_mp3 else ["-c:a", "copy"]
+	result = _run([
+		_tool("ffmpeg"),
+		"-v", "error",
+		"-i", str(path),
+		"-map", "0:a:0",
+		*codec_arguments,
+		"-f", "hash",
+		"-hash", "sha256",
+		"-",
+	], timeout=600)
+	value = str(result.stdout or "").strip()
+	if not value.startswith("SHA256=") or len(value) != len("SHA256=") + 64:
+		raise MediaError("ffmpeg could not verify the managed audio hash.")
+	return value.split("=", 1)[1].casefold()
+
+
+def _has_recording_marker(path: Path, recording_id: str) -> bool:
+	result = _run([
+		_tool("ffprobe"),
+		"-v", "error",
+		"-show_entries", "format_tags=comment",
+		"-of", "json",
+		str(path),
+	], timeout=60)
+	try:
+		comment = str(json.loads(result.stdout).get("format", {}).get("tags", {}).get("comment") or "")
+	except (TypeError, ValueError, json.JSONDecodeError):
+		return False
+	return f"recording_id={recording_id}" in comment
+
+
+def _retag_audio_is_unchanged(
+	recording: dict[str, Any],
+	paths: ManagedPaths,
+	target: Path,
+	*,
+	on_output: Callable[[str], None] | None = None,
+) -> bool:
+	managed = recording.get("managed_file") or {}
+	current_audio_sha = audio_sha256(target)
+	expected_audio_sha = str(managed.get("audio_sha256") or "").casefold()
+	if not _has_recording_marker(target, str(recording.get("recording_id") or "")):
+		return False
+	if expected_audio_sha:
+		return current_audio_sha == expected_audio_sha
+	video_id = str((recording.get("youtube") or {}).get("video_id") or "")
+	source = _source_audio(paths.staging / str(recording.get("recording_id") or ""), video_id)
+	if source is None or audio_sha256(source, transcode_to_managed_mp3=True) != current_audio_sha:
+		return False
+	managed["audio_sha256"] = current_audio_sha
+	if on_output:
+		on_output("Verified the registered legacy MP3 against its saved source; only tags or artwork changed.")
+	return True
+
+
+def _verify_retag_integrity(
+	recording: dict[str, Any],
+	paths: ManagedPaths,
+	target: Path,
+	*,
+	on_output: Callable[[str], None] | None = None,
+) -> None:
+	managed = recording.get("managed_file") or {}
+	expected_sha = str(managed.get("sha256") or "")
+	if not expected_sha or file_sha256(target) == expected_sha:
+		return
+	if _retag_audio_is_unchanged(recording, paths, target, on_output=on_output):
+		return
+	raise MediaError(f"Managed file hash changed; refusing to retag it: {target}")
+
+
 def _duration_matches(actual_ms: int, expected_ms: int, *, ratio: float, minimum_tolerance_ms: int = 500) -> bool:
 	if actual_ms <= 0 or expected_ms <= 0:
 		return False
@@ -402,6 +476,7 @@ def download_recording(
 	return {
 		"relative_path": relative,
 		"sha256": sha256,
+		"audio_sha256": audio_sha256(target),
 		"duration_ms": duration_ms,
 		"source_duration_ms": source_duration_ms,
 		"size_bytes": target.stat().st_size,
@@ -430,8 +505,7 @@ def retag_managed_recording_artwork(
 	target = paths.root / str(managed["relative_path"])
 	if not target.is_file():
 		raise MediaError(f"Managed MP3 is missing: {target}")
-	if managed.get("sha256") and file_sha256(target) != managed["sha256"]:
-		raise MediaError(f"Managed file hash changed; refusing to retag it: {target}")
+	_verify_retag_integrity(recording, paths, target, on_output=on_output)
 	cover_url = str(recording.get("source_metadata", {}).get("cover_url") or "")
 	if not cover_url:
 		raise MediaError("Spotify album artwork is missing; the existing playlist copy was left unchanged.")
@@ -479,6 +553,7 @@ def retag_managed_recording_artwork(
 	os.replace(temporary, target)
 	managed.update({
 		"sha256": file_sha256(target),
+		"audio_sha256": audio_sha256(target),
 		"duration_ms": duration_ms,
 		"size_bytes": target.stat().st_size,
 		"id3_version": "2.3",
@@ -506,8 +581,7 @@ def retag_managed_recording_as_album(
 	target = paths.root / str(managed["relative_path"])
 	if not target.is_file():
 		raise MediaError(f"Managed MP3 is missing: {target}")
-	if managed.get("sha256") and file_sha256(target) != managed["sha256"]:
-		raise MediaError(f"Managed file hash changed; refusing to retag it: {target}")
+	_verify_retag_integrity(recording, paths, target, on_output=on_output)
 	if managed.get("metadata_profile") == "album" and managed.get("spotify_album_id") == album.get("spotify_album_id"):
 		return managed
 	paths.create()
@@ -556,6 +630,7 @@ def retag_managed_recording_as_album(
 	os.replace(temporary, target)
 	managed.update({
 		"sha256": file_sha256(target),
+		"audio_sha256": audio_sha256(target),
 		"duration_ms": duration_ms,
 		"size_bytes": target.stat().st_size,
 		"id3_version": "2.3",

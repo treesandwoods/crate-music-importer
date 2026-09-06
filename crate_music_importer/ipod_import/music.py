@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -323,6 +324,8 @@ end run
 _ADD_FILE_SCRIPT = r'''
 on run argv
 	set filePath to item 1 of argv
+	set ownershipComment to ""
+	if (count of argv) is greater than 1 then set ownershipComment to item 2 of argv as text
 	set fileAlias to POSIX file filePath as alias
 	tell application "Music"
 		set addedValue to add fileAlias
@@ -334,6 +337,11 @@ on run argv
 		end if
 		set importedPID to persistent ID of importedTrack as text
 		set importedDatabaseID to database ID of importedTrack as text
+		if ownershipComment is not "" then
+			try
+				set comment of importedTrack to ownershipComment
+			end try
+		end if
 		try
 			set importedLocation to POSIX path of (location of importedTrack)
 		on error
@@ -789,16 +797,34 @@ class MusicIndex:
 		return match_music_track(source_track, candidates)
 
 
-def import_managed_file(path: Path) -> dict[str, Any]:
+def import_managed_file(path: Path, recording_id: str | None = None) -> dict[str, Any]:
 	if not path.is_file():
 		raise MusicAutomationError(f"Managed MP3 is missing: {path}")
-	fields = _osascript(_ADD_FILE_SCRIPT, [str(path)]).split("\t", 2)
+	arguments = [str(path)]
+	if recording_id:
+		arguments.append(f"Managed by Crate Music Importer; recording_id={recording_id}")
+	fields = _osascript(_ADD_FILE_SCRIPT, arguments).split("\t", 2)
 	if not fields or not fields[0]:
 		raise MusicAutomationError("Music imported the file but did not return a persistent ID.")
 	return {
 		"persistent_id": fields[0],
 		"database_id": fields[1] if len(fields) > 1 else "",
 		"location": fields[2] if len(fields) > 2 and fields[2] else None,
+	}
+
+
+def verify_music_tracks(persistent_ids: list[str], *, settle_seconds: float = 2.0) -> dict[str, dict[str, Any]]:
+	"""Verify recently added Music IDs after its Cloud Library has had time to react."""
+	requested = list(dict.fromkeys(str(value) for value in persistent_ids if str(value)))
+	if not requested:
+		return {}
+	if settle_seconds > 0:
+		time.sleep(settle_seconds)
+	requested_set = set(requested)
+	return {
+		str(track["persistent_id"]): track
+		for track in scan_playlist_imports(requested)
+		if str(track.get("persistent_id") or "") in requested_set
 	}
 
 

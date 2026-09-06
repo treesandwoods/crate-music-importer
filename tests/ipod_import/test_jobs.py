@@ -587,6 +587,35 @@ class DurableJobTests(unittest.TestCase):
 			json.loads(store.job_path("fixture").read_text(encoding="utf-8"))
 			self.assertEqual(list(store.jobs_dir.glob("*.tmp")), [])
 
+	def test_jobs_snapshot_omits_internal_baselines_and_limits_completed_history(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			store = JobStore(root)
+			for index in range(55):
+				store.save({
+					"jobId": f"complete-{index}",
+					"createdAt": f"{index:03d}",
+					"status": "complete",
+					"phase": "complete",
+					"cacheBaseline": {"captured": True, "persistentIds": [f"PID-{value}" for value in range(100)]},
+					"notification": {"pending": False},
+				})
+			store.save({
+				"jobId": "superseded",
+				"createdAt": "999",
+				"status": "superseded",
+				"phase": "superseded",
+				"cacheBaseline": {"captured": True, "persistentIds": ["SECRET-INTERNAL-ID"]},
+				"notification": {"pending": False},
+			})
+
+			snapshot = jobs_snapshot(root=root)
+
+			self.assertEqual(len(snapshot["jobs"]), 50)
+			self.assertNotIn("superseded", {job["status"] for job in snapshot["jobs"]})
+			self.assertTrue(all("cacheBaseline" not in job for job in snapshot["jobs"]))
+			self.assertNotIn("SECRET-INTERNAL-ID", json.dumps(snapshot))
+
 
 if __name__ == "__main__":
 	unittest.main()

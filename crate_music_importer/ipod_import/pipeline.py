@@ -46,6 +46,9 @@ ProgressCallback = Callable[[dict[str, Any]], None]
 ExactMusicLookup = Callable[[str], dict[str, Any] | None]
 CacheTrackUpdater = Callable[[dict[str, Any]], None]
 CacheStaleMarker = Callable[[str, str], None]
+CacheTrackRemover = Callable[[set[str]], int]
+OwnedMusicLookup = Callable[[str], dict[str, Any] | None]
+MusicTrackVerifier = Callable[[list[str]], dict[str, dict[str, Any]]]
 
 
 def _progress(callback: ProgressCallback | None, phase: str, **values: Any) -> None:
@@ -449,6 +452,7 @@ def build_album_preview(
 			if promotion_transition_ready:
 				recording.pop("review", None)
 				recording.pop("last_error", None)
+				recording.pop("last_error_source", None)
 				status = "managed_existing"
 				detail = "album promotion is ready for final exact Music validation"
 			else:
@@ -718,6 +722,7 @@ def execute_import(
 				if (recording.get("music") or {}).get("persistent_id"):
 					recording["artwork_sync_pending"] = True
 				recording.pop("last_error", None)
+				recording.pop("last_error_source", None)
 				_progress(on_progress, "downloaded", recording_id=key, position=int(item["position"]), title=recording["source_metadata"].get("title") or "", artists=recording["source_metadata"].get("artists") or "")
 				continue
 			if not recording.get("youtube") or recording.get("review", {}).get("kind") == "youtube_ambiguity":
@@ -765,9 +770,11 @@ def execute_import(
 				"relative_path": recording["managed_file"]["relative_path"],
 			}
 			recording.pop("last_error", None)
+			recording.pop("last_error_source", None)
 			_progress(on_progress, "downloaded", recording_id=key, position=int(item["position"]), title=recording["source_metadata"].get("title") or "", artists=recording["source_metadata"].get("artists") or "")
 		except (MediaError, YouTubeError, OSError) as exc:
 			recording["last_error"] = str(exc)
+			recording["last_error_source"] = {"type": "playlist", "id": preview.playlist_id}
 			if on_output:
 				on_output(f"Resumable failure: {recording['source_metadata']['title']}: {exc}")
 			_progress(on_progress, "failed", recording_id=key, position=int(item["position"]), title=recording["source_metadata"].get("title") or "", artists=recording["source_metadata"].get("artists") or "", error=str(exc))
@@ -834,6 +841,7 @@ def execute_album_import(
 					"relative_path": recording["managed_file"]["relative_path"],
 				}
 				recording.pop("last_error", None)
+				recording.pop("last_error_source", None)
 				_progress(on_progress, "downloaded", recording_id=key, position=int(item["position"]), title=recording["source_metadata"].get("title") or "", artists=recording["source_metadata"].get("artists") or "")
 				continue
 			if not recording.get("youtube") or recording.get("review", {}).get("kind") == "youtube_ambiguity":
@@ -881,9 +889,11 @@ def execute_album_import(
 				"relative_path": recording["managed_file"]["relative_path"],
 			}
 			recording.pop("last_error", None)
+			recording.pop("last_error_source", None)
 			_progress(on_progress, "downloaded", recording_id=key, position=int(item["position"]), title=recording["source_metadata"].get("title") or "", artists=recording["source_metadata"].get("artists") or "")
 		except (MediaError, YouTubeError, OSError) as exc:
 			recording["last_error"] = str(exc)
+			recording["last_error_source"] = {"type": "album", "id": preview.album_id}
 			if on_output:
 				on_output(f"Resumable failure: {recording['source_metadata']['title']}: {exc}")
 			_progress(on_progress, "failed", recording_id=key, position=int(item["position"]), title=recording["source_metadata"].get("title") or "", artists=recording["source_metadata"].get("artists") or "", error=str(exc))
@@ -915,6 +925,9 @@ def apply_album_to_music(
 	exact_lookup: ExactMusicLookup | None = None,
 	cache_updater: CacheTrackUpdater | None = None,
 	mark_stale: CacheStaleMarker | None = None,
+	cache_remover: CacheTrackRemover | None = None,
+	owned_lookup: OwnedMusicLookup | None = None,
+	verify_music: MusicTrackVerifier | None = None,
 ) -> dict[str, Any]:
 	album = manifest.get("albums", {})[album_id]
 	index = MusicIndex(music_tracks)
@@ -961,6 +974,7 @@ def apply_album_to_music(
 	recovered_imports = 0
 	updated_tracks = 0
 	reused_tracks = 0
+	new_recording_ids: list[str] = []
 	for item in sorted(album["items"], key=lambda value: int(value["position"])):
 		recording = manifest["recordings"][item["recording_id"]]
 		_progress(on_progress, "adding_to_music", recording_id=recording["recording_id"], position=int(item["position"]), title=recording["source_metadata"].get("title") or "", artists=recording["source_metadata"].get("artists") or "")
@@ -995,8 +1009,9 @@ def apply_album_to_music(
 				"started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
 			}
 			save_manifest(paths, manifest)
-			imported = import_managed_file(path)
+			imported = import_managed_file(path, recording["recording_id"])
 			new_imports += 1
+			new_recording_ids.append(recording["recording_id"])
 		elif was_recovered:
 			recovered_imports += 1
 		assert imported is not None
@@ -1041,12 +1056,69 @@ def apply_album_to_music(
 		index.by_recording_comment[recording["recording_id"]] = cached_track
 		save_manifest(paths, manifest)
 		_progress(on_progress, "complete", recording_id=recording["recording_id"], position=int(item["position"]), title=recording["source_metadata"].get("title") or "", artists=recording["source_metadata"].get("artists") or "")
+	stability_recoveries = 0
+	if verify_music and new_recording_ids:
+		expected_ids = [str((manifest["recordings"][recording_id].get("music") or {}).get("persistent_id") or "") for recording_id in new_recording_ids]
+		verified = verify_music(expected_ids)
+		for recording_id, previous_id in zip(new_recording_ids, expected_ids):
+			if previous_id in verified:
+				continue
+			recording = manifest["recordings"][recording_id]
+			managed = recording.get("managed_file") or {}
+			path = paths.root / str(managed.get("relative_path") or "")
+			replacement = owned_lookup(recording_id) if owned_lookup else None
+			if replacement is None:
+				recording["music_import_pending"] = {
+					"relative_path": managed.get("relative_path"),
+					"started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+				}
+				save_manifest(paths, manifest)
+				replacement = import_managed_file(path, recording_id)
+			new_id = str(replacement.get("persistent_id") or "")
+			if not new_id:
+				raise MusicAutomationError("Crate Music Importer could not recover a Music track whose first addition disappeared.")
+			recording["music"] = {
+				"source": "managed_album_import",
+				"persistent_id": new_id,
+				"database_id": replacement.get("database_id"),
+				"location": replacement.get("location"),
+			}
+			recording["cache_sync_pending"] = {
+				"persistent_id": new_id,
+				"action": "album_import_stability_recovery",
+				"started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+			}
+			save_manifest(paths, manifest)
+			if cache_updater:
+				cache_updater(cache_track_for_recording(recording, replacement, album_profile=True))
+			if cache_remover and previous_id != new_id:
+				cache_remover({previous_id})
+			recording.pop("music_import_pending", None)
+			recording.pop("cache_sync_pending", None)
+			recording.pop("last_error", None)
+			save_manifest(paths, manifest)
+			stability_recoveries += 1
+		if stability_recoveries:
+			final_ids = [str((manifest["recordings"][recording_id].get("music") or {}).get("persistent_id") or "") for recording_id in new_recording_ids]
+			confirmed = verify_music(final_ids)
+			missing = [recording_id for recording_id, persistent_id in zip(new_recording_ids, final_ids) if persistent_id not in confirmed]
+			if missing:
+				for recording_id in missing:
+					recording = manifest["recordings"][recording_id]
+					recording["music_import_pending"] = {
+						"relative_path": (recording.get("managed_file") or {}).get("relative_path"),
+						"started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+					}
+					recording["last_error"] = "Crate Music Importer could not verify this track after Music processed the addition."
+				save_manifest(paths, manifest)
+				raise MusicAutomationError("Crate Music Importer could not verify every recovered Music track, so the album was not marked complete.")
 	return {
 		"track_count": len(album["items"]),
 		"new_imports": new_imports,
 		"recovered_imports": recovered_imports,
 		"updated_tracks": updated_tracks,
 		"reused_tracks": reused_tracks,
+		"stability_recoveries": stability_recoveries,
 	}
 
 
@@ -1154,7 +1226,7 @@ def apply_to_music(
 				"started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
 			}
 			save_manifest(paths, manifest)
-			imported = import_managed_file(path)
+			imported = import_managed_file(path, recording["recording_id"])
 			new_imports += 1
 		recording["music"] = {
 			"source": "managed_import",

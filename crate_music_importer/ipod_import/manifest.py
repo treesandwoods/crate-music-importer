@@ -19,6 +19,12 @@ from crate_music_importer.ipod_import.constants import MANAGED_ROOT, MANIFEST_VE
 from crate_music_importer.ipod_import.identity import clean_release_labels, normalize_recording_title, recording_id, recording_identity
 
 
+_YOUTUBE_SELECTION_ERRORS = {
+	"No YouTube result scored strictly above 0.87.",
+	"No verified YouTube recording met the automatic identity and duration requirements.",
+}
+
+
 def _now() -> str:
 	return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -120,8 +126,11 @@ def _apply_manual_youtube_overrides(manifest: dict[str, Any], overrides: dict[st
 			continue
 		chosen = copy.deepcopy(candidate)
 		recording["youtube"] = chosen
-		recording.pop("review", None)
-		recording.pop("last_error", None)
+		if str((recording.get("review") or {}).get("kind") or "") in ("youtube_missing", "youtube_ambiguity"):
+			recording.pop("review", None)
+		if recording.get("last_error") in _YOUTUBE_SELECTION_ERRORS:
+			recording.pop("last_error", None)
+			recording.pop("last_error_source", None)
 		kept[recording_id] = chosen
 	manifest["manual_youtube_overrides"] = kept
 

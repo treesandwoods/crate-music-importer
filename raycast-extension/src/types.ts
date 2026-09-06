@@ -90,6 +90,7 @@ export interface ResolverProblem {
   sources: SourceReference[];
   defaultSearchQuery: string;
   hasChosenYouTube: boolean;
+  canChooseDifferentYouTube: boolean;
 }
 
 export interface ResolverSnapshot {

@@ -120,7 +120,7 @@ function candidateDetail(candidate: ResolverCandidate, problem: ResolverProblem)
 **Expected:** ${markdownText(problem.artists)} — ${markdownText(problem.title)} (${seconds(problem.durationSeconds)})  
 **Uploader:** ${markdownText(candidate.uploader || "Unknown")}  
 **Candidate duration:** ${seconds(candidate.durationSeconds)} (${delta >= 0 ? "+" : ""}${delta}s vs Spotify)  
-**Ranking score (not a probability):** ${score(candidate)}  
+**Ranking score:** ${score(candidate)}${"  "}
 **Automatic eligibility:** ${candidate.automaticEligible ? "Eligible" : "Review only"}
 
 ### Why it needs review
@@ -438,6 +438,10 @@ function ProblemActions({ problem, refresh }: { problem: ResolverProblem; refres
     problem.kind === "music_ambiguity" ||
     problem.kind === "album_conflict" ||
     problem.kind === "album_duplicate_conflict";
+  const sourceTypeCounts = problem.sources.reduce<Record<SourceReference["type"], number>>(
+    (counts, source) => ({ ...counts, [source.type]: counts[source.type] + 1 }),
+    { album: 0, playlist: 0 },
+  );
   return (
     <ActionPanel>
       {problem.state === "needs_choice" && youtubeProblem ? (
@@ -454,7 +458,7 @@ function ProblemActions({ problem, refresh }: { problem: ResolverProblem; refres
           target={<MusicCandidates problem={problem} onResolved={refresh} />}
         />
       ) : null}
-      {problem.state === "retryable" && problem.hasChosenYouTube ? (
+      {problem.state === "retryable" && problem.hasChosenYouTube && problem.canChooseDifferentYouTube ? (
         <Action.Push
           title="Choose a Different Recording"
           icon={Icon.Video}
@@ -466,7 +470,7 @@ function ProblemActions({ problem, refresh }: { problem: ResolverProblem; refres
             <ContinueSourceAction
               key={`${source.type}-${source.id}`}
               source={source}
-              title={`Retry ${source.type === "album" ? "Album" : "Playlist"}`}
+              title={`Retry ${source.type === "album" ? "Album" : "Playlist"}${sourceTypeCounts[source.type] > 1 ? `: ${source.name}` : ""}`}
               onQueued={refresh}
             />
           ))
@@ -474,7 +478,7 @@ function ProblemActions({ problem, refresh }: { problem: ResolverProblem; refres
       {problem.sources.map((source) => (
         <Action.OpenInBrowser
           key={`open-${source.type}-${source.id}`}
-          title={`Open ${source.type === "album" ? "Album" : "Playlist"} in Spotify`}
+          title={`Open ${source.type === "album" ? "Album" : "Playlist"}${sourceTypeCounts[source.type] > 1 ? `: ${source.name}` : ""} in Spotify`}
           url={source.url}
         />
       ))}
@@ -632,6 +636,7 @@ export default function Command(props: LaunchProps<{ launchContext: ActivityCont
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
   const shownNotifications = useRef(new Set<string>());
+  const refreshInFlight = useRef(false);
 
   const showPending = useCallback(async (values: ImportJob[]) => {
     for (const job of values) {
@@ -644,6 +649,8 @@ export default function Command(props: LaunchProps<{ launchContext: ActivityCont
 
   const refresh = useCallback(
     async (showNotifications = true, showLoading = true) => {
+      if (refreshInFlight.current) return;
+      refreshInFlight.current = true;
       if (showLoading) setLoading(true);
       try {
         const [nextSnapshot, nextJobs] = await Promise.all([loadSnapshot(), loadJobs()]);
@@ -654,6 +661,7 @@ export default function Command(props: LaunchProps<{ launchContext: ActivityCont
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : String(caught));
       } finally {
+        refreshInFlight.current = false;
         if (showLoading) setLoading(false);
       }
     },
