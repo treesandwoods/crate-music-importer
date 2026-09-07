@@ -277,8 +277,9 @@ def upsert_recording(
 		}
 	prior_metadata = recording.get("source_metadata") or {}
 	album_metadata = recording.get("album_metadata") or {}
+	preferences = recording.get("local_preferences") or {}
 	recording["source_metadata"] = {
-		"title": clean_track.get("title") or prior_metadata.get("title") or "",
+		"title": preferences.get("title") or clean_track.get("title") or prior_metadata.get("title") or "",
 		"artists": clean_track.get("artists") or canonical_artist(prior_metadata.get("artists")),
 		"original_album": album_metadata.get("album") or clean_track.get("album") or prior_metadata.get("original_album") or "",
 		"duration_ms": int(track.get("duration_ms") or prior_metadata.get("duration_ms") or 0),

@@ -6,7 +6,7 @@ import test from "node:test";
 import { buildSync } from "esbuild";
 import { createElement, StrictMode, type ComponentType, type ElementType } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import type { DependencyResult, HealthResult } from "./backend";
+import type { DependencyResult, HealthResult, HealthAuditState } from "./backend";
 import {
   canUpdate,
   confirmationMessage,
@@ -31,7 +31,7 @@ const source = readFileSync(resolve("src/update-dependencies.tsx"), "utf8")
   )
   .replace(
     /import\s*{[^}]*}\s*from "\.\/backend";/s,
-    "const dependencyStatus = harness.status, dependencyUpdate = harness.update, libraryHealth = harness.health;",
+    "const dependencyStatus = harness.status, dependencyUpdate = harness.update, loadHealthAudit = harness.health, startHealthAudit = harness.start;",
   );
 const bundled = buildSync({
   stdin: { contents: source, loader: "tsx", resolveDir: resolve("src") },
@@ -87,6 +87,21 @@ const healthResult: HealthResult = {
     },
   ],
 };
+function auditState(running = false): HealthAuditState {
+  return {
+    status: running ? "running" : "complete",
+    running,
+    mode: "normal",
+    pid: 123,
+    phase: "Checking files",
+    checked: 1,
+    total: 3,
+    startedAt: null,
+    updatedAt: null,
+    finishedAt: null,
+    lastReport: healthResult,
+  };
+}
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: Error) => void;
@@ -98,6 +113,7 @@ function deferred<T>() {
 }
 async function render(overrides: Record<string, unknown> = {}) {
   const calls = {
+    starts: 0,
     status: 0,
     health: 0,
     updates: [] as string[],
@@ -110,7 +126,11 @@ async function render(overrides: Record<string, unknown> = {}) {
     },
     health: async () => {
       calls.health++;
-      return healthResult;
+      return auditState();
+    },
+    start: async () => {
+      calls.starts++;
+      return auditState(true);
     },
     update: async (plan: string) => {
       calls.updates.push(plan);
@@ -147,8 +167,8 @@ async function render(overrides: Record<string, unknown> = {}) {
   };
 }
 
-test("starts both checks automatically once under StrictMode, with independent completion", async () => {
-  const pending = deferred<HealthResult>();
+test("loads saved results once under StrictMode without starting, with independent dependencies", async () => {
+  const pending = deferred<HealthAuditState>();
   let count = 0;
   const ui = await render({
     health: () => {
@@ -157,10 +177,11 @@ test("starts both checks automatically once under StrictMode, with independent c
     },
   });
   assert.equal(count, 1);
+  assert.equal(ui.calls.starts, 0);
   assert.equal(ui.calls.status, 1);
   assert.match(ui.text(), /yt-dlp/);
   assert.equal(ui.updateAction(), undefined);
-  await act(async () => pending.resolve(healthResult));
+  await act(async () => pending.resolve(auditState()));
   assert.ok(ui.updateAction());
   assert.match(ui.text(), /Missing file/);
   await act(async () => ui.view.unmount());
@@ -271,4 +292,104 @@ test("view model gates eligibility on plan, command, status and both busy states
   assert.match(confirmationMessage(result), /brew upgrade --formula yt-dlp/);
   assert.equal(dependencySummary(dependencies("failed")), "Update availability could not be checked");
   assert.equal(groupIssues(healthResult.issues)[0].severity, "critical");
+});
+
+test("running audit reattaches, polls to completion and keeps findings; unmount stops polling", async () => {
+  let loads = 0;
+  const ui = await render({
+    health: async () => {
+      loads++;
+      if (loads === 1) return auditState(true);
+      if (loads === 2) {
+        const state = { ...auditState(true), checked: 2 };
+        delete state.lastReport;
+        return state;
+      }
+      return { ...auditState(), lastReport: { ...healthResult, summary: { musicTracks: 77 } } };
+    },
+  });
+  assert.equal(ui.calls.starts, 0);
+  assert.match(ui.text(), /Missing file/);
+  assert.match(ui.text(), /1\/3 files/);
+  assert.equal(ui.updateAction(), undefined);
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 2100));
+  });
+  assert.equal(loads, 2);
+  assert.match(ui.text(), /2\/3 files/);
+  assert.match(ui.text(), /Missing file/);
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 2100));
+  });
+  assert.equal(loads, 4);
+  assert.match(ui.text(), /77/);
+  assert.ok(ui.updateAction());
+  await act(async () => ui.view.unmount());
+  let reopenedLoads = 0;
+  const reopened = await render({
+    health: async () => {
+      reopenedLoads++;
+      return auditState(true);
+    },
+  });
+  assert.equal(reopened.calls.starts, 0);
+  assert.match(reopened.text(), /1\/3 files/);
+  await act(async () => reopened.view.unmount());
+  await new Promise((resolve) => setTimeout(resolve, 2100));
+  assert.equal(reopenedLoads, 1);
+});
+
+test("explicit start is guarded against duplicate clicks and keeps previous findings", async () => {
+  const pending = deferred<HealthAuditState>();
+  let starts = 0;
+  const ui = await render({
+    start: () => {
+      starts++;
+      return pending.promise;
+    },
+  });
+  const action = ui.actions().find((item) => item.props.title === "Refresh Library Health")!;
+  await act(async () => {
+    void action.props.onAction();
+    void action.props.onAction();
+  });
+  assert.equal(starts, 1);
+  assert.match(ui.text(), /Missing file/);
+  await act(async () => pending.resolve(auditState(true)));
+  assert.equal(ui.updateAction(), undefined);
+  await act(async () => ui.view.unmount());
+});
+
+test("interrupted audit keeps prior findings and offers retry", async () => {
+  const ui = await render({ health: async () => ({ ...auditState(), status: "failed", error: "Audit interrupted" }) });
+  assert.match(ui.text(), /Audit interrupted/);
+  assert.match(ui.text(), /Missing file/);
+  assert.ok(ui.actions().find((item) => item.props.title === "Refresh Library Health"));
+  await act(async () => ui.view.unmount());
+});
+
+test("empty saved state offers normal and deep explicit audits without waiting for dependencies", async () => {
+  const pending = deferred<DependencyResult>();
+  let deep: boolean | undefined;
+  const ui = await render({
+    status: () => pending.promise,
+    health: async () => ({ ...auditState(), status: "idle", lastReport: null }),
+    start: async (deepAll: boolean) => {
+      deep = deepAll;
+      return auditState(true);
+    },
+  });
+  assert.equal(ui.calls.starts, 0);
+  assert.match(ui.text(), /No saved health report/);
+  assert.ok(ui.actions().find((item) => item.props.title === "Run Library Health Audit"));
+  await act(async () => {
+    await ui
+      .actions()
+      .find((item) => item.props.title === "Deep Check All Local Music")!
+      .props.onAction();
+  });
+  assert.equal(deep, true);
+  await act(async () => pending.resolve(dependencies()));
+  assert.equal(ui.updateAction(), undefined);
+  await act(async () => ui.view.unmount());
 });

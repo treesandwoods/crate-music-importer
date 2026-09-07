@@ -1,6 +1,14 @@
 import { Action, ActionPanel, Alert, confirmAlert, List } from "@raycast/api";
 import { useEffect, useRef, useState } from "react";
-import { dependencyStatus, dependencyUpdate, libraryHealth, type DependencyResult, type HealthResult } from "./backend";
+import {
+  dependencyStatus,
+  dependencyUpdate,
+  loadHealthAudit,
+  startHealthAudit,
+  type HealthAuditState,
+  type DependencyResult,
+  type HealthResult,
+} from "./backend";
 import {
   canUpdate,
   confirmationMessage,
@@ -15,6 +23,8 @@ import {
 
 export default function Command() {
   const [healthBusy, setHealthBusy] = useState(true);
+  const [audit, setAudit] = useState<HealthAuditState>();
+  const initialAudit = useRef<Promise<HealthAuditState> | null>(null);
   const [dependenciesBusy, setDependenciesBusy] = useState(true);
   const [health, setHealth] = useState<HealthResult>();
   const [result, setResult] = useState<DependencyResult>();
@@ -26,18 +36,25 @@ export default function Command() {
   const healthRunning = useRef(false);
   const dependenciesRunning = useRef(false);
 
+  function acceptAudit(value: HealthAuditState) {
+    setAudit(value);
+    if ("lastReport" in value) setHealth(value.lastReport || undefined);
+    setHealthBusy(value.running);
+    setHealthError(value.error || "");
+  }
+
   async function checkHealth(deepAll = false) {
     if (healthRunning.current || operation.current) return;
     healthRunning.current = true;
     setHealthBusy(true);
     setHealthError("");
     try {
-      setHealth(await libraryHealth(deepAll));
+      acceptAudit(await startHealthAudit(deepAll));
     } catch (error) {
       setHealthError(String(error));
+      setHealthBusy(false);
     } finally {
       healthRunning.current = false;
-      setHealthBusy(false);
     }
   }
   async function checkDependencies() {
@@ -58,9 +75,51 @@ export default function Command() {
   useEffect(() => {
     if (started.current) return;
     started.current = true;
-    void checkHealth();
     void checkDependencies();
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    initialAudit.current ??= loadHealthAudit();
+    void initialAudit.current
+      .then((value) => {
+        if (active) acceptAudit(value);
+      })
+      .catch((error) => {
+        if (active) {
+          setHealthError(String(error));
+          setHealthBusy(false);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!audit?.running) return;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try {
+        let value = await loadHealthAudit(false);
+        if (!active) return;
+        if (!value.running) value = await loadHealthAudit();
+        if (!active) return;
+        acceptAudit(value);
+        if (!value.running) return;
+      } catch (error) {
+        if (!active) return;
+        setHealthError(String(error));
+      }
+      timer = setTimeout(poll, 2000);
+    };
+    timer = setTimeout(poll, 2000);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [audit?.running]);
 
   async function update() {
     if (
@@ -101,21 +160,44 @@ export default function Command() {
     <ActionPanel>
       {canUpdate(result, healthBusy, dependenciesBusy) && <Action title={updateTitle(result)} onAction={update} />}
       {!dependenciesBusy && <Action title="Check Dependency Versions" onAction={checkDependencies} />}
-      {!healthBusy && !dependenciesBusy && <Action title="Refresh Library Health" onAction={() => checkHealth()} />}
-      {!healthBusy && !dependenciesBusy && (
+      {!healthBusy && !operation.current && (
+        <Action title={health ? "Refresh Library Health" : "Run Library Health Audit"} onAction={() => checkHealth()} />
+      )}
+      {!healthBusy && !operation.current && (
         <Action title="Deep Check All Local Music" onAction={() => checkHealth(true)} />
       )}
     </ActionPanel>
   );
-  const healthMarkdown = healthError
-    ? `# Check Failed\n\n${healthError}`
-    : health
-      ? `# ${healthLabel(health.status)}\n\n${health.checkedAt}\n\n${health.error || ""}\n\n${healthSummary(health)}\n\n**Checks**\n\n${Object.entries(
+  const reportAge = health
+    ? (() => {
+        const minutes = Math.max(0, Math.floor((Date.now() - Date.parse(health.checkedAt)) / 60000));
+        return minutes < 1
+          ? "just now"
+          : minutes < 60
+            ? `${minutes} minutes ago`
+            : minutes < 1440
+              ? `${Math.floor(minutes / 60)} hours ago`
+              : `${Math.floor(minutes / 1440)} days ago`;
+      })()
+    : "";
+  const progress = audit?.running
+    ? `${audit.phase}${audit.total ? ` · ${audit.checked}/${audit.total} files` : ""}`
+    : "";
+  const healthMarkdown = [
+    progress ? `**Audit running: ${progress}**` : "",
+    healthError
+      ? `**Audit failed:** ${healthError}\n\nRun Library Health Audit or Refresh Library Health to retry.`
+      : "",
+    health
+      ? `# ${healthLabel(health.status)}\n\n**Last report: ${health.checkedAt} (${reportAge})**\n\n${health.error || ""}\n\n${healthSummary(health)}\n\n**Checks**\n\n${Object.entries(
           health.checks,
         )
           .map(([name, status]) => `- ${name}: ${status}`)
           .join("\n")}`
-      : "Reading Music and checking local files. No library changes will be made.";
+      : "No saved health report. Choose Run Library Health Audit to check the full library.",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
   return (
     <List
       isLoading={healthBusy || dependenciesBusy}
@@ -124,7 +206,10 @@ export default function Command() {
     >
       <List.Section title="Library Health">
         <List.Item
-          title={healthBusy ? "Checking library…" : healthError ? "Check Failed" : healthLabel(health?.status)}
+          title={
+            progress || (healthError ? "Audit Failed" : health ? healthLabel(health.status) : "No Saved Health Report")
+          }
+          accessories={health ? [{ text: `Report: ${reportAge}` }] : []}
           detail={<List.Item.Detail markdown={healthMarkdown} />}
           actions={actions}
         />

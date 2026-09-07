@@ -14,6 +14,17 @@ from crate_music_importer.ipod_import.manifest import (
 
 
 class ManifestTests(unittest.TestCase):
+	def test_user_title_survives_source_refresh(self):
+		with tempfile.TemporaryDirectory() as directory:
+			manifest = new_manifest(ManagedPaths(Path(directory)))
+			track = {"title": "Song", "artists": "Artist", "duration_ms": 180000, "sp_id": "source-id"}
+			key, recording = upsert_recording(manifest, track)
+			recording["local_preferences"] = {"title": "My chosen title"}
+			new_key, updated = upsert_recording(manifest, track)
+			self.assertEqual(new_key, key)
+			self.assertEqual(updated["source_metadata"]["title"], "My chosen title")
+			self.assertEqual(updated["source_occurrences"][0]["title"], "Song")
+
 	def test_display_cleanup_for_album_and_playlist_imports(self):
 		for source_type in ("album", "playlist"):
 			with self.subTest(source_type=source_type), tempfile.TemporaryDirectory() as directory:
