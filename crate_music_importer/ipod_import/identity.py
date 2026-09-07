@@ -32,6 +32,8 @@ _REMASTER_LABEL_FRAGMENT = (
 _REMASTER_LABEL_PATTERN = re.compile(_REMASTER_LABEL_FRAGMENT, re.I)
 _RELEASE_LABEL_FRAGMENT = r"""
 	(?:the\s+)?(?:
+		(?:19|20)\d{2}\s+mix\b
+		|
 		(?:(?:\d{1,3}(?:st|nd|rd|th)|(?:19|20)\d{2})\s+)?anniversary
 			(?:\s+(?:super\s+deluxe|deluxe|expanded|special|collector(?:['’]s)?|legacy))?
 			(?:\s+(?:edition|version))?
@@ -114,8 +116,13 @@ def version_markers(value: str | None) -> tuple[str, ...]:
 	return tuple(sorted(markers))
 
 
+def canonical_artist(value: str | None) -> str:
+	"""Apply the supported artist alias before splitting collaborator names."""
+	return re.sub(r"(?<!\w)Yusuf\s*/\s*Cat Stevens(?!\w)", "Cat Stevens", str(value or ""), flags=re.I)
+
+
 def normalized_artists(value: str | None) -> tuple[str, ...]:
-	parts = re.split(r"\s*(?:,|;|/|\bfeat\.?\b|\bfeaturing\b|\bwith\b|\bx\b)\s*", str(value or ""), flags=re.I)
+	parts = re.split(r"\s*(?:,|;|/|\bfeat\.?\b|\bfeaturing\b|\bwith\b|\bx\b)\s*", canonical_artist(value), flags=re.I)
 	cleaned = {normalize_text(part) for part in parts if normalize_text(part)}
 	return tuple(sorted(cleaned))
 
