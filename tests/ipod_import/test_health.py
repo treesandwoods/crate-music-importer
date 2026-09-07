@@ -258,6 +258,138 @@ class HealthTests(unittest.TestCase):
 		self.assertIn("missing_or_unreadable_file", self.categories(result))
 		self.probe.assert_called_once()
 
+	def moved_track(self, pid="A", *, changed=False):
+		track = self.track(pid, managed=True)
+		old = Path(track["location"])
+		new = old.parent / "Music" / old.name
+		new.parent.mkdir(exist_ok=True)
+		old.rename(new)
+		if changed:
+			new.write_bytes(b"changed tags or audio")
+		track["location"] = str(new)
+		return track
+
+	def test_exact_live_id_at_checked_new_location_is_not_missing_or_duplicate(self):
+		track = self.moved_track()
+		before = copy.deepcopy(self.manifest)
+		result = self.report([track])
+		self.assertEqual(self.categories(result), {"saved_location_outdated"})
+		self.assertEqual(result["issues"][0]["severity"], "informational")
+		self.assertEqual(result["summary"]["missingFiles"], 0)
+		self.assertEqual(result["status"], "healthy")
+		self.assertEqual(self.manifest, before)
+		self.decode.assert_called_once_with(Path(track["location"]).resolve())
+
+	def test_relocations_group_into_one_informational_finding(self):
+		tracks = [self.moved_track("A"), self.moved_track("B")]
+		result = self.report(tracks)
+		issues = [i for i in result["issues"] if i["category"] == "saved_location_outdated"]
+		self.assertEqual(len(issues), 1)
+		self.assertIn("2 old saved", issues[0]["detail"])
+
+	def test_relocated_changed_bytes_keep_fingerprint_warning(self):
+		result = self.report([self.moved_track(changed=True)])
+		self.assertEqual(self.categories(result), {"saved_location_outdated", "managed_hash_mismatch"})
+		self.assertEqual(result["summary"]["critical"], 0)
+
+	def test_relocation_never_hides_corrupt_current_audio(self):
+		track = self.moved_track()
+		self.decode.side_effect = ValueError("invalid audio")
+		result = self.report([track])
+		self.assertIn("decode_failed", self.categories(result))
+		self.assertIn("missing_or_unreadable_file", self.categories(result))
+		self.assertNotIn("saved_location_outdated", self.categories(result))
+
+	def test_relocation_needs_unambiguous_exact_id(self):
+		track = self.moved_track()
+		self.report([track])
+		result = health.build_health_report(self.paths, self.manifest, [track, dict(track)])
+		self.assertIn("missing_or_unreadable_file", self.categories(result))
+		self.assertNotIn("saved_location_outdated", self.categories(result))
+
+	def test_no_current_music_reference_still_reports_missing_file(self):
+		self.moved_track()
+		result = self.report([])
+		self.assertIn("missing_or_unreadable_file", self.categories(result))
+		self.assertEqual(result["summary"]["critical"], 1)
+
+	def test_missing_path_is_not_evidence_of_spotify_duplicate(self):
+		first = self.track("A", managed=True)
+		second = self.track("B", managed=True, data=b"different")
+		self.manifest["recordings"]["B"]["spotify_ids"] = ["spotify-A"]
+		Path(second["location"]).unlink()
+		result = self.report([first, second])
+		self.assertNotIn("spotify_duplicate", self.categories(result))
+		self.assertIn("missing_or_unreadable_file", self.categories(result))
+
+	def test_shared_root_alone_is_not_importer_ownership(self):
+		track = self.track(managed=True)
+		self.manifest["recordings"].clear()
+		result = self.report([track])
+		self.assertEqual(result["issues"], [])
+		self.decode.assert_not_called()
+		self.tags.assert_not_called()
+
+	def test_tag_only_change_is_informational_and_still_checks_metadata(self):
+		track = self.track(managed=True)
+		self.manifest["recordings"]["A"]["managed_file"]["audio_sha256"] = "audio-baseline"
+		Path(track["location"]).write_bytes(b"new artwork")
+		with patch.object(health, "audio_sha256", return_value="audio-baseline"):
+			result = self.report([track])
+		self.assertEqual(self.categories(result), {"non_audio_file_changed"})
+		self.assertEqual(result["status"], "healthy")
+		self.tags.assert_called_once()
+
+	def test_audio_change_is_not_dismissed_as_a_tag_edit(self):
+		track = self.track(managed=True)
+		self.manifest["recordings"]["A"]["managed_file"]["audio_sha256"] = "old-audio"
+		Path(track["location"]).write_bytes(b"replacement recording")
+		with patch.object(health, "audio_sha256", return_value="new-audio"):
+			result = self.report([track])
+		self.assertIn("audio_content_changed", self.categories(result))
+		self.assertEqual(result["checks"]["fileIntegrity"], "attention")
+		self.assertNotIn("non_audio_file_changed", self.categories(result))
+
+	def test_audio_fingerprint_failure_does_not_claim_unchanged_audio(self):
+		track = self.track(managed=True)
+		self.manifest["recordings"]["A"]["managed_file"]["audio_sha256"] = "old-audio"
+		Path(track["location"]).write_bytes(b"changed")
+		with patch.object(health, "audio_sha256", side_effect=ValueError("unavailable")):
+			result = self.report([track])
+		self.assertEqual(result["status"], "failed")
+		self.assertIn("audio_fingerprint_unavailable", self.categories(result))
+
+	def test_accepted_local_duration_is_bound_to_audio_baseline(self):
+		track = self.track(managed=True)
+		r = self.manifest["recordings"]["A"]
+		r["managed_file"]["audio_sha256"] = "accepted-audio"
+		r["local_preferences"] = {"accepted_duration": {"duration_ms": 100000, "audio_sha256": "accepted-audio"}}
+		self.probe.return_value = 100000
+		self.assertNotIn("duration_mismatch", self.categories(self.report([track])))
+		self.probe.return_value = 120000
+		self.assertIn("duration_mismatch", self.categories(self.report([track])))
+		self.probe.return_value = 100000
+		r["managed_file"]["audio_sha256"] = "replacement"
+		self.assertIn("duration_mismatch", self.categories(self.report([track])))
+
+	def test_distinct_recordings_decision_expires_if_file_changes(self):
+		tracks = [self.track("A"), self.track("B", data=b"different")]
+		self.manifest["health_preferences"] = {"distinct_recordings": [{"files": {t["persistent_id"]: health.file_sha256(Path(t["location"])) for t in tracks}}]}
+		self.assertNotIn("semantic_duplicate", self.categories(self.report(tracks)))
+		Path(tracks[1]["location"]).write_bytes(b"replacement")
+		self.assertIn("semantic_duplicate", self.categories(self.report(tracks)))
+
+	def test_legacy_profile_and_artwork_provenance_are_not_invented(self):
+		track = self.track(managed=True)
+		managed = self.manifest["recordings"]["A"]["managed_file"]
+		managed.pop("metadata_profile")
+		managed.pop("artwork_source_url")
+		track.update(album="Original Album", track_no=4, compilation=False)
+		self.tags.return_value = ({"title": "Song", "artist": "Artist", "album": "Original Album", "track": "4", "compilation": "0"}, [])
+		self.assertEqual(self.report([track])["issues"], [])
+		self.tags.return_value = (self.tags.return_value[0], ["Embedded artwork is missing."])
+		self.assertIn("artwork_discrepancy", self.categories(self.report([track])))
+
 
 if __name__ == "__main__":
 	unittest.main()

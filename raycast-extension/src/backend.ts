@@ -179,6 +179,25 @@ export interface HealthResult {
   issues: HealthIssue[];
 }
 
-export function libraryHealth(deepAll = false): Promise<HealthResult> {
-  return runJson(["health", "--confirm-read-only-scan", "--json", ...(deepAll ? ["--deep-all"] : [])], 43_200_000);
+export interface HealthAuditState {
+  status: "idle" | "running" | "complete" | "failed";
+  mode: "normal" | "deep";
+  startedAt: string | null;
+  finishedAt: string | null;
+  updatedAt: string | null;
+  phase: string;
+  checked: number;
+  total: number;
+  pid: number | null;
+  running: boolean;
+  error?: string | null;
+  lastReport?: HealthResult | null;
+}
+
+export function loadHealthAudit(includeReport = true): Promise<HealthAuditState> {
+  return runJson(["health-audit", "status", ...(includeReport ? [] : ["--status-only"])], 15_000);
+}
+
+export function startHealthAudit(deepAll = false): Promise<HealthAuditState> {
+  return runJson(["health-audit", "start", ...(deepAll ? ["--deep-all"] : [])], 15_000);
 }

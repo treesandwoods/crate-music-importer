@@ -112,6 +112,10 @@ def _parser() -> argparse.ArgumentParser:
 	rebuild_cache.add_argument("--confirm-read-only-scan", action="store_true", required=True)
 	rebuild_cache.add_argument("--json", action="store_true")
 
+	audit = subparsers.add_parser("health-audit", help="Read or explicitly start a durable health audit.")
+	audit.add_argument("operation", choices=("status", "start"))
+	audit.add_argument("--deep-all", action="store_true")
+	audit.add_argument("--status-only", action="store_true")
 	health = subparsers.add_parser("health", help="Read-only Music library health and local audio diagnostics.")
 	health.add_argument("--confirm-read-only-scan", action="store_true", required=True)
 	health.add_argument("--deep-all", action="store_true", help="Also fully decode user-owned local audio.")
@@ -332,6 +336,13 @@ def _progress(callback: Callable[[dict[str, Any]], None] | None, phase: str, **v
 
 def run(argv: list[str] | None = None, *, on_progress: Callable[[dict[str, Any]], None] | None = None) -> int:
 	arguments = list(sys.argv[1:] if argv is None else argv)
+	if arguments[:1] == ["health-audit"]:
+		from crate_music_importer.ipod_import.health_audit import load_health_audit, start_health_audit
+		args = _parser().parse_args(arguments)
+		paths = ManagedPaths()
+		result = start_health_audit(paths, args.deep_all) if args.operation == "start" else load_health_audit(paths, include_report=not args.status_only)
+		print(json.dumps(result))
+		return 0
 	if arguments[:1] == ["dependencies"]:
 		from crate_music_importer.ipod_import import dependencies
 		args = _parser().parse_args(arguments)
