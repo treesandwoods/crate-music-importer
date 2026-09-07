@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from crate_music_importer.ipod_import.constants import MANAGED_ROOT, MANIFEST_VERSION
-from crate_music_importer.ipod_import.identity import clean_release_labels, normalize_recording_title, recording_id, recording_identity
+from crate_music_importer.ipod_import.identity import canonical_artist, clean_release_labels, normalize_recording_title, recording_id, recording_identity
 
 
 _YOUTUBE_SELECTION_ERRORS = {
@@ -222,6 +222,8 @@ def upsert_recording(
 	clean_track = dict(track)
 	clean_track["title"] = clean_release_labels(raw_title)
 	clean_track["album"] = clean_release_labels(raw_album)
+	clean_track["artists"] = canonical_artist(track.get("artists"))
+	clean_track["album_artist"] = canonical_artist(track.get("album_artist"))
 	found = find_recording(manifest, clean_track)
 	key = found[0] if found else recording_id(clean_track)
 	if found:
@@ -264,7 +266,7 @@ def upsert_recording(
 		recording["album_metadata"] = {
 			"spotify_album_id": str(track.get("album_id") or ""),
 			"album": clean_track.get("album") or "",
-			"album_artist": track.get("album_artist") or track.get("artists") or "",
+			"album_artist": clean_track.get("album_artist") or clean_track.get("artists") or "",
 			"track_no": int(track.get("track_no") or track.get("position") or 0),
 			"track_total": int(track.get("track_total") or 0),
 			"disc_no": int(track.get("disc_no") or 1),
@@ -277,7 +279,7 @@ def upsert_recording(
 	album_metadata = recording.get("album_metadata") or {}
 	recording["source_metadata"] = {
 		"title": clean_track.get("title") or prior_metadata.get("title") or "",
-		"artists": track.get("artists") or prior_metadata.get("artists") or "",
+		"artists": clean_track.get("artists") or canonical_artist(prior_metadata.get("artists")),
 		"original_album": album_metadata.get("album") or clean_track.get("album") or prior_metadata.get("original_album") or "",
 		"duration_ms": int(track.get("duration_ms") or prior_metadata.get("duration_ms") or 0),
 		"cover_url": album_metadata.get("cover_url") or track.get("cover_url") or prior_metadata.get("cover_url"),
@@ -287,7 +289,7 @@ def upsert_recording(
 		"spotify_id": spotify_id or None,
 		"isrc": isrc or None,
 		"title": clean_track.get("title") or "",
-		"artists": track.get("artists") or "",
+		"artists": clean_track.get("artists") or "",
 		"original_album": clean_track.get("album") or "",
 		"duration_ms": int(track.get("duration_ms") or 0),
 		"cover_url": track.get("cover_url"),

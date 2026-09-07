@@ -27,6 +27,8 @@ class IdentityTests(unittest.TestCase):
 		self.assertEqual(clean_release_labels("Song (Live in Stereo)"), "Song (Live)")
 		self.assertEqual(clean_release_labels("Song (Acoustic Version)"), "Song (Acoustic Version)")
 		self.assertEqual(clean_release_labels("Song - Club Remix"), "Song - Club Remix")
+		self.assertEqual(clean_release_labels("Song (2009 Mix)"), "Song")
+		self.assertEqual(clean_release_labels("Song - 2009 Club Mix"), "Song - 2009 Club Mix")
 
 	def test_release_cleanup_never_turns_a_label_only_title_into_blank_text(self):
 		self.assertEqual(clean_release_labels("Deluxe Edition"), "Deluxe Edition")
