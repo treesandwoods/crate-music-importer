@@ -131,6 +131,22 @@ class HealthTests(unittest.TestCase):
 		self.assertIn("stale_cache_reference", self.categories(result))
 		self.assertEqual(self.paths.music_cache.read_bytes(), before)
 
+	def test_missing_cached_location_does_not_conflict_with_exact_live_id(self):
+		track = self.track()
+		cache = build_full_cache(self.paths, self.manifest, [track])
+		cache["tracks"][track["persistent_id"]]["location"] = None
+		save_music_cache(self.paths, cache)
+		result = health.build_health_report(self.paths, self.manifest, [track])
+		self.assertNotIn("stale_cache_reference", self.categories(result))
+
+	def test_different_cached_location_remains_stale(self):
+		track = self.track()
+		cache = build_full_cache(self.paths, self.manifest, [track])
+		cache["tracks"][track["persistent_id"]]["location"] = str(self.root / "old.mp3")
+		save_music_cache(self.paths, cache)
+		result = health.build_health_report(self.paths, self.manifest, [track])
+		self.assertIn("stale_cache_reference", self.categories(result))
+
 	def test_scan_is_read_only_and_diagnostic_saved_atomically(self):
 		track = self.track(managed=True)
 		save_music_cache(self.paths, build_full_cache(self.paths, self.manifest, [track]))
@@ -330,13 +346,13 @@ class HealthTests(unittest.TestCase):
 		self.decode.assert_not_called()
 		self.tags.assert_not_called()
 
-	def test_tag_only_change_is_informational_and_still_checks_metadata(self):
+	def test_tag_only_change_is_benign_and_still_checks_metadata(self):
 		track = self.track(managed=True)
 		self.manifest["recordings"]["A"]["managed_file"]["audio_sha256"] = "audio-baseline"
 		Path(track["location"]).write_bytes(b"new artwork")
 		with patch.object(health, "audio_sha256", return_value="audio-baseline"):
 			result = self.report([track])
-		self.assertEqual(self.categories(result), {"non_audio_file_changed"})
+		self.assertEqual(result["issues"], [])
 		self.assertEqual(result["status"], "healthy")
 		self.tags.assert_called_once()
 

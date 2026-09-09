@@ -218,7 +218,12 @@ def _build_health_report(
 			add("incomplete_cache", "The persistent Music cache has not completed its initial scan.", [], next_step="Run Rebuild Music Library Cache.")
 		for pid, cached in cache["tracks"].items():
 			live = by_pid.get(pid, [])
-			if cached.get("stale") or cached.get("validation_required") or not live or any(str(item["track"].get("location") or "") != str(cached.get("location") or "") for item in live):
+			cached_location = str(cached.get("location") or "")
+			# Music can omit a newly added track's location while Cloud Library is
+			# settling. An absent cache location makes no conflicting claim: the
+			# authoritative health scan already resolved this exact persistent ID.
+			location_changed = bool(cached_location) and any(str(item["track"].get("location") or "") != cached_location for item in live)
+			if cached.get("stale") or cached.get("validation_required") or not live or location_changed:
 				add("stale_cache_reference", "Cached reference is stale, incomplete, or differs from the full Music scan.", live or [{"track": cached, "persistent_id": pid, "path": str(cached.get("location") or ""), "recordingIds": sorted(refs.get(pid, [])), "ownership": "importer_referenced" if refs.get(pid) else "user_owned", "evidence": {}}], evidence=cached, next_step="Run Rebuild Music Library Cache.")
 		migration = cache.get("migration") or {}
 		pending = sorted(set(migration.get("incomplete_persistent_ids") or []) | set(migration.get("entries_requiring_validation") or {}))
@@ -306,7 +311,6 @@ def _build_health_report(
 				if actual_audio != managed["audio_sha256"]:
 					add("audio_content_changed", "The encoded audio changed since its saved baseline. This may be an intentional replacement; review the recording before accepting it.", [entry], check="fileIntegrity", evidence={"expected": managed["audio_sha256"], "actual": actual_audio})
 					continue
-				add("non_audio_file_changed", "Audio is unchanged. Only tags, artwork, or other file packaging changed.", [entry], severity="informational")
 			try:
 				_metadata_checks(path, entry, recording, manifest, duration, add)
 			except Exception as exc:
