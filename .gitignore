@@ -42,7 +42,6 @@ Thumbs.db
 !.env.example
 config.local.json
 .state/
-.staging/
 *.mp3
 *.m4a
 *.opus

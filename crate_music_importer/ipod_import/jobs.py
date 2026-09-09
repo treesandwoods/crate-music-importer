@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
-from functools import wraps
 import json
 import os
 import shutil
@@ -434,16 +433,6 @@ def _terminate_runner(pid: int) -> None:
 	os.killpg(pid, signal.SIGTERM)
 
 
-def _with_dependency_access(function):
-	@wraps(function)
-	def guarded(*args, **kwargs):
-		from crate_music_importer.ipod_import.dependency_lock import dependency_lock
-		with dependency_lock():
-			return function(*args, **kwargs)
-	return guarded
-
-
-@_with_dependency_access
 def cancel_incomplete(
 	job_id: str,
 	*,
@@ -514,7 +503,6 @@ def cancel_queued(job_id: str, *, root: Path = MANAGED_ROOT) -> dict[str, Any]:
 	return cancel_incomplete(job_id, root=root)
 
 
-@_with_dependency_access
 def cancel_source_progress(
 	source_type: str,
 	source_id: str,

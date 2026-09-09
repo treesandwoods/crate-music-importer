@@ -432,12 +432,7 @@ def download_recording(
 	target = paths.root / relative
 	target.parent.mkdir(parents=True, exist_ok=True)
 	if target.exists() and not managed.get("relative_path"):
-		import hashlib
-		suffix = hashlib.sha256(recording["recording_id"].encode()).hexdigest()[:10]
-		target = target.with_name(f"{target.stem} — {suffix}.mp3")
-		relative = str(target.relative_to(paths.root))
-		if target.exists():
-			raise MediaError(f"Refusing to overwrite an unregistered file: {target}")
+		raise MediaError(f"Refusing to overwrite an unregistered file: {target}")
 	temporary = target.with_suffix(".partial.mp3")
 	ffmpeg = _tool("ffmpeg")
 	_run([

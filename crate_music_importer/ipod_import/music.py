@@ -423,51 +423,6 @@ end run
 '''
 
 
-_RELINK_FILE_TRACK_SCRIPT = r'''
-on run argv
-	set requestedID to item 1 of argv as text
-	set requestedPath to item 2 of argv as text
-	set requestedFile to POSIX file requestedPath as alias
-	tell application "Music"
-		set matches to every file track of library playlist 1 whose persistent ID is requestedID
-		if (count of matches) is 0 then error "The local Music file track is missing: " & requestedID
-		set targetTrack to item 1 of matches
-		set location of targetTrack to requestedFile
-		set returnedID to persistent ID of targetTrack as text
-		set returnedLocation to location of targetTrack
-	end tell
-	return returnedID & tab & (POSIX path of returnedLocation)
-end run
-'''
-
-
-_RELINK_FILE_TRACKS_SCRIPT = r'''
-on run argv
-	set rowSeparator to character id 30
-	set fieldSeparator to character id 31
-	if ((count of argv) mod 2) is not 0 then error "Music relink arguments must be persistent-ID/path pairs."
-	set output to ""
-	set itemIndex to 1
-	repeat while itemIndex <= (count of argv)
-		set requestedID to item itemIndex of argv as text
-		set requestedPath to item (itemIndex + 1) of argv as text
-		set requestedFile to POSIX file requestedPath as alias
-		tell application "Music"
-			set matches to every file track of library playlist 1 whose persistent ID is requestedID
-			if (count of matches) is not 1 then error "The local Music file track is missing or ambiguous: " & requestedID
-			set targetTrack to item 1 of matches
-			set location of targetTrack to requestedFile
-			set returnedID to persistent ID of targetTrack as text
-			set returnedLocation to location of targetTrack as text
-		end tell
-		set output to output & returnedID & fieldSeparator & returnedLocation & rowSeparator
-		set itemIndex to itemIndex + 2
-	end repeat
-	return output
-end run
-'''
-
-
 _MERGE_EXACT_DUPLICATE_SCRIPT = r'''
 on run argv
 	set canonicalID to item 1 of argv as text
@@ -826,44 +781,6 @@ def verify_music_tracks(persistent_ids: list[str], *, settle_seconds: float = 2.
 		for track in scan_playlist_imports(requested)
 		if str(track.get("persistent_id") or "") in requested_set
 	}
-
-
-def relink_music_file_track(persistent_id: str, path: Path) -> dict[str, Any]:
-	"""Point an existing local Music file track at an already-verified replacement file."""
-	if not persistent_id:
-		raise MusicAutomationError("A Music persistent ID is required to relink a file track.")
-	if not path.is_file():
-		raise MusicAutomationError(f"Replacement Music file is missing: {path}")
-	fields = _osascript(_RELINK_FILE_TRACK_SCRIPT, [persistent_id, str(path)]).split("\t", 1)
-	if len(fields) != 2 or fields[0] != persistent_id or not fields[1]:
-		raise MusicAutomationError(f"Music returned an unexpected relink result: {' '.join(fields)}")
-	return {"persistent_id": fields[0], "location": fields[1]}
-
-
-def relink_music_file_tracks(targets: dict[str, Path], *, batch_size: int = 100) -> dict[str, Path]:
-	"""Relink local Music tracks in bounded batches, retaining their persistent IDs."""
-	if batch_size < 1:
-		raise ValueError("batch_size must be positive")
-	items = [(str(persistent_id), Path(path)) for persistent_id, path in targets.items()]
-	for persistent_id, path in items:
-		if not persistent_id or not path.is_file():
-			raise MusicAutomationError("Every batch relink target needs a persistent ID and an existing file.")
-	updated: dict[str, Path] = {}
-	for start in range(0, len(items), batch_size):
-		arguments: list[str] = []
-		for persistent_id, path in items[start:start + batch_size]:
-			arguments.extend((persistent_id, str(path)))
-		output = _osascript(_RELINK_FILE_TRACKS_SCRIPT, arguments, timeout=600)
-		for row in output.split(chr(30)):
-			if not row:
-				continue
-			fields = row.split(chr(31), 1)
-			if len(fields) != 2 or fields[0] not in targets:
-				raise MusicAutomationError(f"Music returned an unexpected batch relink result: {row}")
-			updated[fields[0]] = Path(_music_location_to_posix(fields[1]) or "")
-	if set(updated) != set(targets) or any(updated[persistent_id] != path for persistent_id, path in targets.items()):
-		raise MusicAutomationError("Music did not return every requested relinked file location.")
-	return updated
 
 
 def merge_exact_duplicate_music_tracks(

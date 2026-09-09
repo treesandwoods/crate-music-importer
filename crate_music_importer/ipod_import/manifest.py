@@ -64,7 +64,7 @@ class ManagedPaths:
 		return self.root / "playlists"
 
 	def create(self) -> None:
-		for directory in (self.state_dir, self.staging, self.playlists):
+		for directory in (self.state_dir, self.staging, self.tracks, self.playlists):
 			directory.mkdir(parents=True, exist_ok=True)
 
 
@@ -78,7 +78,6 @@ def new_manifest(paths: ManagedPaths) -> dict[str, Any]:
 		"playlists": {},
 		"albums": {},
 		"manual_youtube_overrides": {},
-		"catalog": {"version": 1, "entries": {}, "complete": False},
 	}
 
 
@@ -100,9 +99,6 @@ def _load_manifest_unlocked(paths: ManagedPaths) -> dict[str, Any]:
 		if isinstance(recording, dict):
 			recording.setdefault("album_metadata", None)
 			recording.setdefault("album_memberships", {})
-	data.setdefault("catalog", {"version": 1, "entries": {}, "complete": False})
-	if not isinstance(data["catalog"], dict) or data["catalog"].get("version") != 1 or not isinstance(data["catalog"].get("entries"), dict):
-		raise ValueError("Unsupported or invalid Crate catalog schema.")
 	return data
 
 
@@ -147,16 +143,7 @@ def refresh_manual_youtube_overrides(paths: ManagedPaths, manifest: dict[str, An
 
 
 def _save_manifest_unlocked(paths: ManagedPaths, manifest: dict[str, Any]) -> None:
-	from crate_music_importer.ipod_import.catalog import register_tracks, catalog_tracks
-	if manifest.get("catalog", {}).get("complete"):
-		register_tracks(manifest, catalog_tracks(manifest))
 	paths.create()
-	if manifest.get("catalog", {}).get("complete") and paths.manifest.exists():
-		from crate_music_importer.ipod_import.catalog import atomic_json
-		backup = paths.state_dir / "manifest-before-catalog.json"
-		prior = json.loads(paths.manifest.read_text())
-		if not prior.get("catalog", {}).get("complete") and not backup.exists():
-			atomic_json(backup, prior)
 	manifest["updated_at"] = _now()
 	with tempfile.NamedTemporaryFile(
 		"w",
@@ -178,9 +165,6 @@ def save_manifest(paths: ManagedPaths, manifest: dict[str, Any]) -> None:
 		overrides = dict(latest.get("manual_youtube_overrides") or {})
 		overrides.update(manifest.get("manual_youtube_overrides") or {})
 		_apply_manual_youtube_overrides(manifest, overrides)
-		# Preserve catalog changes committed by cache refreshes during a long import.
-		if latest.get("catalog", {}).get("complete"):
-			manifest["catalog"] = latest["catalog"]
 		_save_manifest_unlocked(paths, manifest)
 
 
@@ -389,20 +373,10 @@ def set_album(
 
 
 def managed_relative_path(recording: dict[str, Any]) -> str:
-	# Existing files stay put through metadata edits and in-place album upgrades.
-	managed = recording.get("managed_file") or {}
-	if managed.get("relative_path"):
-		return str(managed["relative_path"])
-	from crate_music_importer.ipod_import.catalog import canonical_relative_path
+	key = recording["recording_id"]
 	meta = recording["source_metadata"]
-	album = recording.get("album_metadata") or {}
-	track = {
-		"title": meta.get("title"), "album": album.get("album") or "Playlist Imports",
-		"album_artist": album.get("album_artist") or "Various Artists",
-		"compilation": bool(album.get("is_compilation")) if album else True,
-		"track_no": album.get("track_no"), "disc_no": album.get("disc_no"), "disc_total": album.get("disc_total"),
-	}
-	return canonical_relative_path(track)
+	label = safe_name(f"{meta.get('artists', '')} - {meta.get('title', '')}", limit=100)
+	return f"tracks/{key[4:6]}/{key}--{label}.mp3"
 
 
 def file_sha256(path: Path) -> str:
@@ -427,10 +401,7 @@ def playlist_m3u8(manifest: dict[str, Any], playlist_id: str, paths: ManagedPath
 		lines.append(f"#EXTINF:{duration},{meta.get('artists', '')} - {meta.get('title', '')}")
 		music = recording.get("music") or {}
 		managed = recording.get("managed_file") or {}
-		catalog_entry = manifest.get("catalog", {}).get("entries", {}).get(recording.get("library_id"), {})
-		if catalog_entry.get("present_in_music") and catalog_entry.get("location"):
-			location = catalog_entry["location"]
-		elif active.get("kind") == "existing_music":
+		if active.get("kind") == "existing_music":
 			location = music.get("location")
 		else:
 			location = str(paths.root / managed["relative_path"]) if managed.get("relative_path") else None
