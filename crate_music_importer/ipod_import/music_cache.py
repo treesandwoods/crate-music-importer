@@ -11,7 +11,8 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from crate_music_importer.ipod_import.identity import clean_release_labels, normalize_recording_title, normalize_text
-from crate_music_importer.ipod_import.manifest import ManagedPaths
+from crate_music_importer.ipod_import.manifest import ManagedPaths, load_manifest, update_manifest
+from crate_music_importer.ipod_import.catalog import register_tracks, catalog_tracks
 
 
 MUSIC_CACHE_SCHEMA_VERSION = 1
@@ -144,6 +145,12 @@ def _validate_cache(cache: Any, paths: ManagedPaths) -> dict[str, Any]:
 
 
 def load_music_cache(paths: ManagedPaths, *, require_complete: bool = True) -> dict[str, Any]:
+	manifest = load_manifest(paths)
+	if manifest.get("catalog", {}).get("complete"):
+		cache = build_full_cache(paths, manifest, catalog_tracks(manifest))
+		cache.update(copy.deepcopy(manifest["catalog"].get("cache_metadata") or {}))
+		cache["tracks"] = {track["persistent_id"]: normalize_cache_track(track) for track in catalog_tracks(manifest)}
+		return cache
 	if not paths.music_cache.is_file():
 		raise MusicCacheUnavailableError(f"The one-time Music library cache has not been created. {REBUILD_INSTRUCTION}")
 	try:
@@ -162,8 +169,14 @@ def music_cache_tracks(cache: dict[str, Any]) -> list[dict[str, Any]]:
 	return [copy.deepcopy(track) for track in cache["tracks"].values()]
 
 
-def save_music_cache(paths: ManagedPaths, cache: dict[str, Any]) -> None:
+def save_music_cache(paths: ManagedPaths, cache: dict[str, Any], *, commit_catalog: bool = True) -> None:
 	cache = _validate_cache(cache, paths)
+	# The catalog commits first. A failed cache write is recoverable from it.
+	if commit_catalog and cache.get("initial_scan_completed"):
+		def commit(manifest: dict[str, Any]) -> None:
+			catalog = register_tracks(manifest, list(cache["tracks"].values()), complete=True)
+			catalog["cache_metadata"] = {key: copy.deepcopy(value) for key, value in cache.items() if key not in ("tracks", "total_cached_tracks")}
+		update_manifest(paths, commit)
 	paths.state_dir.mkdir(parents=True, exist_ok=True)
 	temporary = None
 	try:
@@ -244,6 +257,8 @@ def rebuild_music_cache(
 	scan: Callable[[], list[dict[str, Any]]],
 	progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
+	from crate_music_importer.ipod_import.manifest import file_sha256
+	manifest_before = file_sha256(paths.manifest) if paths.manifest.exists() else None
 	started = time.monotonic()
 	if progress:
 		progress({"phase": "scanning_music_read_only", "message": "Reading the complete Music library. Music will not be changed."})
@@ -255,7 +270,33 @@ def rebuild_music_cache(
 		except MusicCacheUnavailableError:
 			previous = None
 	cache = build_full_cache(paths, manifest, tracks, previous=previous)
-	save_music_cache(paths, cache)
+	# Register all exact IDs first in memory; probing never grants mutation authority.
+	from crate_music_importer.ipod_import.unification import fingerprints
+	from crate_music_importer.ipod_import.catalog import library_id
+	from pathlib import Path
+	observations = {}
+	for index, track in enumerate(tracks):
+		location = track.get("location")
+		if not location:
+			continue
+		if progress:
+			progress({"phase": "catalog_files", "checked": index, "total": len(tracks)})
+		try:
+			observations[library_id(track["persistent_id"])] = {"fingerprints": fingerprints(Path(location))}
+		except Exception as exc:
+			observations[library_id(track["persistent_id"])] = {"verification_error": str(exc)}
+	def commit_catalog(value: dict[str, Any]) -> None:
+		if (file_sha256(paths.manifest) if paths.manifest.exists() else None) != manifest_before:
+			raise MusicCacheError("Crate changed during the Music rebuild. Wait for imports to finish and scan again.")
+		catalog = register_tracks(value, tracks, complete=True)
+		catalog["cache_metadata"] = {key: copy.deepcopy(value) for key, value in cache.items() if key not in ("tracks", "total_cached_tracks")}
+		for key, observation in observations.items():
+			entry = catalog["entries"][key]
+			entry["last_observation"] = observation
+			if observation.get("fingerprints") and not entry.get("fingerprints"):
+				entry["fingerprints"] = observation["fingerprints"]
+	update_manifest(paths, commit_catalog)
+	save_music_cache(paths, cache, commit_catalog=False)
 	elapsed = time.monotonic() - started
 	result = {
 		"cache_path": str(paths.music_cache),
@@ -272,48 +313,47 @@ def rebuild_music_cache(
 def upsert_music_cache_track(paths: ManagedPaths, track: dict[str, Any]) -> None:
 	cache = load_music_cache(paths)
 	entry = normalize_cache_track(track)
-	persistent_id = entry["persistent_id"]
-	if not persistent_id:
+	if not entry["persistent_id"]:
 		raise MusicCacheError("A Music persistent ID is required for an incremental cache update.")
 	entry.update({"validation_required": False, "migration_source": None, "stale": False, "stale_reason": None, "stale_at": None})
-	cache["tracks"][persistent_id] = entry
-	cache["total_cached_tracks"] = len(cache["tracks"])
-	cache["updated_at"] = _now()
-	save_music_cache(paths, cache)
+	def commit(manifest: dict[str, Any]) -> None:
+		if not manifest.get("catalog", {}).get("complete"):
+			register_tracks(manifest, list(cache["tracks"].values()), complete=True)
+		register_tracks(manifest, [entry])
+	update_manifest(paths, commit)
+	save_music_cache(paths, load_music_cache(paths), commit_catalog=False)
 
 
 def remove_music_cache_tracks(paths: ManagedPaths, persistent_ids: set[str]) -> int:
-	"""Atomically forget explicitly removed Music items without disturbing the rest of the index."""
 	requested = {str(value) for value in persistent_ids if str(value)}
 	if not requested:
 		return 0
 	cache = load_music_cache(paths)
-	removed = sum(1 for persistent_id in requested if cache["tracks"].pop(persistent_id, None) is not None)
-	migration = cache.get("migration") or {}
-	entries = migration.get("entries_requiring_validation")
-	if isinstance(entries, dict):
-		for persistent_id in requested:
-			entries.pop(persistent_id, None)
-	for field in ("incomplete_persistent_ids", "manifest_ids_missing_from_music"):
-		values = migration.get(field)
-		if isinstance(values, list):
-			migration[field] = [value for value in values if str(value) not in requested]
-	cache["total_cached_tracks"] = len(cache["tracks"])
-	cache["updated_at"] = _now()
-	save_music_cache(paths, cache)
+	def commit(manifest: dict[str, Any]) -> int:
+		if not manifest.get("catalog", {}).get("complete"):
+			register_tracks(manifest, list(cache["tracks"].values()), complete=True)
+		removed = 0
+		for entry in manifest["catalog"]["entries"].values():
+			if entry["persistent_id"] in requested and entry.get("present_in_music"):
+				entry["present_in_music"] = False
+				removed += 1
+		return removed
+	removed = update_manifest(paths, commit)
+	save_music_cache(paths, load_music_cache(paths), commit_catalog=False)
 	return removed
 
 
 def mark_music_cache_entry_stale(paths: ManagedPaths, persistent_id: str, reason: str) -> None:
 	cache = load_music_cache(paths)
-	entry = cache["tracks"].get(persistent_id)
-	if entry is None:
+	if persistent_id not in cache["tracks"]:
 		return
-	entry["stale"] = True
-	entry["stale_reason"] = reason
-	entry["stale_at"] = _now()
-	cache["updated_at"] = _now()
-	save_music_cache(paths, cache)
+	from crate_music_importer.ipod_import.catalog import library_id
+	def commit(manifest: dict[str, Any]) -> None:
+		if not manifest.get("catalog", {}).get("complete"):
+			register_tracks(manifest, list(cache["tracks"].values()), complete=True)
+		manifest["catalog"]["entries"][library_id(persistent_id)]["music"].update(stale=True, stale_reason=reason, stale_at=_now())
+	update_manifest(paths, commit)
+	save_music_cache(paths, load_music_cache(paths), commit_catalog=False)
 
 
 def _same_title(left: Any, right: Any) -> bool:

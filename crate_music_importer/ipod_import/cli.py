@@ -54,6 +54,12 @@ def _parser() -> argparse.ArgumentParser:
 	)
 	subparsers = parser.add_subparsers(dest="command", required=True)
 
+	unify = subparsers.add_parser("unification", help="Read a saved unification preview or explicitly start a fresh scan.")
+	unify.add_argument("operation", choices=("status", "start", "organize", "resume", "rollback", "confirm-settings", "release-backup"))
+	unify.add_argument("--confirm-preview")
+	working = subparsers.add_parser("working-files", help="Review staging or explicitly move an eligible sidecar to Trash.")
+	working.add_argument("--trash-reviewed", help=argparse.SUPPRESS)
+
 	preview = subparsers.add_parser("preview", aliases=["dry-run"], help="Read Spotify and Music metadata without downloading or changing Music.")
 	preview.add_argument("url", nargs="?")
 	preview.add_argument("--spotify-fixture", type=Path, help=argparse.SUPPRESS)
@@ -118,7 +124,7 @@ def _parser() -> argparse.ArgumentParser:
 	audit.add_argument("--status-only", action="store_true")
 	health = subparsers.add_parser("health", help="Read-only Music library health and local audio diagnostics.")
 	health.add_argument("--confirm-read-only-scan", action="store_true", required=True)
-	health.add_argument("--deep-all", action="store_true", help="Also fully decode user-owned local audio.")
+	health.add_argument("--deep-all", action="store_true", help="Recompute every local audio check regardless of provenance.")
 	health.add_argument("--json", action="store_true")
 
 	library_audit = subparsers.add_parser("library-audit", help="Read and hash the local Music file library without changing Music or media.")
@@ -336,6 +342,8 @@ def _progress(callback: Callable[[dict[str, Any]], None] | None, phase: str, **v
 
 def run(argv: list[str] | None = None, *, on_progress: Callable[[dict[str, Any]], None] | None = None) -> int:
 	arguments = list(sys.argv[1:] if argv is None else argv)
+	if arguments[:1] in (["unification"], ["working-files"]):
+		return _run(arguments, on_progress=on_progress)
 	if arguments[:1] == ["health-audit"]:
 		from crate_music_importer.ipod_import.health_audit import load_health_audit, start_health_audit
 		args = _parser().parse_args(arguments)
@@ -367,6 +375,30 @@ def _run(
 ) -> int:
 	args = _parser().parse_args(argv)
 	paths = ManagedPaths()
+	if args.command == "unification":
+		from crate_music_importer.ipod_import.unification_worker import start, status
+		if args.operation == "release-backup":
+			from crate_music_importer.ipod_import.unification import release_backup
+			result = release_backup(paths, args.confirm_preview or "")
+		elif args.operation == "confirm-settings":
+			from crate_music_importer.ipod_import.preservation import record_settings_observation
+			record_settings_observation(paths, keep_organized=False, copy_files=False, evidence="User explicitly confirmed both checkboxes off in Music Settings > Files.")
+			result = status(paths)
+		elif args.operation in ("organize", "resume", "rollback"):
+			if not args.confirm_preview:
+				raise ValueError("Explicit approval of the saved preview ID is required.")
+			result = start(paths, args.operation, args.confirm_preview)
+		else:
+			result = start(paths) if args.operation == "start" else status(paths)
+		print(json.dumps(result, ensure_ascii=False))
+		return 0
+	if args.command == "working-files":
+		from crate_music_importer.ipod_import.working_files import review_working_files
+		if args.trash_reviewed:
+			from crate_music_importer.ipod_import.working_files import cleanup
+			cleanup(paths, json.loads(args.trash_reviewed))
+		print(json.dumps(review_working_files(paths, load_manifest(paths)), ensure_ascii=False))
+		return 0
 	if args.command == "preflight":
 		print(f"Managed root: {MANAGED_ROOT}")
 		for name, path in check_tools().items():
@@ -412,17 +444,7 @@ def _run(
 			print(f"Saved read-only audit: {target}")
 		return 0
 	if args.command in ("library-migrate", "library-resume"):
-		audit = load_library_audit(paths, args.audit_id)
-		print(f"Reconciling Music audit {args.audit_id}; originals remain until each relink verifies.")
-		journal = migrate_library(paths, audit, scan_music_library(), relink=relink_music_file_track, relink_batch=relink_music_file_tracks)
-		current_music = scan_music_library()
-		manifest_repair = reconcile_missing_manifest_references(paths, current_music)
-		verify_library_migration(paths, audit, journal, current_music)
-		rebuild_music_cache(paths, load_manifest(paths), scan=lambda: current_music)
-		print(f"Library reconciliation complete: {len(journal['tracks'])} tracks. Legacy originals were moved to Trash only after Music verification.")
-		if manifest_repair["resolved_to_music"] or manifest_repair["marked_unavailable"]:
-			print("Retired stale importer references: " + ", ".join(f"{key}={value}" for key, value in manifest_repair.items()) + ".")
-		return 0
+		raise ValueError("The old reconciliation writer cannot verify the complete preservation baseline. Use Unify Music Library and approve its fresh preview.")
 	if args.command == "status":
 		managed = sum(1 for recording in manifest["recordings"].values() if (recording.get("active_reference") or {}).get("kind") == "managed_file")
 		reused = sum(1 for recording in manifest["recordings"].values() if (recording.get("active_reference") or {}).get("kind") == "existing_music")
