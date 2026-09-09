@@ -29,13 +29,13 @@ class ManifestTests(unittest.TestCase):
 		for source_type in ("album", "playlist"):
 			with self.subTest(source_type=source_type), tempfile.TemporaryDirectory() as directory:
 				manifest = new_manifest(ManagedPaths(Path(directory)))
-				track = {"title": "Trouble - 2009 Mix", "artists": "Yusuf / Cat Stevens", "album_artist": "Yusuf / Cat Stevens", "album": "Mona Bone Jakon", "duration_ms": 180000}
+				track = {"title": "Song - 2009 Mix", "artists": "Yusuf / Cat Stevens", "album_artist": "Yusuf / Cat Stevens", "album": "Album", "duration_ms": 180000}
 				key, recording = upsert_recording(manifest, track, source_type=source_type)
-				self.assertEqual(recording["source_metadata"]["title"], "Trouble")
+				self.assertEqual(recording["source_metadata"]["title"], "Song")
 				self.assertEqual(recording["source_metadata"]["artists"], "Cat Stevens")
 				if source_type == "album":
 					self.assertEqual(recording["album_metadata"]["album_artist"], "Cat Stevens")
-				other_key, _ = upsert_recording(manifest, dict(track, artists="Cat Stevens", title="Trouble"), source_type=source_type)
+				other_key, _ = upsert_recording(manifest, dict(track, artists="Cat Stevens", title="Song"), source_type=source_type)
 				self.assertEqual(key, other_key)
 
 	def test_album_metadata_wins_without_creating_a_second_recording(self):

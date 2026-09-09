@@ -48,6 +48,20 @@
       "subtitle": "Crate Music Importer",
       "description": "Run a read-only library audit and check for safe, stable downloader updates.",
       "mode": "view"
+    },
+    {
+      "name": "unify-music-library",
+      "title": "Unify Music Library",
+      "subtitle": "Crate Music Importer",
+      "description": "Preview canonical organization, preservation checks, and adoption without changing Music.",
+      "mode": "view"
+    },
+    {
+      "name": "review-crate-working-files",
+      "title": "Review Crate Working Files",
+      "subtitle": "Crate Music Importer",
+      "description": "Review active, recoverable, and unknown staging material.",
+      "mode": "view"
     }
   ],
   "scripts": {

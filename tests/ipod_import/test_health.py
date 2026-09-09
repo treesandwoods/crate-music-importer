@@ -25,6 +25,7 @@ class HealthTests(unittest.TestCase):
 		self.addCleanup(self.stack.close)
 		self.stack.enter_context(patch.dict(os.environ, {"CRATE_APPLICATION_STATE": str(self.root / "app")}))
 		self.probe = self.stack.enter_context(patch.object(health, "probe_duration_ms", return_value=180000))
+		self.audio = self.stack.enter_context(patch.object(health, "audio_sha256", return_value="audio-hash"))
 		self.decode = self.stack.enter_context(patch.object(health, "_decode"))
 		self.real_tags = health._tags_and_artwork
 		self.tags = self.stack.enter_context(patch.object(health, "_tags_and_artwork", return_value=({"title": "Song", "artist": "Artist", "album": "Playlist Imports", "track": "", "disc": "", "compilation": "1"}, [])))
@@ -54,8 +55,8 @@ class HealthTests(unittest.TestCase):
 		self.assertEqual(self.categories(result), {"missing_or_unreadable_file", "cloud_only"})
 		self.assertEqual(result["summary"]["missingFiles"], 1)
 		self.assertEqual(next(i for i in result["issues"] if i["category"] == "cloud_only")["severity"], "informational")
-		self.tags.assert_not_called()
-		self.decode.assert_not_called()
+		self.tags.assert_called_once()
+		self.decode.assert_called_once()
 
 	def test_marked_untracked_and_absent_manifest_ids(self):
 		track = self.track()
@@ -105,16 +106,16 @@ class HealthTests(unittest.TestCase):
 		self.manifest["recordings"]["A"] = {"music": {"persistent_id": "A"}, "source_metadata": {"title": "Other"}, "active_reference": {"kind": "existing_music", "persistent_id": "A"}}
 		result = self.report([track])
 		self.assertEqual(result["issues"], [])
-		self.tags.assert_not_called()
-		self.decode.assert_not_called()
+		self.tags.assert_called_once()
+		self.decode.assert_called_once()
 
 	def test_conflicting_references_are_ambiguous(self):
 		track = self.track(managed=True)
 		self.manifest["recordings"]["B"] = {"music": {"persistent_id": "A"}}
 		result = self.report([track])
 		self.assertIn("conflicting_recording_references", self.categories(result))
-		self.tags.assert_not_called()
-		self.decode.assert_not_called()
+		self.tags.assert_called_once()
+		self.decode.assert_called_once()
 
 	def test_registered_file_without_music_still_checked(self):
 		track = self.track(managed=True)
@@ -327,8 +328,8 @@ class HealthTests(unittest.TestCase):
 		self.manifest["recordings"].clear()
 		result = self.report([track])
 		self.assertEqual(result["issues"], [])
-		self.decode.assert_not_called()
-		self.tags.assert_not_called()
+		self.decode.assert_called_once()
+		self.tags.assert_called_once()
 
 	def test_tag_only_change_is_informational_and_still_checks_metadata(self):
 		track = self.track(managed=True)

@@ -54,7 +54,11 @@ export function healthSummary(result: HealthResult) {
   const labels: Record<string, string> = {
     musicTracks: "Music tracks scanned",
     localFiles: "Local files checked",
-    managedTracks: "Importer-managed tracks",
+    catalogedLocalTracks: "Cataloged local tracks",
+    canonicalFiles: "Files in the canonical layout",
+    externalFiles: "External files awaiting adoption",
+    fullyAudioVerified: "Files fully audio-verified",
+    actualRepairCandidates: "Actual repair candidates",
     missingFiles: "Missing or unreadable files",
     corruptFiles: "Corrupt or truncated audio",
     exactDuplicateGroups: "Exact duplicate groups",

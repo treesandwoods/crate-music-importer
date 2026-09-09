@@ -270,20 +270,47 @@ def _build_health_report(
 			report["checks"]["fileIntegrity"] = "failed"
 			continue
 		decode_ok = True
-		managed_group = any(entry["ownership"] == "importer_owned" for entry in group)
-		if managed_group or deep_all:
-			deep_count += 1
-			try:
-				_decode(path)
-			except (MediaError, OSError, subprocess.TimeoutExpired) as exc:
-				decode_ok = False
-				add("decode_unavailable", str(exc), group, check="fileIntegrity")
-				report["checks"]["fileIntegrity"] = "failed"
-			except Exception as exc:
-				decode_ok = False
-				add("decode_failed", str(exc), group, check="fileIntegrity", severity="critical")
+		deep_count += 1
+		try:
+			_decode(path)
+		except (MediaError, OSError, subprocess.TimeoutExpired) as exc:
+			decode_ok = False
+			add("decode_unavailable", str(exc), group, check="fileIntegrity")
+			report["checks"]["fileIntegrity"] = "failed"
+		except Exception as exc:
+			decode_ok = False
+			add("decode_failed", str(exc), group, check="fileIntegrity", severity="critical")
 		if decode_ok:
 			playable_files.add(location)
+		# Uniform file checks are independent of source-specific comparisons.
+		file_tags = None
+		try:
+			file_tags = _tags_and_artwork(path)
+			_, artwork_errors = file_tags
+			for error in artwork_errors:
+				add("artwork_discrepancy", error, group, check="artwork")
+		except Exception as exc:
+			add("metadata_check_failed", str(exc), group, check="metadata")
+		try:
+			actual_audio = audio_sha256(path)
+		except Exception as exc:
+			actual_audio = None
+			playable_files.discard(location)
+			add("audio_fingerprint_unavailable", str(exc), group, check="fileIntegrity")
+		for entry in group:
+			from crate_music_importer.ipod_import.catalog import library_id
+			catalog_entry = manifest.get("catalog", {}).get("entries", {}).get(library_id(entry["persistent_id"]) if entry["persistent_id"] else "", {})
+			baseline = catalog_entry.get("fingerprints", {})
+			if baseline.get("audio_sha256") and actual_audio and baseline["audio_sha256"] != actual_audio:
+				add("audio_changed", "Audio changed since the catalog baseline.", [entry], check="fileIntegrity", severity="critical")
+			elif baseline.get("sha256") and baseline["sha256"] != digest:
+				add("tags_or_artwork_changed", "File bytes changed; audio fingerprint is unchanged." if actual_audio else "File bytes changed; audio verification is unavailable.", [entry], check="metadata", severity="informational")
+			if catalog_entry and catalog_entry.get("location") != entry["track"].get("location"):
+				add("catalog_location_mismatch", "Music and catalog locations disagree.", [entry])
+			if catalog_entry and any(catalog_entry.get("music", {}).get(field) != entry["track"].get(field) for field in ("title", "artist", "album", "album_artist", "track_no", "disc_no")):
+				add("music_metadata_changed", "Music metadata changed; refresh the catalog.", [entry], check="metadata", severity="informational")
+			if any(not entry["track"].get(field) for field in ("title", "artist", "album")):
+				add("metadata_incomplete", "Music metadata is incomplete; missing values are not invented.", [entry], check="metadata")
 		for entry in group:
 			track = entry["track"]
 			key = (normalize_recording_title(track.get("title")), normalized_artists(track.get("artist")), version_markers(track.get("title")))
@@ -307,8 +334,10 @@ def _build_health_report(
 					add("audio_content_changed", "The encoded audio changed since its saved baseline. This may be an intentional replacement; review the recording before accepting it.", [entry], check="fileIntegrity", evidence={"expected": managed["audio_sha256"], "actual": actual_audio})
 					continue
 				add("non_audio_file_changed", "Audio is unchanged. Only tags, artwork, or other file packaging changed.", [entry], severity="informational")
+			if file_tags is None:
+				continue
 			try:
-				_metadata_checks(path, entry, recording, manifest, duration, add)
+				_metadata_checks(path, entry, recording, manifest, duration, add, file_tags=file_tags)
 			except Exception as exc:
 				add("metadata_check_failed", str(exc), [entry], check="metadata")
 				report["checks"]["metadata"] = "failed"
@@ -380,11 +409,12 @@ def _build_health_report(
 		"possibleRecordingDuplicates": sum(issue["category"] in ("semantic_duplicate", "spotify_duplicate") for issue in issues),
 		"manifestInconsistencies": sum(issue["category"] in ("duplicate_persistent_id", "missing_persistent_id", "untracked_managed_track", "conflicting_recording_references", "conflicting_music_ids", "manifest_id_absent", "music_location_mismatch", "active_reference_mismatch", "managed_path_outside_root", "managed_hash_mismatch", "incomplete_cache", "stale_cache_reference", "cache_unavailable") for issue in issues),
 		"metadataDiscrepancies": sum(issue["category"] in ("duration_mismatch", "tag_mismatch", "artwork_discrepancy", "metadata_check_failed") for issue in issues)}
+	report["summary"].update(catalogedLocalTracks=sum(bool(entry.get("location")) and entry.get("present_in_music", False) for entry in manifest.get("catalog", {}).get("entries", {}).values()), canonicalFiles=sum(_inside(Path(location), paths.root / "Music") for location in files), externalFiles=sum(not _inside(Path(location), paths.root) for location in files), fullyAudioVerified=len(playable_files), actualRepairCandidates=sum(issue["severity"] == "critical" for issue in issues))
 	report["status"] = "failed" if "failed" in report["checks"].values() else "attention" if counts["critical"] or counts["warning"] or any(issue["category"] == "semantic_duplicate" for issue in issues) else "healthy"
 	return report
 
 
-def _metadata_checks(path: Path, entry: dict[str, Any], recording: dict[str, Any], manifest: dict[str, Any], duration: int, add: Callable[..., None]) -> None:
+def _metadata_checks(path: Path, entry: dict[str, Any], recording: dict[str, Any], manifest: dict[str, Any], duration: int, add: Callable[..., None], *, file_tags: Any = None) -> None:
 	meta = recording.get("source_metadata") or {}
 	managed = recording.get("managed_file") or {}
 	album = (recording.get("album_metadata") or {}) if managed.get("metadata_profile") == "album" else {}
@@ -399,7 +429,7 @@ def _metadata_checks(path: Path, entry: dict[str, Any], recording: dict[str, Any
 			add("duration_mismatch", f"Actual duration differs from {label} beyond the existing importer tolerance.", [entry], check="metadata", evidence={"actualMs": duration, "expectedMs": expected, "ratio": ratio, "minimumToleranceMs": minimum})
 	if path.suffix.casefold() != ".mp3":
 		return
-	tags, artwork_problems = _tags_and_artwork(path)
+	tags, artwork_problems = file_tags if file_tags is not None else _tags_and_artwork(path)
 	artwork_problems = list(artwork_problems)
 	expected = {"title": preferences.get("title") or meta.get("title", ""), "artist": meta.get("artists", "")}
 	profile_known = managed.get("metadata_profile") == "playlist" or bool(album)
