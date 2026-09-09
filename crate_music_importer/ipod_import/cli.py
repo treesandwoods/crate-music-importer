@@ -11,7 +11,7 @@ from typing import Any, Callable
 from crate_music_importer.ipod_import.constants import MANAGED_ROOT
 from crate_music_importer.ipod_import.manifest import ManagedPaths, load_manifest
 from crate_music_importer.ipod_import.media import check_tools
-from crate_music_importer.ipod_import.music import load_music_fixture, lookup_importer_owned_music_track, lookup_music_track, relink_music_file_track, relink_music_file_tracks, scan_music_library, scan_music_library_for_health, verify_music_tracks
+from crate_music_importer.ipod_import.music import load_music_fixture, lookup_importer_owned_music_track, lookup_music_track, scan_music_library, scan_music_library_for_health, verify_music_tracks
 from crate_music_importer.ipod_import.music_cache import (
 	load_music_cache,
 	mark_music_cache_entry_stale,
@@ -19,15 +19,6 @@ from crate_music_importer.ipod_import.music_cache import (
 	remove_music_cache_tracks,
 	rebuild_music_cache,
 	upsert_music_cache_track,
-)
-from crate_music_importer.ipod_import.reconciliation import (
-	build_library_audit,
-	load_library_audit,
-	migrate_library,
-	reconcile_missing_manifest_references,
-	reconciliation_status,
-	save_library_audit,
-	verify_library_migration,
 )
 from crate_music_importer.ipod_import.pipeline import (
 	apply_album_to_music,
@@ -53,12 +44,6 @@ def _parser() -> argparse.ArgumentParser:
 		description="Preview, download, and deliberately apply public Spotify albums and playlists to Music.app for normal whole-library iPod sync.",
 	)
 	subparsers = parser.add_subparsers(dest="command", required=True)
-
-	unify = subparsers.add_parser("unification", help="Read a saved unification preview or explicitly start a fresh scan.")
-	unify.add_argument("operation", choices=("status", "start", "organize", "resume", "rollback", "confirm-settings", "release-backup"))
-	unify.add_argument("--confirm-preview")
-	working = subparsers.add_parser("working-files", help="Review staging or explicitly move an eligible sidecar to Trash.")
-	working.add_argument("--trash-reviewed", help=argparse.SUPPRESS)
 
 	preview = subparsers.add_parser("preview", aliases=["dry-run"], help="Read Spotify and Music metadata without downloading or changing Music.")
 	preview.add_argument("url", nargs="?")
@@ -124,18 +109,8 @@ def _parser() -> argparse.ArgumentParser:
 	audit.add_argument("--status-only", action="store_true")
 	health = subparsers.add_parser("health", help="Read-only Music library health and local audio diagnostics.")
 	health.add_argument("--confirm-read-only-scan", action="store_true", required=True)
-	health.add_argument("--deep-all", action="store_true", help="Recompute every local audio check regardless of provenance.")
+	health.add_argument("--deep-all", action="store_true", help="Also fully decode user-owned local audio.")
 	health.add_argument("--json", action="store_true")
-
-	library_audit = subparsers.add_parser("library-audit", help="Read and hash the local Music file library without changing Music or media.")
-	library_audit.add_argument("--json", action="store_true")
-	library_migrate = subparsers.add_parser("library-migrate", help="Copy/relink a saved library audit into the configured managed root.")
-	library_migrate.add_argument("audit_id")
-	library_migrate.add_argument("--confirm-library-write", action="store_true", required=True)
-	library_resume = subparsers.add_parser("library-resume", help="Resume a checkpointed library migration after an interruption.")
-	library_resume.add_argument("audit_id")
-	library_resume.add_argument("--confirm-library-write", action="store_true", required=True)
-	subparsers.add_parser("library-status", help="Show saved library audits and migration checkpoints.")
 
 	deps = subparsers.add_parser("dependencies", help="Check or deliberately update Homebrew downloader tools.")
 	deps.add_argument("operation", choices=["status", "update"])
@@ -342,8 +317,6 @@ def _progress(callback: Callable[[dict[str, Any]], None] | None, phase: str, **v
 
 def run(argv: list[str] | None = None, *, on_progress: Callable[[dict[str, Any]], None] | None = None) -> int:
 	arguments = list(sys.argv[1:] if argv is None else argv)
-	if arguments[:1] in (["unification"], ["working-files"]):
-		return _run(arguments, on_progress=on_progress)
 	if arguments[:1] == ["health-audit"]:
 		from crate_music_importer.ipod_import.health_audit import load_health_audit, start_health_audit
 		args = _parser().parse_args(arguments)
@@ -375,30 +348,6 @@ def _run(
 ) -> int:
 	args = _parser().parse_args(argv)
 	paths = ManagedPaths()
-	if args.command == "unification":
-		from crate_music_importer.ipod_import.unification_worker import start, status
-		if args.operation == "release-backup":
-			from crate_music_importer.ipod_import.unification import release_backup
-			result = release_backup(paths, args.confirm_preview or "")
-		elif args.operation == "confirm-settings":
-			from crate_music_importer.ipod_import.preservation import record_settings_observation
-			record_settings_observation(paths, keep_organized=False, copy_files=False, evidence="User explicitly confirmed both checkboxes off in Music Settings > Files.")
-			result = status(paths)
-		elif args.operation in ("organize", "resume", "rollback"):
-			if not args.confirm_preview:
-				raise ValueError("Explicit approval of the saved preview ID is required.")
-			result = start(paths, args.operation, args.confirm_preview)
-		else:
-			result = start(paths) if args.operation == "start" else status(paths)
-		print(json.dumps(result, ensure_ascii=False))
-		return 0
-	if args.command == "working-files":
-		from crate_music_importer.ipod_import.working_files import review_working_files
-		if args.trash_reviewed:
-			from crate_music_importer.ipod_import.working_files import cleanup
-			cleanup(paths, json.loads(args.trash_reviewed))
-		print(json.dumps(review_working_files(paths, load_manifest(paths)), ensure_ascii=False))
-		return 0
 	if args.command == "preflight":
 		print(f"Managed root: {MANAGED_ROOT}")
 		for name, path in check_tools().items():
@@ -427,24 +376,6 @@ def _run(
 			print(f"Music library cache rebuilt: {result['cached_tracks']} tracks in {result['elapsed_seconds']:.1f} seconds.")
 			print(f"Cache: {result['cache_path']}")
 		return 0
-	if args.command == "library-status":
-		print(json.dumps(reconciliation_status(paths), ensure_ascii=False, indent=2))
-		return 0
-	if args.command == "library-audit":
-		print("Scanning local Music file tracks and hashing their MP3s…", file=sys.stderr)
-		audit = build_library_audit(paths, manifest, scan_music_library())
-		target = save_library_audit(paths, audit)
-		if args.json:
-			print(json.dumps(audit, ensure_ascii=False, indent=2))
-		else:
-			groups = audit["source_groups"]
-			print(f"Library audit: {audit['audit_id']}")
-			print(f"Music file tracks: {audit['track_count']}; YT Albums: {groups.get('yt_albums', 0)}; managed root: {groups.get('managed_root', 0)}; other: {groups.get('other', 0)}")
-			print(f"Exact duplicate groups: {len(audit['exact_duplicates'])}; semantic review candidates: {len(audit['semantic_candidates'])}")
-			print(f"Saved read-only audit: {target}")
-		return 0
-	if args.command in ("library-migrate", "library-resume"):
-		raise ValueError("The old reconciliation writer cannot verify the complete preservation baseline. Use Unify Music Library and approve its fresh preview.")
 	if args.command == "status":
 		managed = sum(1 for recording in manifest["recordings"].values() if (recording.get("active_reference") or {}).get("kind") == "managed_file")
 		reused = sum(1 for recording in manifest["recordings"].values() if (recording.get("active_reference") or {}).get("kind") == "existing_music")

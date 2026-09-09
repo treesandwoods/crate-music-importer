@@ -201,38 +201,3 @@ export function loadHealthAudit(includeReport = true): Promise<HealthAuditState>
 export function startHealthAudit(deepAll = false): Promise<HealthAuditState> {
   return runJson(["health-audit", "start", ...(deepAll ? ["--deep-all"] : [])], 15_000);
 }
-
-export interface UnificationPreview {
-  preview_id: string;
-  ready: boolean;
-  blockers: string[];
-  tracks: Array<{ persistent_id: string; source: string; target: string; status: string }>;
-  collisions: unknown[];
-  orphans: string[];
-  temporary_audio_bytes: number;
-  backup_bytes: number;
-  report_path: string;
-  possible_recording_duplicates: string[][];
-}
-export interface UnificationState {
-  status: string;
-  error?: string;
-  preview?: UnificationPreview;
-  checked?: number;
-  total?: number;
-  phase?: string;
-  journal?: { state: string; backup_retained: boolean };
-}
-export function unification(
-  operation: "status" | "start" | "organize" | "resume" | "rollback" | "confirm-settings" | "release-backup",
-  previewId?: string,
-): Promise<UnificationState> {
-  return runJson(["unification", operation, ...(previewId ? ["--confirm-preview", previewId] : [])], 15_000);
-}
-export interface WorkingFiles {
-  total_bytes: number;
-  files: Array<{ path: string; size_bytes: number; category: string; reason: string; cleanup_eligible: boolean }>;
-}
-export function workingFiles(row?: WorkingFiles["files"][number]): Promise<WorkingFiles> {
-  return runJson(["working-files", ...(row ? ["--trash-reviewed", JSON.stringify(row)] : [])], 120_000);
-}

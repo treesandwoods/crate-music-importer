@@ -9,8 +9,6 @@ from crate_music_importer.ipod_import.music import (
 	_ADD_FILE_SCRIPT,
 	_DELETE_IMPORTER_OWNED_TRACK_SCRIPT,
 	_LOOKUP_TRACK_BY_RECORDING_ID_SCRIPT,
-	_RELINK_FILE_TRACK_SCRIPT,
-	_RELINK_FILE_TRACKS_SCRIPT,
 	_LOOKUP_TRACK_BY_ID_SCRIPT,
 	_SCAN_PLAYLIST_IMPORTS_SCRIPT,
 	_SCAN_SCRIPT,
@@ -22,8 +20,6 @@ from crate_music_importer.ipod_import.music import (
 	import_managed_file,
 	lookup_importer_owned_music_track,
 	lookup_music_track,
-	relink_music_file_track,
-	relink_music_file_tracks,
 	scan_playlist_imports,
 	update_managed_music_artwork,
 	verify_music_tracks,
@@ -127,28 +123,6 @@ class MusicAutomationTests(unittest.TestCase):
 		with patch("crate_music_importer.ipod_import.music.subprocess.run", return_value=result):
 			with self.assertRaisesRegex(MusicAutomationError, "Music was busy"):
 				_osascript("return 1")
-
-	def test_relink_requires_matching_persistent_id_and_location(self):
-		with tempfile.TemporaryDirectory() as directory:
-			path = Path(directory) / "replacement.mp3"
-			path.write_bytes(b"mp3")
-			with patch("crate_music_importer.ipod_import.music._osascript", return_value="PID\t" + str(path)) as run_script:
-				result = relink_music_file_track("PID", path)
-			self.assertEqual(result, {"persistent_id": "PID", "location": str(path)})
-			run_script.assert_called_once_with(_RELINK_FILE_TRACK_SCRIPT, ["PID", str(path)])
-
-	def test_batch_relink_returns_each_requested_location(self):
-		with tempfile.TemporaryDirectory() as directory:
-			one = Path(directory) / "one.mp3"
-			two = Path(directory) / "two.mp3"
-			one.write_bytes(b"one")
-			two.write_bytes(b"two")
-			output = chr(30).join((f"ONE{chr(31)}Macintosh HD:{str(one).lstrip('/').replace('/', ':')}", f"TWO{chr(31)}Macintosh HD:{str(two).lstrip('/').replace('/', ':')}", ""))
-			with patch("crate_music_importer.ipod_import.music._osascript", return_value=output) as run_script:
-				result = relink_music_file_tracks({"ONE": one, "TWO": two}, batch_size=100)
-			self.assertEqual(result, {"ONE": one, "TWO": two})
-			run_script.assert_called_once_with(_RELINK_FILE_TRACKS_SCRIPT, ["ONE", str(one), "TWO", str(two)], timeout=600)
-
 
 if __name__ == "__main__":
 	unittest.main()
