@@ -115,7 +115,7 @@ def _cache_warning(exc: Exception) -> MusicAutomationError:
 	return MusicAutomationError(
 		"Music changed successfully, but its persistent cache could not be saved. "
 		"The Music ID was checkpointed so retrying will not create a duplicate. "
-		"Run ‘Rebuild Music Library Cache’ before continuing. " + str(exc)
+		"Refresh Library Health before continuing. " + str(exc)
 	)
 
 
@@ -129,7 +129,7 @@ def _stale_music_reference(
 ) -> None:
 	message = (
 		f"Cached Music track {persistent_id} is stale because {reason}. "
-		"Run ‘Rebuild Music Library Cache’; this track was stopped so a duplicate cannot be created."
+		"Refresh Library Health; this track was stopped so a duplicate cannot be created."
 	)
 	recording["review"] = {
 		"kind": "music_cache_stale",
@@ -235,7 +235,7 @@ def _validate_exact_reference(
 			except Exception as exc:
 				raise MusicAutomationError(
 					"The Music ID is valid, but the persistent cache could not be reconciled. "
-					"Run ‘Rebuild Music Library Cache’ before continuing. " + str(exc)
+					"Refresh Library Health before continuing. " + str(exc)
 				) from exc
 		recording.pop("cache_sync_pending", None)
 		recording.pop("last_error", None)
@@ -324,10 +324,10 @@ def build_preview(
 					recording.pop("last_error", None)
 			else:
 				status = "review_music"
-				detail = "saved Music cache entry is stale; run Rebuild Music Library Cache"
+				detail = "saved Music cache entry is stale; refresh Library Health"
 		elif persistent_id and persistent_id not in index.by_persistent_id:
 			status = "review_music"
-			detail = "saved Music ID is missing from the cache; run Rebuild Music Library Cache"
+			detail = "saved Music ID is missing from the cache; refresh Library Health"
 		elif _playlist_artwork_needs_update(recording, paths):
 			status = "artwork_update"
 			detail = "repair the importer-owned MP3 with this track's individual Spotify album artwork"
@@ -457,10 +457,10 @@ def build_album_preview(
 				detail = "album promotion is ready for final exact Music validation"
 			else:
 				status = "review_music"
-				detail = "saved Music cache entry is stale; run Rebuild Music Library Cache"
+				detail = "saved Music cache entry is stale; refresh Library Health"
 		elif persistent_id and persistent_id not in index.by_persistent_id:
 			status = "review_music"
-			detail = "saved Music ID is missing from the cache; run Rebuild Music Library Cache"
+			detail = "saved Music ID is missing from the cache; refresh Library Health"
 		elif (
 			preferred_album_candidate
 			and active_candidate
@@ -1002,7 +1002,7 @@ def apply_album_to_music(
 			if recording.get("music_import_pending"):
 				raise MusicAutomationError(
 					f"A previous Music import may have succeeded for {recording['source_metadata']['title']}. "
-					"Run ‘Rebuild Music Library Cache’ before retrying; refusing to create a possible duplicate."
+					"Refresh Library Health before retrying; refusing to create a possible duplicate."
 				)
 			recording["music_import_pending"] = {
 				"relative_path": managed["relative_path"],
@@ -1183,7 +1183,7 @@ def apply_to_music(
 		elif recording.get("music_import_pending"):
 			message = (
 				f"A previous Music import may have succeeded for {recording['source_metadata']['title']}. "
-				"Run ‘Rebuild Music Library Cache’ before retrying; refusing to create a possible duplicate."
+				"Refresh Library Health before retrying; refusing to create a possible duplicate."
 			)
 			recording["review"] = {"kind": "music_cache_stale", "message": message, "candidates": []}
 			recording["last_error"] = message

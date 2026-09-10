@@ -11,13 +11,13 @@ from typing import Any, Callable
 from crate_music_importer.ipod_import.constants import MANAGED_ROOT
 from crate_music_importer.ipod_import.manifest import ManagedPaths, load_manifest
 from crate_music_importer.ipod_import.media import check_tools
-from crate_music_importer.ipod_import.music import load_music_fixture, lookup_importer_owned_music_track, lookup_music_track, scan_music_library, scan_music_library_for_health, verify_music_tracks
+from crate_music_importer.ipod_import.music import load_music_fixture, lookup_importer_owned_music_track, lookup_music_track, scan_music_library_for_health, verify_music_tracks
 from crate_music_importer.ipod_import.music_cache import (
 	load_music_cache,
 	mark_music_cache_entry_stale,
 	music_cache_tracks,
 	remove_music_cache_tracks,
-	rebuild_music_cache,
+	refresh_music_cache,
 	upsert_music_cache_track,
 )
 from crate_music_importer.ipod_import.pipeline import (
@@ -98,10 +98,6 @@ def _parser() -> argparse.ArgumentParser:
 	album_apply = subparsers.add_parser("album-apply", help="Add or update one real album in Music without creating an album playlist.")
 	album_apply.add_argument("album", help="Spotify album ID, Spotify URL, or exact saved album name")
 	album_apply.add_argument("--confirm-music-write", action="store_true", required=True)
-
-	rebuild_cache = subparsers.add_parser("rebuild-music-cache", help="Perform one deliberate, read-only full Music scan and atomically replace the persistent cache.")
-	rebuild_cache.add_argument("--confirm-read-only-scan", action="store_true", required=True)
-	rebuild_cache.add_argument("--json", action="store_true")
 
 	audit = subparsers.add_parser("health-audit", help="Read or explicitly start a durable health audit.")
 	audit.add_argument("operation", choices=("status", "start"))
@@ -358,24 +354,15 @@ def _run(
 		from crate_music_importer.ipod_import.health import build_health_report, failed_health_report, save_health_report
 		try:
 			manifest = load_manifest(paths)
-			result = build_health_report(paths, manifest, scan_music_library_for_health(), on_progress=on_progress, deep_all=args.deep_all)
+			music_tracks = scan_music_library_for_health()
+			refresh_music_cache(paths, manifest, music_tracks)
+			result = build_health_report(paths, manifest, music_tracks, on_progress=on_progress, deep_all=args.deep_all)
 		except Exception as exc:
 			result = failed_health_report(str(exc))
 		save_health_report(paths, result)
 		print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else f"Library health: {result['status']}\n{json.dumps(result, ensure_ascii=False, indent=2)}")
 		return 0
 	manifest = load_manifest(paths)
-	if args.command == "rebuild-music-cache":
-		def rebuild_progress(event: dict[str, Any]) -> None:
-			if not args.json and event.get("phase") == "scanning_music_read_only":
-				print("Reading the complete Music library once. This scan is read-only; no tracks, playlists, or iPod settings will be changed.", file=sys.stderr)
-		result = rebuild_music_cache(paths, manifest, scan=scan_music_library, progress=rebuild_progress)
-		if args.json:
-			print(json.dumps(result, ensure_ascii=False, indent=2))
-		else:
-			print(f"Music library cache rebuilt: {result['cached_tracks']} tracks in {result['elapsed_seconds']:.1f} seconds.")
-			print(f"Cache: {result['cache_path']}")
-		return 0
 	if args.command == "status":
 		managed = sum(1 for recording in manifest["recordings"].values() if (recording.get("active_reference") or {}).get("kind") == "managed_file")
 		reused = sum(1 for recording in manifest["recordings"].values() if (recording.get("active_reference") or {}).get("kind") == "existing_music")

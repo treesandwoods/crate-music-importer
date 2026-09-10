@@ -25,7 +25,7 @@ class AlbumCliEfficiencyTests(unittest.TestCase):
 			before = paths.music_cache.read_bytes()
 			with patch("crate_music_importer.ipod_import.cli.ManagedPaths", return_value=paths), \
 				patch("crate_music_importer.ipod_import.cli.load_manifest", return_value=manifest), \
-				patch("crate_music_importer.ipod_import.cli.scan_music_library") as full_scan, \
+				patch("crate_music_importer.ipod_import.cli.scan_music_library_for_health") as full_scan, \
 				contextlib.redirect_stdout(io.StringIO()):
 				code = cli.run([
 					"album-preview",
@@ -51,7 +51,7 @@ class AlbumCliEfficiencyTests(unittest.TestCase):
 				patch("crate_music_importer.ipod_import.cli.fetch_album", return_value=album), \
 				patch("crate_music_importer.ipod_import.cli.build_album_preview", return_value=preview) as build_preview, \
 				patch("crate_music_importer.ipod_import.cli.execute_album_import", return_value=result), \
-				patch("crate_music_importer.ipod_import.cli.scan_music_library") as full_scan, \
+				patch("crate_music_importer.ipod_import.cli.scan_music_library_for_health") as full_scan, \
 				contextlib.redirect_stdout(io.StringIO()):
 				code = cli.run(["album-import", ALBUM_URL, "--confirm-download"])
 			self.assertEqual(code, 0)
@@ -88,7 +88,7 @@ class AlbumCliEfficiencyTests(unittest.TestCase):
 			apply_result = {"track_count": 1, "new_imports": 0, "updated_tracks": 0, "reused_tracks": 1}
 			with patch("crate_music_importer.ipod_import.cli.ManagedPaths", return_value=paths), \
 				patch("crate_music_importer.ipod_import.cli.load_manifest", return_value=manifest), \
-				patch("crate_music_importer.ipod_import.cli.scan_music_library") as full_scan, \
+				patch("crate_music_importer.ipod_import.cli.scan_music_library_for_health") as full_scan, \
 				patch("crate_music_importer.ipod_import.cli.apply_album_to_music", return_value=apply_result) as apply_album, \
 				contextlib.redirect_stdout(io.StringIO()):
 				code = cli.run(["album-apply", ALBUM_URL, "--confirm-music-write"])
@@ -111,7 +111,7 @@ class AlbumCliEfficiencyTests(unittest.TestCase):
 				patch("crate_music_importer.ipod_import.cli.execute_import", return_value=result), \
 				patch("crate_music_importer.ipod_import.cli.fetch_playlist", return_value=playlist), \
 				patch("crate_music_importer.ipod_import.cli.check_tools", return_value={}), \
-				patch("crate_music_importer.ipod_import.cli.scan_music_library") as full_scan, \
+				patch("crate_music_importer.ipod_import.cli.scan_music_library_for_health") as full_scan, \
 				contextlib.redirect_stdout(io.StringIO()):
 				self.assertEqual(cli.run(["preview", "--spotify-fixture", str(FIXTURES / "spotify_playlist.json"), "--json"]), 0)
 				self.assertEqual(cli.run(["import", "https://open.spotify.com/playlist/37i9dQZF1DXTESTFIXTURE1", "--confirm-download"]), 0)

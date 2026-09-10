@@ -216,11 +216,11 @@ export function SourcePreviewView({ type, url }: { type: "album" | "playlist"; u
           actions={
             <ActionPanel>
               <Action title="Try Again" icon={Icon.ArrowClockwise} onAction={load} />
-              {error.includes("Rebuild Music Library Cache") ? (
+              {error.includes("Music library cache") ? (
                 <Action
-                  title="Open Rebuild Music Library Cache"
+                  title="Open Library Health & Updates"
                   icon={Icon.HardDrive}
-                  onAction={() => launchCommand({ name: "rebuild-music-cache", type: LaunchType.UserInitiated })}
+                  onAction={() => launchCommand({ name: "update-dependencies", type: LaunchType.UserInitiated })}
                 />
               ) : null}
             </ActionPanel>

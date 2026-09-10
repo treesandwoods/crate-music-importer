@@ -429,13 +429,13 @@ def resolve_music(
 	index = MusicIndex(scan() if scan else music_cache_tracks(load_music_cache(paths)))
 	cached = index.by_persistent_id.get(persistent_id)
 	if not cached:
-		raise ValueError("The selected Music track is no longer present in the Music library cache. Run ‘Rebuild Music Library Cache’.")
+		raise ValueError("The selected Music track is no longer present in the Music library cache. Refresh Library Health.")
 	candidate = cached if scan else lookup_music_track(persistent_id)
 	valid, reason = validate_exact_track(cached, candidate)
 	if not valid:
 		if not scan:
 			mark_music_cache_entry_stale(paths, persistent_id, reason)
-		raise ValueError(f"The selected Music track changed: {reason}. Run ‘Rebuild Music Library Cache’.")
+		raise ValueError(f"The selected Music track changed: {reason}. Refresh Library Health.")
 	assert candidate is not None
 	score, reasons = score_music_candidate(recording["source_metadata"], candidate)
 	if score < MUSIC_CONFIDENCE_MIN:

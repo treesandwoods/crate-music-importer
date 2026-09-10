@@ -36,13 +36,6 @@
       "mode": "view"
     },
     {
-      "name": "rebuild-music-cache",
-      "title": "Rebuild Music Library Cache",
-      "subtitle": "Crate Music Importer",
-      "description": "Deliberately perform one read-only Music-library scan for fast, duplicate-safe previews.",
-      "mode": "view"
-    },
-    {
       "name": "update-dependencies",
       "title": "Library Health & Updates",
       "subtitle": "Crate Music Importer",

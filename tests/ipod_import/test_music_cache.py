@@ -11,7 +11,7 @@ from crate_music_importer.ipod_import.music_cache import (
 	mark_music_cache_entry_stale,
 	music_cache_tracks,
 	new_partial_cache,
-	rebuild_music_cache,
+	refresh_music_cache,
 	save_music_cache,
 	upsert_music_cache_track,
 	validate_exact_track,
@@ -39,66 +39,54 @@ def track(persistent_id: str = "PID", *, title: str = "Song") -> dict:
 
 
 class MusicCacheTests(unittest.TestCase):
-	def test_missing_cache_has_deliberate_rebuild_instruction(self):
+	def test_missing_cache_directs_user_to_library_health(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")
-			with self.assertRaisesRegex(MusicCacheUnavailableError, "Rebuild Music Library Cache"):
+			with self.assertRaisesRegex(MusicCacheUnavailableError, "Library Health"):
 				load_music_cache(paths)
 			self.assertFalse(paths.root.exists())
 
-	def test_rebuild_is_atomic_and_uses_only_supplied_read_only_scan(self):
+	def test_refresh_is_atomic_and_uses_only_supplied_tracks(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")
 			manifest = new_manifest(paths)
-			calls = []
-			result = rebuild_music_cache(paths, manifest, scan=lambda: calls.append("scan") or [track()])
-			self.assertEqual(calls, ["scan"])
-			self.assertEqual(result["cached_tracks"], 1)
+			result = refresh_music_cache(paths, manifest, [track()])
+			self.assertEqual(result["total_cached_tracks"], 1)
 			self.assertTrue(load_music_cache(paths)["initial_scan_completed"])
 			self.assertFalse(list(paths.state_dir.glob("*.tmp")))
-
-	def test_failed_rebuild_preserves_previous_cache(self):
-		with tempfile.TemporaryDirectory() as directory:
-			paths = ManagedPaths(Path(directory) / "managed")
-			manifest = new_manifest(paths)
-			rebuild_music_cache(paths, manifest, scan=lambda: [track(title="Original")])
-			before = paths.music_cache.read_bytes()
-			with self.assertRaisesRegex(RuntimeError, "scan failed"):
-				rebuild_music_cache(paths, manifest, scan=lambda: (_ for _ in ()).throw(RuntimeError("scan failed")))
-			self.assertEqual(paths.music_cache.read_bytes(), before)
 
 	def test_duplicate_persistent_id_aborts_without_replacing_cache(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")
 			manifest = new_manifest(paths)
-			rebuild_music_cache(paths, manifest, scan=lambda: [track(title="Original")])
+			refresh_music_cache(paths, manifest, [track(title="Original")])
 			before = paths.music_cache.read_bytes()
 			with self.assertRaisesRegex(MusicCacheError, "duplicate persistent ID"):
-				rebuild_music_cache(paths, manifest, scan=lambda: [track(title="One"), track(title="Two")])
+				refresh_music_cache(paths, manifest, [track(title="One"), track(title="Two")])
 			self.assertEqual(paths.music_cache.read_bytes(), before)
 
 	def test_incremental_updates_replace_same_persistent_id_without_duplicates(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")
 			manifest = new_manifest(paths)
-			rebuild_music_cache(paths, manifest, scan=lambda: [track()])
+			refresh_music_cache(paths, manifest, [track()])
 			upsert_music_cache_track(paths, track(title="Retagged"))
 			upsert_music_cache_track(paths, track(title="Retagged Again"))
 			cache = load_music_cache(paths)
 			self.assertEqual(cache["total_cached_tracks"], 1)
 			self.assertEqual(cache["tracks"]["PID"]["title"], "Retagged Again")
 
-	def test_manual_rebuild_refreshes_changed_tracks_and_removes_deleted_tracks(self):
+	def test_refresh_replaces_changed_tracks_and_removes_deleted_tracks(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")
 			manifest = new_manifest(paths)
-			rebuild_music_cache(paths, manifest, scan=lambda: [track("ONE"), track("TWO")])
-			rebuild_music_cache(paths, manifest, scan=lambda: [track("ONE", title="Changed")])
+			refresh_music_cache(paths, manifest, [track("ONE"), track("TWO")])
+			refresh_music_cache(paths, manifest, [track("ONE", title="Changed")])
 			cache = load_music_cache(paths)
 			self.assertEqual(set(cache["tracks"]), {"ONE"})
 			self.assertEqual(cache["tracks"]["ONE"]["title"], "Changed")
 
-	def test_full_rebuild_retains_missing_manifest_metadata_only_as_stale_migration_data(self):
+	def test_full_scan_retains_missing_manifest_metadata_only_as_stale_migration_data(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")
 			manifest = new_manifest(paths)

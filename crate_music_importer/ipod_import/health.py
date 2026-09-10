@@ -215,7 +215,7 @@ def _build_health_report(
 	try:
 		cache = load_music_cache(paths, require_complete=False)
 		if not cache.get("initial_scan_completed"):
-			add("incomplete_cache", "The persistent Music cache has not completed its initial scan.", [], next_step="Run Rebuild Music Library Cache.")
+			add("incomplete_cache", "The persistent Music cache has not completed its initial scan.", [], next_step="Refresh Library Health.")
 		for pid, cached in cache["tracks"].items():
 			live = by_pid.get(pid, [])
 			cached_location = str(cached.get("location") or "")
@@ -224,16 +224,16 @@ def _build_health_report(
 			# authoritative health scan already resolved this exact persistent ID.
 			location_changed = bool(cached_location) and any(str(item["track"].get("location") or "") != cached_location for item in live)
 			if cached.get("stale") or cached.get("validation_required") or not live or location_changed:
-				add("stale_cache_reference", "Cached reference is stale, incomplete, or differs from the full Music scan.", live or [{"track": cached, "persistent_id": pid, "path": str(cached.get("location") or ""), "recordingIds": sorted(refs.get(pid, [])), "ownership": "importer_referenced" if refs.get(pid) else "user_owned", "evidence": {}}], evidence=cached, next_step="Run Rebuild Music Library Cache.")
+				add("stale_cache_reference", "Cached reference is stale, incomplete, or differs from the full Music scan.", live or [{"track": cached, "persistent_id": pid, "path": str(cached.get("location") or ""), "recordingIds": sorted(refs.get(pid, [])), "ownership": "importer_referenced" if refs.get(pid) else "user_owned", "evidence": {}}], evidence=cached, next_step="Refresh Library Health.")
 		migration = cache.get("migration") or {}
 		pending = sorted(set(migration.get("incomplete_persistent_ids") or []) | set(migration.get("entries_requiring_validation") or {}))
 		if pending:
-			add("incomplete_cache", "Cache migration references still require validation.", [], evidence={"persistentIds": pending}, next_step="Run Rebuild Music Library Cache.")
+			add("incomplete_cache", "Cache migration references still require validation.", [], evidence={"persistentIds": pending}, next_step="Refresh Library Health.")
 		missing = sorted(set(by_pid) - set(cache["tracks"]))
 		if missing:
-			add("incomplete_cache", "Music IDs are absent from the persistent cache.", [], evidence={"missingPersistentIds": missing}, next_step="Run Rebuild Music Library Cache.")
+			add("incomplete_cache", "Music IDs are absent from the persistent cache.", [], evidence={"missingPersistentIds": missing}, next_step="Refresh Library Health.")
 	except Exception as exc:
-		add("cache_unavailable", str(exc), [], next_step="Run Rebuild Music Library Cache.")
+		add("cache_unavailable", str(exc), [], next_step="Refresh Library Health.")
 
 	files: dict[str, list[dict[str, Any]]] = defaultdict(list)
 	for entry in entries:

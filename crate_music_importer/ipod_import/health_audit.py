@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from crate_music_importer.ipod_import.health import build_health_report, failed_health_report, save_health_report
 from crate_music_importer.ipod_import.manifest import ManagedPaths, load_manifest
 from crate_music_importer.ipod_import.music import scan_music_library_for_health
+from crate_music_importer.ipod_import.music_cache import refresh_music_cache
 from crate_music_importer.ipod_import.dependency_lock import dependency_lock
 
 
@@ -139,7 +140,12 @@ def run_worker(paths: ManagedPaths, run_id: str) -> None:
 			with _lock(paths):
 				_save(paths, state)
 			manifest = load_manifest(paths)
-			report = build_health_report(paths, manifest, scan_music_library_for_health(), on_progress=progress, deep_all=state["mode"] == "deep")
+			music_tracks = scan_music_library_for_health()
+			state.update(phase="Refreshing preview index", updatedAt=_now())
+			with _lock(paths):
+				_save(paths, state)
+			refresh_music_cache(paths, manifest, music_tracks)
+			report = build_health_report(paths, manifest, music_tracks, on_progress=progress, deep_all=state["mode"] == "deep")
 	except Exception as exc:
 		report = failed_health_report(str(exc))
 	report["checkedAt"] = _now()

@@ -1,13 +1,6 @@
 import { backendCommand } from "./runtime";
 
-import type {
-  ImportJob,
-  JobsSnapshot,
-  MusicCacheRebuildResult,
-  ResolverSnapshot,
-  SourcePreview,
-  YouTubeSearchResult,
-} from "./types";
+import type { ImportJob, JobsSnapshot, ResolverSnapshot, SourcePreview, YouTubeSearchResult } from "./types";
 
 function errorMessage(error: unknown): string {
   if (error && typeof error === "object") {
@@ -58,10 +51,6 @@ export function loadSnapshot(): Promise<ResolverSnapshot> {
 
 export function previewSource(type: "album" | "playlist", url: string): Promise<SourcePreview> {
   return runJson<SourcePreview>([type === "album" ? "album-preview" : "preview", url, "--json"], 660_000);
-}
-
-export function rebuildMusicCache(): Promise<MusicCacheRebuildResult> {
-  return runJson<MusicCacheRebuildResult>(["rebuild-music-cache", "--confirm-read-only-scan", "--json"], 900_000);
 }
 
 export function loadJobs(): Promise<JobsSnapshot> {

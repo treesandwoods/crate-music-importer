@@ -6,9 +6,8 @@ import copy
 import json
 import os
 import tempfile
-import time
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any
 
 from crate_music_importer.ipod_import.identity import clean_release_labels, normalize_recording_title, normalize_text
 from crate_music_importer.ipod_import.manifest import ManagedPaths
@@ -16,7 +15,7 @@ from crate_music_importer.ipod_import.manifest import ManagedPaths
 
 MUSIC_CACHE_SCHEMA_VERSION = 1
 MUSIC_CACHE_MIGRATION_VERSION = 1
-REBUILD_INSTRUCTION = "Run the Raycast command ‘Rebuild Music Library Cache’ before previewing or importing."
+CACHE_REFRESH_INSTRUCTION = "Run or refresh Library Health before previewing or importing."
 
 
 class MusicCacheError(RuntimeError):
@@ -112,7 +111,7 @@ def new_partial_cache(paths: ManagedPaths, manifest: dict[str, Any]) -> dict[str
 		"managed_root": str(paths.root),
 		"created_at": now,
 		"updated_at": now,
-		"last_full_rebuild_at": None,
+		"last_full_scan_at": None,
 		"total_cached_tracks": len(tracks),
 		"initial_scan_completed": False,
 		"migration": {
@@ -127,34 +126,34 @@ def new_partial_cache(paths: ManagedPaths, manifest: dict[str, Any]) -> dict[str
 
 def _validate_cache(cache: Any, paths: ManagedPaths) -> dict[str, Any]:
 	if not isinstance(cache, dict):
-		raise MusicCacheUnavailableError(f"The Music library cache is invalid. {REBUILD_INSTRUCTION}")
+		raise MusicCacheUnavailableError(f"The Music library cache is invalid. {CACHE_REFRESH_INSTRUCTION}")
 	if cache.get("schema_version") != MUSIC_CACHE_SCHEMA_VERSION:
-		raise MusicCacheUnavailableError(f"The Music library cache uses an unsupported format. {REBUILD_INSTRUCTION}")
+		raise MusicCacheUnavailableError(f"The Music library cache uses an unsupported format. {CACHE_REFRESH_INSTRUCTION}")
 	if cache.get("managed_root") != str(paths.root):
-		raise MusicCacheUnavailableError(f"The Music library cache belongs to a different managed library. {REBUILD_INSTRUCTION}")
+		raise MusicCacheUnavailableError(f"The Music library cache belongs to a different managed library. {CACHE_REFRESH_INSTRUCTION}")
 	tracks = cache.get("tracks")
 	if not isinstance(tracks, dict):
-		raise MusicCacheUnavailableError(f"The Music library cache has no valid track index. {REBUILD_INSTRUCTION}")
+		raise MusicCacheUnavailableError(f"The Music library cache has no valid track index. {CACHE_REFRESH_INSTRUCTION}")
 	for persistent_id, track in tracks.items():
 		if not persistent_id or not isinstance(track, dict) or str(track.get("persistent_id") or "") != persistent_id:
-			raise MusicCacheUnavailableError(f"The Music library cache contains an invalid track entry. {REBUILD_INSTRUCTION}")
+			raise MusicCacheUnavailableError(f"The Music library cache contains an invalid track entry. {CACHE_REFRESH_INSTRUCTION}")
 	if _integer(cache.get("total_cached_tracks")) != len(tracks):
-		raise MusicCacheUnavailableError(f"The Music library cache track count is inconsistent. {REBUILD_INSTRUCTION}")
+		raise MusicCacheUnavailableError(f"The Music library cache track count is inconsistent. {CACHE_REFRESH_INSTRUCTION}")
 	return cache
 
 
 def load_music_cache(paths: ManagedPaths, *, require_complete: bool = True) -> dict[str, Any]:
 	if not paths.music_cache.is_file():
-		raise MusicCacheUnavailableError(f"The one-time Music library cache has not been created. {REBUILD_INSTRUCTION}")
+		raise MusicCacheUnavailableError(f"The Music library cache has not been created. {CACHE_REFRESH_INSTRUCTION}")
 	try:
 		with paths.music_cache.open("r", encoding="utf-8") as handle:
 			cache = _validate_cache(json.load(handle), paths)
 	except MusicCacheUnavailableError:
 		raise
 	except (OSError, ValueError) as exc:
-		raise MusicCacheUnavailableError(f"The Music library cache could not be read safely. {REBUILD_INSTRUCTION}") from exc
+		raise MusicCacheUnavailableError(f"The Music library cache could not be read safely. {CACHE_REFRESH_INSTRUCTION}") from exc
 	if require_complete and not cache.get("initial_scan_completed"):
-		raise MusicCacheUnavailableError(f"The migrated Music cache is incomplete and cannot be used for matching. {REBUILD_INSTRUCTION}")
+		raise MusicCacheUnavailableError(f"The migrated Music cache is incomplete and cannot be used for matching. {CACHE_REFRESH_INSTRUCTION}")
 	return cache
 
 
@@ -222,7 +221,7 @@ def build_full_cache(
 		"managed_root": str(paths.root),
 		"created_at": str((previous or {}).get("created_at") or now),
 		"updated_at": now,
-		"last_full_rebuild_at": now,
+		"last_full_scan_at": now,
 		"total_cached_tracks": len(indexed),
 		"initial_scan_completed": True,
 		"migration": {
@@ -237,17 +236,12 @@ def build_full_cache(
 	}
 
 
-def rebuild_music_cache(
+def refresh_music_cache(
 	paths: ManagedPaths,
 	manifest: dict[str, Any],
-	*,
-	scan: Callable[[], list[dict[str, Any]]],
-	progress: Callable[[dict[str, Any]], None] | None = None,
+	tracks: list[dict[str, Any]],
 ) -> dict[str, Any]:
-	started = time.monotonic()
-	if progress:
-		progress({"phase": "scanning_music_read_only", "message": "Reading the complete Music library. Music will not be changed."})
-	tracks = scan()
+	"""Atomically refresh the preview index from an already completed Music scan."""
 	previous = None
 	if paths.music_cache.is_file():
 		try:
@@ -256,17 +250,7 @@ def rebuild_music_cache(
 			previous = None
 	cache = build_full_cache(paths, manifest, tracks, previous=previous)
 	save_music_cache(paths, cache)
-	elapsed = time.monotonic() - started
-	result = {
-		"cache_path": str(paths.music_cache),
-		"cached_tracks": cache["total_cached_tracks"],
-		"elapsed_seconds": round(elapsed, 3),
-		"initial_scan_completed": True,
-		"last_full_rebuild_at": cache["last_full_rebuild_at"],
-	}
-	if progress:
-		progress({"phase": "cache_rebuild_complete", **result})
-	return result
+	return cache
 
 
 def upsert_music_cache_track(paths: ManagedPaths, track: dict[str, Any]) -> None:
