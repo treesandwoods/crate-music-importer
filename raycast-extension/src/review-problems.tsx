@@ -169,6 +169,8 @@ function ContinueSourceAction({
           const job = await queueSource(source.type, source.url, {
             name: source.name,
             total: source.itemCount,
+            mode: source.mode,
+            savedPlaylistId: source.mode === "update" ? source.id : undefined,
           });
           updateToast(
             toast,
@@ -195,7 +197,12 @@ async function continueSourcesMadeReady(problem: ResolverProblem): Promise<numbe
   const snapshot = await loadSnapshot();
   const ready = snapshot.readySources.filter((source) => affected.has(`${source.type}:${source.id}`));
   for (const source of ready) {
-    await queueSource(source.type, source.url, { name: source.name, total: source.itemCount });
+    await queueSource(source.type, source.url, {
+      name: source.name,
+      total: source.itemCount,
+      mode: source.mode,
+      savedPlaylistId: source.mode === "update" ? source.id : undefined,
+    });
   }
   return ready.length;
 }
@@ -513,7 +520,7 @@ function jobDetail(job: ImportJob): string {
   const summary = job.status === "complete" || !progress ? "" : `\n\n${progress}`;
   return `# ${markdownText(job.source.name)}
 
-**${job.source.type === "album" ? "Album" : "Playlist"} · ${jobPhaseLabel(job)}**${summary}${current}
+**${job.mode === "update" ? "Playlist Update" : job.source.type === "album" ? "Album" : "Playlist"} · ${jobPhaseLabel(job)}**${summary}${current}
 
 ### Tracks
 
@@ -521,16 +528,18 @@ ${tracks}${error}`;
 }
 
 function CancelProgressAction({ job, refresh }: { job: ImportJob; refresh: () => Promise<void> }) {
+  const update = job.mode === "update";
   return (
     <Action
-      title="Cancel and Delete Progress"
+      title={update ? "Cancel Update and Keep Progress" : "Cancel and Delete Progress"}
       icon={Icon.Trash}
       style={Action.Style.Destructive}
       onAction={async () => {
         const confirmed = await confirmAlert({
-          title: "Cancel and delete progress?",
-          message:
-            "This removes the unfinished source and every unshared track created by this attempt from Music, the cache, the manifest, and managed files. Tracks that were already cached before the attempt and shared tracks are kept.",
+          title: update ? "Cancel this update?" : "Cancel and delete progress?",
+          message: update
+            ? "This stops the update job and keeps the saved playlist, downloaded additions, manifest checkpoints, Music items, and managed files for a later retry."
+            : "This removes the unfinished source and every unshared track created by this attempt from Music, the cache, the manifest, and managed files. Tracks that were already cached before the attempt and shared tracks are kept.",
           primaryAction: { title: "Cancel and Delete", style: Alert.ActionStyle.Destructive },
           dismissAction: { title: "Keep", style: Alert.ActionStyle.Cancel },
         });

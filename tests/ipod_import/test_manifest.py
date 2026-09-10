@@ -4,8 +4,10 @@ from pathlib import Path
 
 from crate_music_importer.ipod_import.manifest import (
 	ManagedPaths,
+	load_manifest,
 	new_manifest,
 	playlist_m3u8,
+	save_manifest,
 	set_album,
 	set_playlist,
 	upsert_recording,
@@ -14,6 +16,14 @@ from crate_music_importer.ipod_import.manifest import (
 
 
 class ManifestTests(unittest.TestCase):
+	def test_known_legacy_playlist_links_are_seeded_without_machine_specific_state(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory))
+			manifest = new_manifest(paths)
+			manifest["playlists"]["7e9ZbYY2MshqF4APO1GdMm"] = {"name": "time", "spotify_url": "", "items": []}
+			save_manifest(paths, manifest)
+			self.assertEqual(load_manifest(paths)["playlists"]["7e9ZbYY2MshqF4APO1GdMm"]["spotify_url"], "https://open.spotify.com/playlist/7e9ZbYY2MshqF4APO1GdMm")
+
 	def test_user_title_survives_source_refresh(self):
 		with tempfile.TemporaryDirectory() as directory:
 			manifest = new_manifest(ManagedPaths(Path(directory)))
@@ -207,3 +217,4 @@ class ManifestTests(unittest.TestCase):
 
 if __name__ == "__main__":
 	unittest.main()
+	save_manifest,

@@ -1,6 +1,15 @@
 import { backendCommand } from "./runtime";
+import { playlistUpdateQueueArgs } from "./playlist-update-model";
 
-import type { ImportJob, JobsSnapshot, ResolverSnapshot, SourcePreview, YouTubeSearchResult } from "./types";
+import type {
+  ImportJob,
+  JobsSnapshot,
+  PlaylistUpdatePreview,
+  ResolverSnapshot,
+  SavedPlaylistSummary,
+  SourcePreview,
+  YouTubeSearchResult,
+} from "./types";
 
 function errorMessage(error: unknown): string {
   if (error && typeof error === "object") {
@@ -53,6 +62,28 @@ export function previewSource(type: "album" | "playlist", url: string): Promise<
   return runJson<SourcePreview>([type === "album" ? "album-preview" : "preview", url, "--json"], 660_000);
 }
 
+export async function loadSavedPlaylists(): Promise<SavedPlaylistSummary[]> {
+  return (await runJson<{ playlists: SavedPlaylistSummary[] }>(["saved-playlists", "--json"])).playlists;
+}
+
+export function previewPlaylistUpdate(playlistId: string): Promise<PlaylistUpdatePreview> {
+  return runJson<PlaylistUpdatePreview>(["playlist-update-preview", playlistId, "--json"], 660_000);
+}
+
+export function changePlaylistLink(
+  playlistId: string,
+  url: string,
+): Promise<{ playlist_id: string; spotify_url: string }> {
+  return runJson(["playlist-link-set", playlistId, url, "--confirm"]);
+}
+
+export function queuePlaylistUpdate(
+  playlist: SavedPlaylistSummary,
+  preview: PlaylistUpdatePreview,
+): Promise<ImportJob> {
+  return runRaycastJson<ImportJob>(playlistUpdateQueueArgs(playlist, preview));
+}
+
 export function loadJobs(): Promise<JobsSnapshot> {
   return runRaycastJson<JobsSnapshot>(["jobs-json"]);
 }
@@ -98,6 +129,8 @@ export function queueSource(
   seed?: {
     name: string;
     total: number;
+    mode?: "import" | "update";
+    savedPlaylistId?: string;
     tracks?: Array<{
       position: number;
       trackNumber: number;
@@ -108,7 +141,8 @@ export function queueSource(
     }>;
   },
 ): Promise<ImportJob> {
-  const action = type === "album" ? "album_combined" : "playlist_combined";
+  const action =
+    seed?.mode === "update" ? "playlist_update_combined" : type === "album" ? "album_combined" : "playlist_combined";
   const args = ["queue-json", action, url];
   if (seed) args.push(JSON.stringify(seed));
   return runRaycastJson<ImportJob>(args);

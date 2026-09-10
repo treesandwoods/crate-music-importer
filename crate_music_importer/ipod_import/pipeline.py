@@ -690,6 +690,7 @@ def execute_import(
 	search: Callable[[dict[str, Any]], list[dict[str, Any]]] = search_candidates,
 	download: Callable[..., dict[str, Any]] = download_recording,
 	retag_artwork: Callable[..., dict[str, Any]] = retag_managed_recording_artwork,
+	items_override: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
 	manifest = preview.manifest
 	playlist = manifest["playlists"][preview.playlist_id]
@@ -697,8 +698,9 @@ def execute_import(
 		raise ValueError(playlist.get("warning") or "Spotify did not expose the complete ordered playlist.")
 	paths.create()
 	save_manifest(paths, manifest)
+	work_items = items_override if items_override is not None else playlist["items"]
 	processed: set[str] = set()
-	for item in sorted(playlist["items"], key=lambda value: int(value["position"])):
+	for item in sorted(work_items, key=lambda value: int(value["position"])):
 		key = item["recording_id"]
 		if key in processed:
 			continue
@@ -780,7 +782,7 @@ def execute_import(
 			_progress(on_progress, "failed", recording_id=key, position=int(item["position"]), title=recording["source_metadata"].get("title") or "", artists=recording["source_metadata"].get("artists") or "", error=str(exc))
 		finally:
 			save_manifest(paths, manifest)
-	for item in playlist["items"]:
+	for item in work_items:
 		recording = manifest["recordings"][item["recording_id"]]
 		active = recording.get("active_reference") or {}
 		music = recording.get("music") or {}
@@ -1263,6 +1265,23 @@ def apply_to_music(
 		_progress(on_progress, "complete", recording_id=recording["recording_id"], position=int(item["position"]), title=recording["source_metadata"].get("title") or "", artists=recording["source_metadata"].get("artists") or "")
 	playlist_pid = sync_music_playlist(playlist["name"], known_playlist_id, ordered_ids)
 	playlist["music_playlist_persistent_id"] = playlist_pid
+	playlist["spotify_occurrence_snapshot"] = [
+		{
+			"spotify_id": str(item.get("spotify_id") or ""),
+			"recording_id": str(item.get("recording_id") or ""),
+			"spotify_position": int(item.get("spotify_position") or item.get("position") or position),
+			"saved_position": int(item.get("position") or position),
+		}
+		for position, item in enumerate(sorted(playlist["items"], key=lambda value: int(value["position"])), start=1)
+	]
+	playlist["spotify_occurrence_counts"] = {}
+	for occurrence in playlist["spotify_occurrence_snapshot"]:
+		spotify_id = occurrence["spotify_id"]
+		if spotify_id:
+			playlist["spotify_occurrence_counts"][spotify_id] = int(playlist["spotify_occurrence_counts"].get(spotify_id) or 0) + 1
+	playlist["latest_observed_spotify_snapshot"] = list(playlist["spotify_occurrence_snapshot"])
+	playlist["latest_observed_spotify_counts"] = dict(playlist["spotify_occurrence_counts"])
+	playlist["last_successful_update_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 	write_playlist_m3u8(manifest, playlist_id, paths)
 	save_manifest(paths, manifest)
 	return {"playlist_persistent_id": playlist_pid, "new_imports": new_imports, "track_count": len(ordered_ids)}

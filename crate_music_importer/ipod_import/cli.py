@@ -5,11 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 from crate_music_importer.ipod_import.constants import MANAGED_ROOT
-from crate_music_importer.ipod_import.manifest import ManagedPaths, load_manifest
+from crate_music_importer.ipod_import.manifest import ManagedPaths, load_manifest, save_manifest, seed_known_playlist_urls, update_manifest
 from crate_music_importer.ipod_import.media import check_tools
 from crate_music_importer.ipod_import.music import load_music_fixture, lookup_importer_owned_music_track, lookup_music_track, scan_music_library_for_health, verify_music_tracks
 from crate_music_importer.ipod_import.music_cache import (
@@ -28,6 +29,12 @@ from crate_music_importer.ipod_import.pipeline import (
 	execute_album_import,
 	execute_import,
 	promote_recording,
+)
+from crate_music_importer.ipod_import.playlist_update import (
+	apply_playlist_update,
+	build_playlist_update_preview,
+	save_pending_update,
+	saved_playlists,
 )
 from crate_music_importer.ipod_import.resolver import (
 	resolve_music as resolve_music_choice,
@@ -58,6 +65,24 @@ def _parser() -> argparse.ArgumentParser:
 	apply = subparsers.add_parser("apply", help="Import only new managed MP3s and idempotently update one Music playlist.")
 	apply.add_argument("playlist", help="Spotify playlist ID, Spotify URL, or exact saved playlist name")
 	apply.add_argument("--confirm-music-write", action="store_true", required=True)
+
+	subparsers.add_parser("saved-playlists", help="List saved imported playlists and stored Spotify links.").add_argument("--json", action="store_true")
+	update_preview = subparsers.add_parser("playlist-update-preview", help="Preview occurrence additions and itemized removals for a saved playlist.")
+	update_preview.add_argument("playlist")
+	update_preview.add_argument("--spotify-fixture", type=Path, help=argparse.SUPPRESS)
+	update_preview.add_argument("--music-fixture", type=Path, help=argparse.SUPPRESS)
+	update_preview.add_argument("--json", action="store_true")
+	update_prepare = subparsers.add_parser("playlist-update-prepare", help="Prepare only new occurrences for a confirmed combined update.")
+	update_prepare.add_argument("playlist")
+	update_prepare.add_argument("--confirmation-token")
+	update_prepare.add_argument("--confirm-download", action="store_true", required=True)
+	update_apply = subparsers.add_parser("playlist-update-apply", help="Apply a confirmed append/removal update without clearing the playlist.")
+	update_apply.add_argument("playlist")
+	update_apply.add_argument("--confirm-music-write", action="store_true", required=True)
+	link = subparsers.add_parser("playlist-link-set", help="Change the stored Spotify link for a saved imported playlist.")
+	link.add_argument("playlist")
+	link.add_argument("url")
+	link.add_argument("--confirm", action="store_true", required=True)
 
 	review = subparsers.add_parser("review", help="List unresolved/ambiguous recordings and candidates.")
 	review.add_argument("playlist", nargs="?")
@@ -155,6 +180,19 @@ def _album(args: argparse.Namespace) -> dict[str, Any]:
 def _music_tracks(args: argparse.Namespace, paths: ManagedPaths) -> list[dict[str, Any]]:
 	fixture = getattr(args, "music_fixture", None)
 	return load_music_fixture(fixture) if fixture else music_cache_tracks(load_music_cache(paths))
+
+
+def _current_saved_playlist(args: argparse.Namespace, manifest: dict[str, Any], playlist_id: str) -> dict[str, Any]:
+	if getattr(args, "spotify_fixture", None):
+		current = load_fixture(args.spotify_fixture).to_dict()
+	else:
+		url = str(manifest["playlists"][playlist_id].get("spotify_url") or "")
+		if not url:
+			raise ValueError("This saved playlist has no Spotify link. Use Change Stored Spotify Link first.")
+		current = fetch_playlist(url, known_track_covers=_known_playlist_track_covers(manifest)).to_dict()
+	current["fetched_spotify_playlist_id"] = current.get("id")
+	current["id"] = playlist_id
+	return current
 
 
 def _find_playlist_id(manifest: dict[str, Any], value: str) -> str:
@@ -363,6 +401,56 @@ def _run(
 		print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else f"Library health: {result['status']}\n{json.dumps(result, ensure_ascii=False, indent=2)}")
 		return 0
 	manifest = load_manifest(paths)
+	if args.command == "saved-playlists":
+		update_manifest(paths, seed_known_playlist_urls)
+		manifest = load_manifest(paths)
+		values = saved_playlists(manifest)
+		print(json.dumps({"playlists": values}, ensure_ascii=False, indent=2) if args.json else "\n".join(f"{value['name']}\t{value['track_count']}\t{value['spotify_url']}" for value in values))
+		return 0
+	if args.command == "playlist-link-set":
+		playlist_id = _find_playlist_id(manifest, args.playlist)
+		_, canonical = parse_playlist_url(args.url)
+		manifest["playlists"][playlist_id]["spotify_url"] = canonical
+		manifest["playlists"][playlist_id]["updated_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+		save_manifest(paths, manifest)
+		print(json.dumps({"playlist_id": playlist_id, "spotify_url": canonical}, ensure_ascii=False))
+		return 0
+	if args.command == "playlist-update-preview":
+		playlist_id = _find_playlist_id(manifest, args.playlist)
+		current = _current_saved_playlist(args, manifest, playlist_id)
+		preview = build_playlist_update_preview(current, _music_tracks(args, paths), manifest, paths)
+		print(json.dumps(preview.to_dict(), ensure_ascii=False, indent=2) if args.json else f"{len(preview.additions)} additions; {len(preview.removals)} removals; {preview.state}")
+		return 0
+	if args.command == "playlist-update-prepare":
+		playlist_id = _find_playlist_id(manifest, args.playlist)
+		current = _current_saved_playlist(args, manifest, playlist_id)
+		preview = build_playlist_update_preview(current, music_cache_tracks(load_music_cache(paths)), manifest, paths)
+		if preview.state != "ready":
+			raise ValueError(preview.warning or "Playlist is up to date; no update was queued.")
+		if preview.removals and args.confirmation_token != preview.confirmation_token():
+			raise ValueError("The playlist changed after its destructive preview. Refresh and confirm the itemized removals again.")
+		if preview.addition_items:
+			check_tools()
+			execute_import(preview=type("AdditionPreview", (), {"manifest": preview.manifest, "playlist_id": playlist_id})(), paths=paths, on_output=print, on_progress=on_progress, items_override=preview.addition_items)
+		save_pending_update(preview, paths)
+		print(f"Prepared {len(preview.additions)} additions and {len(preview.removals)} removals.")
+		statuses = {str(item.get("status") or "") for item in preview.addition_items}
+		return 2 if statuses & {"review_required", "failed", "review_music"} else 0
+	if args.command == "playlist-update-apply":
+		playlist_id = _find_playlist_id(manifest, args.playlist)
+		result = apply_playlist_update(
+			manifest,
+			playlist_id,
+			paths,
+			music_cache_tracks(load_music_cache(paths)),
+			exact_lookup=lookup_music_track,
+			cache_updater=lambda track: upsert_music_cache_track(paths, track),
+			cache_remover=lambda persistent_ids: remove_music_cache_tracks(paths, persistent_ids),
+			on_progress=on_progress,
+		)
+		print(f"Playlist update complete: {result['additions']} additions; {result['removals']} removals; {result['deleted']} permanently deleted.")
+		print("Finder/iPod sync settings were not touched.")
+		return 0
 	if args.command == "status":
 		managed = sum(1 for recording in manifest["recordings"].values() if (recording.get("active_reference") or {}).get("kind") == "managed_file")
 		reused = sum(1 for recording in manifest["recordings"].values() if (recording.get("active_reference") or {}).get("kind") == "existing_music")

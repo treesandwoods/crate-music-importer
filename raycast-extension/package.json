@@ -23,9 +23,9 @@
     },
     {
       "name": "import-playlist-link",
-      "title": "Playlist Link Import",
+      "title": "Playlists Browse & Import",
       "subtitle": "Crate Music Importer",
-      "description": "Preview a public Spotify playlist link before downloading and adding it to Music.",
+      "description": "Import a public Spotify playlist or preview additions and removals for a saved import.",
       "mode": "view"
     },
     {

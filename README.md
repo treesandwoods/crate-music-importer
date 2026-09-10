@@ -69,11 +69,13 @@ This uses Authorization Code with PKCE; no client secret is used or shipped. Tok
 Open **Library Health & Updates** and run **Library Health Audit** once. This read-only Music scan also prepares the saved index used by previews. Allow Raycast to control Music when macOS asks. In **System Settings → Privacy & Security → Automation**, grant access to the process you use: Raycast for the extension, or Terminal for the CLI. Grant file access to the configured Music directory if requested.
 
 - **Albums Browse & Import**: search Spotify, preview an album, and deliberately queue Download + Add to Music.
-- **Playlist Link Import**: preview a public Spotify playlist URL and confirm its import.
+- **Playlists Browse & Import**: import a new public Spotify playlist, or select a saved import to preview and confirm an additions-and-removals update.
 - **Review Activity & Problems**: follow durable jobs, resolve ambiguous Music/YouTube matches, retry failed work, or cancel incomplete progress.
 - **Library Health & Updates**: show saved library health findings and check stable downloader updates; explicitly start a durable read-only audit; review findings or confirm eligible updates.
 
 Previews use the persistent cache. Final Music writes revalidate exact persistent IDs. The importer preserves user-owned tracks and playlist memberships. Reusing an importer-owned playlist recording in a real album can update that same Music item in place when ownership is proven; ambiguous ownership or conflicting real albums stop for review.
+
+Saved-playlist updates compare Spotify track IDs by occurrence count against the last successful snapshot. Reorders and moves are no-ops. New occurrences are appended in their current Spotify order, while surviving Music entries keep their existing order. Manually added Music playlist entries are authoritative and are never removed by this diff. Every removed imported occurrence is itemized before confirmation: a track still referenced by another imported playlist or full album is unlinked only; an importer-owned `Playlist Imports` track whose sole reference is this playlist is labeled **delete permanently** and, only after confirmation, removed from Music, the cache, the manifest, and managed storage. Incomplete Spotify fetches block updates, and legacy playlists with an incomplete ID baseline defer removals for their first additions-only update. These operations do not change Finder or iPod whole-library sync settings.
 
 Automatic YouTube selection requires a score strictly greater than `0.87`. Manual choices remain deliberate. Incomplete Spotify responses, missing per-track artwork, and incorrect downloaded durations stop progress instead of silently producing partial or incorrect imports.
 

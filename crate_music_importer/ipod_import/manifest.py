@@ -24,6 +24,23 @@ _YOUTUBE_SELECTION_ERRORS = {
 	"No verified YouTube recording met the automatic identity and duration requirements.",
 }
 
+_SEEDED_PLAYLIST_URLS = {
+	"7e9ZbYY2MshqF4APO1GdMm": "https://open.spotify.com/playlist/7e9ZbYY2MshqF4APO1GdMm",
+	"6iV3fAswdxYDitegoVjo72": "https://open.spotify.com/playlist/6iV3fAswdxYDitegoVjo72",
+	"1CZPh4vz1diXjmNw3b3HgK": "https://open.spotify.com/playlist/1CZPh4vz1diXjmNw3b3HgK",
+}
+
+
+def seed_known_playlist_urls(manifest: dict[str, Any]) -> int:
+	"""Backfill the three explicitly supplied legacy playlist links."""
+	updated = 0
+	for playlist_id, url in _SEEDED_PLAYLIST_URLS.items():
+		playlist = manifest.get("playlists", {}).get(playlist_id)
+		if isinstance(playlist, dict) and not playlist.get("spotify_url"):
+			playlist["spotify_url"] = url
+			updated += 1
+	return updated
+
 
 def _now() -> str:
 	return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -99,6 +116,7 @@ def _load_manifest_unlocked(paths: ManagedPaths) -> dict[str, Any]:
 		if isinstance(recording, dict):
 			recording.setdefault("album_metadata", None)
 			recording.setdefault("album_memberships", {})
+	seed_known_playlist_urls(data)
 	return data
 
 

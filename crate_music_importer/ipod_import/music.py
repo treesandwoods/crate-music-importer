@@ -553,6 +553,98 @@ end run
 '''
 
 
+_PLAYLIST_MEMBERSHIP_SCRIPT = r'''
+on run argv
+	set requestedName to item 1 of argv
+	set knownPID to item 2 of argv
+	set separatorText to ASCII character 31
+	tell application "Music"
+		set targetPlaylist to missing value
+		repeat with candidate in every user playlist
+			try
+				if (persistent ID of candidate as text) is knownPID then set targetPlaylist to candidate
+			end try
+		end repeat
+		if targetPlaylist is missing value then error "The importer-owned Music playlist no longer exists."
+		repeat with candidate in every user playlist
+			try
+				if (persistent ID of candidate as text) is not knownPID and (name of candidate as text) is requestedName then error "A different Music playlist now uses the requested name."
+			end try
+		end repeat
+		set values to {}
+		repeat with playlistTrack in every track of targetPlaylist
+			set end of values to (persistent ID of playlistTrack as text)
+		end repeat
+		set AppleScript's text item delimiters to separatorText
+		set encoded to values as text
+		set AppleScript's text item delimiters to ""
+		return "OK" & tab & encoded
+	end tell
+end run
+'''
+
+
+_EDIT_PLAYLIST_MEMBERSHIP_SCRIPT = r'''
+on split_text(valueText, delimiterText)
+	if valueText is "" then return {}
+	set oldDelimiters to AppleScript's text item delimiters
+	set AppleScript's text item delimiters to delimiterText
+	set values to text items of valueText
+	set AppleScript's text item delimiters to oldDelimiters
+	return values
+end split_text
+
+on run argv
+	set requestedName to item 1 of argv
+	set knownPID to item 2 of argv
+	set expectedIDs to my split_text(item 3 of argv, ASCII character 31)
+	set removalValues to my split_text(item 4 of argv, ",")
+	set appendIDs to my split_text(item 5 of argv, ASCII character 31)
+	tell application "Music"
+		set targetPlaylist to missing value
+		repeat with candidate in every user playlist
+			try
+				if (persistent ID of candidate as text) is knownPID then set targetPlaylist to candidate
+			end try
+		end repeat
+		if targetPlaylist is missing value then error "The importer-owned Music playlist no longer exists."
+		repeat with candidate in every user playlist
+			try
+				if (persistent ID of candidate as text) is not knownPID and (name of candidate as text) is requestedName then error "A different Music playlist now uses the requested name."
+			end try
+		end repeat
+		set currentTracks to every track of targetPlaylist
+		if (count of currentTracks) is not (count of expectedIDs) then error "Playlist membership changed before the guarded update."
+		repeat with trackIndex from 1 to count of expectedIDs
+			set currentID to persistent ID of (item trackIndex of currentTracks) as text
+			if currentID is not (item trackIndex of expectedIDs as text) then error "Playlist membership changed before the guarded update."
+		end repeat
+		repeat with removalValue in removalValues
+			if (removalValue as text) is not "" then
+				set removalPosition to (removalValue as integer) + 1
+				set currentTracks to every track of targetPlaylist
+				delete (item removalPosition of currentTracks)
+			end if
+		end repeat
+		repeat with requestedID in appendIDs
+			set wantedID to requestedID as text
+			set matches to every track of library playlist 1 whose persistent ID is wantedID
+			if (count of matches) is not 1 then error "A planned Music track is missing or colliding: " & wantedID
+			duplicate (item 1 of matches) to targetPlaylist
+		end repeat
+		set finalIDs to {}
+		repeat with playlistTrack in every track of targetPlaylist
+			set end of finalIDs to (persistent ID of playlistTrack as text)
+		end repeat
+		set AppleScript's text item delimiters to ASCII character 31
+		set encoded to finalIDs as text
+		set AppleScript's text item delimiters to ""
+		return "OK" & tab & encoded
+	end tell
+end run
+'''
+
+
 def _osascript(script: str, args: list[str] | None = None, *, timeout: int = 300) -> str:
 	command = ["/usr/bin/osascript", "-e", script]
 	command.extend(args or [])
@@ -863,3 +955,38 @@ def sync_music_playlist(name: str, known_persistent_id: str | None, track_persis
 	if fields[0] != "OK" or len(fields) < 2 or not fields[1]:
 		raise MusicAutomationError(f"Music returned an unexpected playlist result: {output}")
 	return fields[1]
+
+
+def playlist_membership(name: str, known_persistent_id: str) -> list[str]:
+	"""Read one exact saved user playlist without scanning the Music library."""
+	if not known_persistent_id:
+		raise MusicAutomationError("A saved Music playlist persistent ID is required.")
+	output = _osascript(_PLAYLIST_MEMBERSHIP_SCRIPT, [name, known_persistent_id], timeout=120)
+	fields = output.split("\t", 1)
+	if fields[0] != "OK":
+		raise MusicAutomationError(f"Music returned an unexpected playlist membership result: {output}")
+	return fields[1].split(chr(31)) if len(fields) > 1 and fields[1] else []
+
+
+def edit_music_playlist_membership(
+	name: str,
+	known_persistent_id: str,
+	expected_ids: list[str],
+	remove_indexes: list[int],
+	append_ids: list[str],
+) -> list[str]:
+	"""Guard an append/remove mutation with an exact sequence comparison."""
+	if any(index < 0 or index >= len(expected_ids) for index in remove_indexes):
+		raise MusicAutomationError("A planned playlist removal index is invalid.")
+	arguments = [
+		name,
+		known_persistent_id,
+		chr(31).join(expected_ids),
+		",".join(str(index) for index in sorted(set(remove_indexes), reverse=True)),
+		chr(31).join(append_ids),
+	]
+	output = _osascript(_EDIT_PLAYLIST_MEMBERSHIP_SCRIPT, arguments, timeout=600)
+	fields = output.split("\t", 1)
+	if fields[0] != "OK":
+		raise MusicAutomationError(f"Music returned an unexpected guarded playlist result: {output}")
+	return fields[1].split(chr(31)) if len(fields) > 1 and fields[1] else []

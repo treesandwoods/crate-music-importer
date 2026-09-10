@@ -60,6 +60,7 @@ export interface SourceReference {
   name: string;
   url: string;
   itemCount: number;
+  mode?: "import" | "update";
   state?: SourceState;
   problemCount?: number;
   problemRecordingIds?: string[];
@@ -153,6 +154,45 @@ export interface SourcePreview {
   rows: PreviewRow[];
 }
 
+export interface SavedPlaylistSummary {
+  id: string;
+  name: string;
+  track_count: number;
+  spotify_url: string;
+  music_playlist_persistent_id?: string | null;
+}
+
+export interface PlaylistUpdateRemoval {
+  saved_position: number;
+  spotify_id: string;
+  recording_id: string;
+  title: string;
+  artists: string;
+  action: "unlink" | "delete";
+}
+
+export interface PlaylistUpdatePreview {
+  source: {
+    type: "playlist";
+    id: string;
+    name: string;
+    url: string;
+    saved_total: number;
+    current_total: number;
+  };
+  playlist_id: string;
+  additions: PreviewRow[];
+  removals: PlaylistUpdateRemoval[];
+  up_to_date: boolean;
+  incomplete_data: boolean;
+  blocked: boolean;
+  state: "ready" | "up_to_date" | "incomplete_data" | "missing_music_playlist" | "playlist_collision";
+  warning?: string | null;
+  baseline_backfilled: boolean;
+  removals_deferred: boolean;
+  confirmation_token: string;
+}
+
 export interface JobCounts {
   total: number;
   notStarted?: number;
@@ -187,6 +227,7 @@ export interface ImportJob {
   version: number;
   jobId: string;
   action: string;
+  mode?: "import" | "update";
   source: {
     type: "album" | "playlist";
     id: string;
