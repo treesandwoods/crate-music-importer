@@ -8,18 +8,22 @@ from crate_music_importer.ipod_import.music import (
 	MusicAutomationError,
 	_ADD_FILE_SCRIPT,
 	_DELETE_IMPORTER_OWNED_TRACK_SCRIPT,
+	_EDIT_PLAYLIST_MEMBERSHIP_SCRIPT,
 	_LOOKUP_TRACK_BY_RECORDING_ID_SCRIPT,
 	_LOOKUP_TRACK_BY_ID_SCRIPT,
 	_SCAN_PLAYLIST_IMPORTS_SCRIPT,
 	_SCAN_SCRIPT,
+	_PLAYLIST_MEMBERSHIP_SCRIPT,
 	_UPDATE_ALBUM_TRACK_SCRIPT,
 	_UPDATE_MANAGED_ARTWORK_SCRIPT,
 	_osascript,
 	_music_location_to_posix,
 	delete_importer_owned_music_track,
+	edit_music_playlist_membership,
 	import_managed_file,
 	lookup_importer_owned_music_track,
 	lookup_music_track,
+	playlist_membership,
 	scan_playlist_imports,
 	update_managed_music_artwork,
 	verify_music_tracks,
@@ -105,6 +109,20 @@ class MusicAutomationTests(unittest.TestCase):
 		run_script.assert_called_once_with(_DELETE_IMPORTER_OWNED_TRACK_SCRIPT, ["PID", "rec_one"], timeout=60)
 		self.assertIn("whose persistent ID is requestedID", _DELETE_IMPORTER_OWNED_TRACK_SCRIPT)
 		self.assertIn("does not contain ownershipMarker", _DELETE_IMPORTER_OWNED_TRACK_SCRIPT)
+
+	def test_playlist_membership_reads_only_the_saved_playlist(self):
+		with patch("crate_music_importer.ipod_import.music._osascript", return_value="OK\tA\x1fB\x1fA") as run_script:
+			self.assertEqual(playlist_membership("Saved", "PLAYLIST-PID"), ["A", "B", "A"])
+		run_script.assert_called_once_with(_PLAYLIST_MEMBERSHIP_SCRIPT, ["Saved", "PLAYLIST-PID"], timeout=120)
+		self.assertIn("persistent ID of candidate", _PLAYLIST_MEMBERSHIP_SCRIPT)
+
+	def test_guarded_playlist_edit_preserves_survivors_and_appends(self):
+		with patch("crate_music_importer.ipod_import.music._osascript", return_value="OK\tMANUAL\x1fA\x1fC") as run_script:
+			result = edit_music_playlist_membership("Saved", "PLAYLIST-PID", ["MANUAL", "A", "B"], [2], ["C"])
+		self.assertEqual(result, ["MANUAL", "A", "C"])
+		self.assertEqual(run_script.call_args.args[1], ["Saved", "PLAYLIST-PID", "MANUAL\x1fA\x1fB", "2", "C"])
+		self.assertIn("Playlist membership changed before the guarded update", _EDIT_PLAYLIST_MEMBERSHIP_SCRIPT)
+		self.assertNotIn("delete every track of targetPlaylist", _EDIT_PLAYLIST_MEMBERSHIP_SCRIPT)
 
 	def test_permission_error_names_automation_settings(self):
 		result = subprocess.CompletedProcess([], 1, "", "execution error: Not authorized to send Apple events. (-1743)")

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from crate_music_importer.ipod_import.jobs import (
 	JobStore,
+	_commands,
 	_raycast_deeplink,
 	acknowledge_notification,
 	cancel_incomplete,
@@ -78,6 +79,30 @@ class DurableJobTests(unittest.TestCase):
 			self.assertEqual(JobStore(root).load(job["jobId"])["source"]["id"], "37i9dQZF1DXTESTFIXTURE1")
 			with self.assertRaisesRegex(ValueError, "already queued or running"):
 				enqueue("playlist_combined", PLAYLIST_URL, root=root, popen=popen)
+
+	def test_update_job_has_explicit_mode_and_routes_only_to_update_commands(self):
+		with tempfile.TemporaryDirectory() as directory:
+			job = enqueue(
+				"playlist_update_combined",
+				PLAYLIST_URL,
+				root=Path(directory),
+				popen=lambda *_args, **_kwargs: SimpleNamespace(pid=os.getpid()),
+				seed={"savedPlaylistId": "saved-id", "name": "Saved", "total": 2},
+			)
+			self.assertEqual(job["mode"], "update")
+			self.assertEqual(job["source"]["id"], "saved-id")
+			self.assertEqual(_commands(job), [
+				["playlist-update-prepare", "saved-id", "--confirm-download"],
+				["playlist-update-apply", "saved-id", "--confirm-music-write"],
+			])
+
+	def test_cancelling_update_preserves_saved_playlist_progress(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			job = enqueue("playlist_update_combined", PLAYLIST_URL, root=root, popen=lambda *_args, **_kwargs: SimpleNamespace(pid=os.getpid()), seed={"savedPlaylistId": "saved-id"})
+			result = cancel_incomplete(job["jobId"], root=root)
+			self.assertEqual(result["removedRecordings"], 0)
+			self.assertEqual(result["removedFiles"], 0)
 
 	def test_one_runner_processes_fifo_jobs_in_order(self):
 		with tempfile.TemporaryDirectory() as directory:

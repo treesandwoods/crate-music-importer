@@ -63,12 +63,17 @@ def _source_url(source_type: str, source_id: str, source: dict[str, Any]) -> str
 
 
 def _source_entry(source_type: str, source_id: str, source: dict[str, Any]) -> dict[str, Any]:
+	pending = source.get("pending_update") if source_type == "playlist" else None
+	item_count = len(source.get("items") or [])
+	if isinstance(pending, dict):
+		item_count = len(pending.get("addition_items") or []) + len(pending.get("removals") or [])
 	return {
 		"type": source_type,
 		"id": source_id,
 		"name": str(source.get("name") or ("Spotify Album" if source_type == "album" else "Spotify Playlist")),
 		"url": _source_url(source_type, source_id, source),
-		"itemCount": len(source.get("items") or []),
+		"itemCount": item_count,
+		"mode": "update" if source_type == "playlist" and isinstance(source.get("pending_update"), dict) else "import",
 	}
 
 
@@ -81,6 +86,10 @@ def _recording_sources(manifest: dict[str, Any], recording: dict[str, Any]) -> l
 	for playlist_id in recording.get("playlist_memberships", {}):
 		playlist = manifest.get("playlists", {}).get(playlist_id)
 		if playlist:
+			sources.append(_source_entry("playlist", playlist_id, playlist))
+	for playlist_id in recording.get("pending_playlist_memberships", {}):
+		playlist = manifest.get("playlists", {}).get(playlist_id)
+		if playlist and not any(source["type"] == "playlist" and source["id"] == playlist_id for source in sources):
 			sources.append(_source_entry("playlist", playlist_id, playlist))
 	return sources
 
@@ -282,6 +291,8 @@ def _source_rows(manifest: dict[str, Any], paths: ManagedPaths, problems: list[d
 	for source_type, sources in (("album", manifest.get("albums", {})), ("playlist", manifest.get("playlists", {}))):
 		for source_id, source in sources.items():
 			items = source.get("items") or []
+			if source_type == "playlist" and isinstance(source.get("pending_update"), dict):
+				items = list(items) + list(source["pending_update"].get("addition_items") or [])
 			item_problems = [
 				problem_by_recording[item["recording_id"]]
 				for item in items

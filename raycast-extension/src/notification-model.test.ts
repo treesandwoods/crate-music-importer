@@ -61,3 +61,14 @@ test("terminal job toasts are concise and omit long source names", () => {
     message: "12 tracks",
   });
 });
+
+test("playlist update jobs use update language and change counts", () => {
+  const job = fixture("complete", "playlist");
+  job.mode = "update";
+  job.action = "playlist_update_combined";
+  assert.deepEqual(jobToast(job), {
+    style: "success",
+    title: "Playlist update complete",
+    message: "12 changes",
+  });
+});

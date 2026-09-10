@@ -37,9 +37,12 @@ export function jobToast(job: ImportJob): {
   message?: string;
 } {
   const kind = job.source.type === "album" ? "Album" : "Playlist";
-  const tracks = `${job.counts.total || job.source.total || 0} tracks`;
+  const tracks = `${job.counts.total || job.source.total || 0} ${job.mode === "update" ? "changes" : "tracks"}`;
   if (job.status === "complete") {
-    return { style: "success", ...compactToast(`${kind} added to Music`, tracks) };
+    return {
+      style: "success",
+      ...compactToast(job.mode === "update" ? "Playlist update complete" : `${kind} added to Music`, tracks),
+    };
   }
   if (job.status === "needs_attention") {
     const count = job.counts.review + job.counts.failed;
@@ -48,5 +51,8 @@ export function jobToast(job: ImportJob): {
       ...compactToast(`${kind} needs attention`, `${count} ${count === 1 ? "track needs" : "tracks need"} review`),
     };
   }
-  return { style: "failure", ...compactToast(`${kind} import failed`, "Open Import Activity") };
+  return {
+    style: "failure",
+    ...compactToast(job.mode === "update" ? "Playlist update failed" : `${kind} import failed`, "Open Import Activity"),
+  };
 }

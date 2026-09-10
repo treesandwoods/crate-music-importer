@@ -162,7 +162,10 @@ def _new_job(
 ) -> dict[str, Any]:
 	source_type, source_id, canonical = parse_source_url(url)
 	expected_action = f"{source_type}_combined"
-	if action not in ("source_combined", expected_action):
+	allowed_actions = {"source_combined", expected_action}
+	if source_type == "playlist":
+		allowed_actions.add("playlist_update_combined")
+	if action not in allowed_actions:
 		raise ValueError(f"The {action} action does not accept a Spotify {source_type} URL.")
 	now = _now()
 	seed = seed if isinstance(seed, dict) else {}
@@ -187,12 +190,13 @@ def _new_job(
 		"jobId": uuid4().hex,
 		"source": {
 			"type": source_type,
-			"id": source_id,
+			"id": str(seed.get("savedPlaylistId") or source_id),
 			"url": canonical,
 			"name": str(seed.get("name") or ("Spotify Album" if source_type == "album" else "Spotify Playlist")),
 			"total": total,
 		},
-		"action": expected_action,
+		"action": "playlist_update_combined" if action == "playlist_update_combined" else expected_action,
+		"mode": "update" if action == "playlist_update_combined" else "import",
 		"status": "queued",
 		"phase": "queued",
 		"pid": None,
@@ -225,6 +229,7 @@ def _new_job(
 		"logPath": None,
 		"notification": {"pending": False, "notifiedAt": None},
 		"cacheBaseline": cache_baseline or {"captured": False, "persistentIds": []},
+		"confirmationToken": str(seed.get("confirmationToken") or "") or None,
 	}
 
 
@@ -473,7 +478,11 @@ def cancel_incomplete(
 		job["finishedAt"] = _now()
 		job["notification"] = {"pending": False, "notifiedAt": None}
 		store.save(job)
-		removed = _delete_source_progress(job, store, delete_music=delete_music, lookup_imported=lookup_imported)
+		removed = (
+			{"recordings": 0, "files": 0, "music_tracks": 0, "cache_entries": 0}
+			if job.get("action") == "playlist_update_combined"
+			else _delete_source_progress(job, store, delete_music=delete_music, lookup_imported=lookup_imported)
+		)
 		removed_job_ids: list[str] = []
 		for existing in store.list():
 			if existing.get("status") == "complete" or not _same_source(existing, job):
@@ -598,6 +607,13 @@ def retry_job(
 		root=root,
 		popen=popen,
 		retry_of=str(original["jobId"]),
+		seed={
+			"savedPlaylistId": original.get("source", {}).get("id"),
+			"name": original.get("source", {}).get("name"),
+			"total": original.get("source", {}).get("total"),
+			"tracks": original.get("tracks") or [],
+			"confirmationToken": original.get("confirmationToken"),
+		},
 		cache_baseline=original.get("cacheBaseline") or {"captured": False, "persistentIds": []},
 	)
 	original["status"] = "superseded"
@@ -668,7 +684,25 @@ def sync_from_manifest(job: dict[str, Any], store: JobStore) -> dict[str, Any]:
 	if not source_value:
 		return job
 	job["source"]["name"] = str(source_value.get("name") or job["source"]["name"])
-	items = sorted(source_value.get("items") or [], key=lambda item: int(item.get("position") or 0))
+	if job.get("action") == "playlist_update_combined":
+		pending = source_value.get("pending_update")
+		if not isinstance(pending, dict):
+			if job.get("status") == "running":
+				for track in job.get("tracks") or []:
+					track["state"] = "complete"
+				job["counts"] = {**(job.get("counts") or {}), "complete": len(job.get("tracks") or []), "pending": 0, "review": 0, "failed": 0}
+				return store.save(job)
+			return job
+		items = list(pending.get("addition_items") or []) + [
+			{
+				"position": int(removal.get("saved_position") or 0),
+				"recording_id": str(removal.get("recording_id") or ""),
+				"status": "removal",
+			}
+			for removal in pending.get("removals") or []
+		]
+	else:
+		items = sorted(source_value.get("items") or [], key=lambda item: int(item.get("position") or 0))
 	job["source"]["total"] = len(items)
 	current_id = str((job.get("currentTrack") or {}).get("recordingId") or "") or None
 	current_state = str((job.get("currentTrack") or {}).get("state") or "")
@@ -694,7 +728,11 @@ def sync_from_manifest(job: dict[str, Any], store: JobStore) -> dict[str, Any]:
 	for item in items:
 		recording = manifest.get("recordings", {}).get(item.get("recording_id"), {})
 		metadata = recording.get("source_metadata") or {}
-		state = _track_state(recording, current_id=current_id, current_state=current_state)
+		if job.get("action") == "playlist_update_combined" and item.get("status") == "removal":
+			checkpoint = (source_value.get("pending_update") or {}).get("music_checkpoint") or {}
+			state = "complete" if checkpoint.get("applied_at") else "not_started"
+		else:
+			state = _track_state(recording, current_id=current_id, current_state=current_state)
 		if state == "downloaded":
 			counts["downloaded"] += 1
 		if state == "reused":
@@ -805,6 +843,12 @@ class JobLogWriter:
 
 def _commands(job: dict[str, Any]) -> list[list[str]]:
 	url = str(job["source"]["url"])
+	if job.get("action") == "playlist_update_combined":
+		playlist_id = str(job["source"]["id"])
+		prepare = ["playlist-update-prepare", playlist_id, "--confirm-download"]
+		if job.get("confirmationToken"):
+			prepare += ["--confirmation-token", str(job["confirmationToken"])]
+		return [prepare, ["playlist-update-apply", playlist_id, "--confirm-music-write"]]
 	if job["source"]["type"] == "album":
 		return [["album-import", url, "--confirm-download"], ["album-apply", url, "--confirm-music-write"]]
 	return [["import", url, "--confirm-download"], ["apply", url, "--confirm-music-write"]]
