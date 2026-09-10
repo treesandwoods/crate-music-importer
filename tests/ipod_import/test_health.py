@@ -123,7 +123,7 @@ class HealthTests(unittest.TestCase):
 		self.assertTrue({"manifest_id_absent", "missing_or_unreadable_file"} <= self.categories(result))
 		self.assertEqual(result["summary"]["localFiles"], 1)
 
-	def test_cache_staleness_is_reported_without_rebuilding(self):
+	def test_cache_staleness_is_reported_without_mutating_the_index(self):
 		track = self.track()
 		save_music_cache(self.paths, build_full_cache(self.paths, self.manifest, [track]))
 		before = self.paths.music_cache.read_bytes()

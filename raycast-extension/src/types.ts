@@ -172,14 +172,6 @@ export interface JobCounts {
   pending: number;
 }
 
-export interface MusicCacheRebuildResult {
-  cache_path: string;
-  cached_tracks: number;
-  elapsed_seconds: number;
-  initial_scan_completed: boolean;
-  last_full_rebuild_at: string;
-}
-
 export interface ImportJobTrack {
   position: number;
   trackNumber: number;

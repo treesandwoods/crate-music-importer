@@ -44,8 +44,9 @@ class HealthAuditTests(unittest.TestCase):
 				self.assertEqual(progress["checked"], 2)
 				self.assertEqual(progress["phase"], "Checking files")
 				return dict(self.report)
-			with patch.object(audit, "load_manifest", return_value={}), patch.object(audit, "scan_music_library_for_health", return_value=[]), patch.object(audit, "build_health_report", side_effect=build), patch.object(audit, "_notify") as notify:
+			with patch.object(audit, "load_manifest", return_value={}), patch.object(audit, "scan_music_library_for_health", return_value=[]), patch.object(audit, "refresh_music_cache") as refresh, patch.object(audit, "build_health_report", side_effect=build), patch.object(audit, "_notify") as notify:
 				audit.run_worker(self.paths, state["runId"])
+				refresh.assert_called_once_with(self.paths, {}, [])
 				notify.assert_called_once_with(False)
 			self.assertEqual(audit.load_health_audit(self.paths)["status"], "complete")
 

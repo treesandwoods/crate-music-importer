@@ -154,7 +154,7 @@ class PipelineCacheTests(unittest.TestCase):
 			with patch("crate_music_importer.ipod_import.pipeline.playlist_status", return_value=("AVAILABLE", None)), \
 				patch("crate_music_importer.ipod_import.pipeline.import_managed_file") as imported, \
 				patch("crate_music_importer.ipod_import.pipeline.sync_music_playlist") as synced:
-				with self.assertRaisesRegex(Exception, "Rebuild Music Library Cache"):
+				with self.assertRaisesRegex(Exception, "Refresh Library Health"):
 					apply_to_music(
 						manifest,
 						"list",
