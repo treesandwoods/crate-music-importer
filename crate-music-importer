@@ -2,7 +2,7 @@
 set -eu
 export PYTHONDONTWRITEBYTECODE=1
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+export PATH="/opt/homebrew/bin:/usr/local/bin:${PATH:-/usr/bin:/bin}"
 if [ -n "${CRATE_PYTHON:-}" ]; then
     python_bin="$CRATE_PYTHON"
 elif [ -x "$script_dir/.venv/bin/python3" ]; then

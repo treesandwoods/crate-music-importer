@@ -16,13 +16,17 @@ from crate_music_importer.ipod_import.manifest import (
 
 
 class ManifestTests(unittest.TestCase):
-	def test_known_legacy_playlist_links_are_seeded_without_machine_specific_state(self):
+	def test_missing_playlist_links_are_recovered_from_any_valid_spotify_id(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory))
 			manifest = new_manifest(paths)
-			manifest["playlists"]["7e9ZbYY2MshqF4APO1GdMm"] = {"name": "time", "spotify_url": "", "items": []}
+			playlist_id = "37i9dQZF1DXTESTFIXTURE1"
+			manifest["playlists"][playlist_id] = {"name": "Fixture", "spotify_url": "", "items": []}
+			manifest["playlists"]["not-a-spotify-id"] = {"name": "Other", "spotify_url": "", "items": []}
 			save_manifest(paths, manifest)
-			self.assertEqual(load_manifest(paths)["playlists"]["7e9ZbYY2MshqF4APO1GdMm"]["spotify_url"], "https://open.spotify.com/playlist/7e9ZbYY2MshqF4APO1GdMm")
+			loaded = load_manifest(paths)
+			self.assertEqual(loaded["playlists"][playlist_id]["spotify_url"], f"https://open.spotify.com/playlist/{playlist_id}")
+			self.assertEqual(loaded["playlists"]["not-a-spotify-id"]["spotify_url"], "")
 
 	def test_user_title_survives_source_refresh(self):
 		with tempfile.TemporaryDirectory() as directory:

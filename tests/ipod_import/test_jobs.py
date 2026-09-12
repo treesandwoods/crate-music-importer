@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from crate_music_importer.ipod_import.jobs import (
 	JobStore,
@@ -124,6 +125,22 @@ class DurableJobTests(unittest.TestCase):
 			self.assertEqual(JobStore(root).load(first["jobId"])["status"], "complete")
 			self.assertEqual(JobStore(root).load(second["jobId"])["status"], "complete")
 			self.assertFalse(JobStore(root).runner_path.exists())
+
+	def test_notification_failure_does_not_stop_the_fifo_queue(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			popen = lambda *_args, **_kwargs: SimpleNamespace(pid=os.getpid())
+			first = enqueue("playlist_combined", PLAYLIST_URL, root=root, popen=popen)
+			second = enqueue("album_combined", ALBUM_URL, root=root, popen=popen)
+			commands = []
+
+			def notify(_job_id):
+				raise RuntimeError("Raycast unavailable")
+
+			run_queue(root=root, engine=lambda command: commands.append(command) or 0, notifier=notify)
+			self.assertEqual(len(commands), 4)
+			self.assertTrue(JobStore(root).load(first["jobId"])["notification"]["pending"])
+			self.assertTrue(JobStore(root).load(second["jobId"])["notification"]["pending"])
 
 	def test_all_queued_jobs_share_one_runner_lock(self):
 		with tempfile.TemporaryDirectory() as directory:
@@ -598,11 +615,28 @@ class DurableJobTests(unittest.TestCase):
 			self.assertIsNotNone(reopened_again["notification"]["notifiedAt"])
 
 	def test_terminal_deeplink_passes_only_durable_job_context(self):
-		url = _raycast_deeplink("job-id")
+		with patch.dict(os.environ, {"CRATE_RAYCAST_AUTHOR": "fixture-author", "CRATE_RAYCAST_EXTENSION": "fixture-extension"}):
+			url = _raycast_deeplink("job-id")
+		self.assertIn("fixture-author/fixture-extension", url)
 		self.assertIn("import-activity-problems", url)
 		self.assertIn("launchType=background", url)
 		self.assertIn("job-id", url)
 		self.assertNotIn("Album added", url)
+
+	def test_terminal_notification_retries_failed_raycast_launches(self):
+		from crate_music_importer.ipod_import.jobs import notify_raycast
+
+		results = [SimpleNamespace(returncode=1), SimpleNamespace(returncode=1), SimpleNamespace(returncode=0)]
+		calls = []
+		delays = []
+		with patch.dict(os.environ, {"CRATE_RAYCAST_AUTHOR": "fixture-author"}):
+			notify_raycast(
+				"job-id",
+				opener=lambda *args, **kwargs: calls.append((args, kwargs)) or results.pop(0),
+				sleeper=delays.append,
+			)
+		self.assertEqual(len(calls), 3)
+		self.assertEqual(delays, [0.25, 0.5])
 
 	def test_job_json_never_uses_partial_temporary_file_as_record(self):
 		with tempfile.TemporaryDirectory() as directory:

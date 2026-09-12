@@ -14,7 +14,7 @@ const playlist: SavedPlaylistSummary = {
   id: "saved-id",
   name: "Saved",
   track_count: 3,
-  spotify_url: "https://open.spotify.com/playlist/7e9ZbYY2MshqF4APO1GdMm",
+  spotify_url: "https://open.spotify.com/playlist/37i9dQZF1DXTESTFIXTURE1",
 };
 const preview: PlaylistUpdatePreview = {
   source: {

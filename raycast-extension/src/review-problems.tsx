@@ -1,4 +1,5 @@
 import { mergeYouTubeCandidates } from "./youtube-review";
+import { randomUUID } from "node:crypto";
 import {
   Action,
   ActionPanel,
@@ -7,8 +8,10 @@ import {
   confirmAlert,
   Form,
   Icon,
+  LaunchType,
   List,
   LaunchProps,
+  LocalStorage,
   Toast,
   useNavigation,
 } from "@raycast/api";
@@ -18,7 +21,6 @@ import {
   acknowledgeJobNotification,
   cancelIncompleteJob,
   cancelSourceProgress,
-  loadJob,
   loadJobs,
   loadSnapshot,
   queueSource,
@@ -27,8 +29,9 @@ import {
   retryJob,
   searchYouTube,
 } from "./backend";
-import { compactToast } from "./notification-model";
-import { showCompactToast, showTerminalJobToast } from "./notifications";
+import { clearActivityOpen, isActivityOpen, markActivityOpen } from "./activity-presence";
+import { deliverPendingNotifications } from "./notification-delivery";
+import { showCompactToast, showTerminalJobToast, updateCompactToast } from "./notifications";
 import type {
   ImportJob,
   JobsSnapshot,
@@ -58,13 +61,6 @@ function seconds(value: number): string {
 
 function markdownText(value: string): string {
   return value.replace(/[\\`*_[\]<>]/g, "\\$&");
-}
-
-function updateToast(toast: Toast, style: Toast.Style, title: string, message = "") {
-  const compact = compactToast(title, message);
-  toast.style = style;
-  toast.title = compact.title;
-  toast.message = compact.message;
 }
 
 function problemKind(kind: string): string {
@@ -172,7 +168,7 @@ function ContinueSourceAction({
             mode: source.mode,
             savedPlaylistId: source.mode === "update" ? source.id : undefined,
           });
-          updateToast(
+          updateCompactToast(
             toast,
             Toast.Style.Success,
             `${source.type === "album" ? "Album" : "Playlist"} queued`,
@@ -180,7 +176,7 @@ function ContinueSourceAction({
           );
           await onQueued();
         } catch (error) {
-          updateToast(
+          updateCompactToast(
             toast,
             Toast.Style.Failure,
             "Could not queue import",
@@ -610,7 +606,7 @@ function JobActions({ job, refresh }: { job: ImportJob; refresh: () => Promise<v
             const toast = await showCompactToast(Toast.Style.Animated, "Queueing import");
             try {
               const retried = await retryJob(job.jobId);
-              updateToast(
+              updateCompactToast(
                 toast,
                 Toast.Style.Success,
                 `${job.source.type === "album" ? "Album" : "Playlist"} queued`,
@@ -618,7 +614,7 @@ function JobActions({ job, refresh }: { job: ImportJob; refresh: () => Promise<v
               );
               await refresh();
             } catch (error) {
-              updateToast(
+              updateCompactToast(
                 toast,
                 Toast.Style.Failure,
                 "Could not queue import",
@@ -646,18 +642,20 @@ export default function Command(props: LaunchProps<{ launchContext: ActivityCont
   const [error, setError] = useState<string>();
   const shownNotifications = useRef(new Set<string>());
   const refreshInFlight = useRef(false);
+  const activitySession = useRef(randomUUID());
 
-  const showPending = useCallback(async (values: ImportJob[]) => {
-    for (const job of values) {
-      if (shownNotifications.current.has(job.jobId)) continue;
-      shownNotifications.current.add(job.jobId);
-      await showTerminalJobToast(job);
-      await acknowledgeJobNotification(job.jobId);
-    }
+  const handlePending = useCallback(async (values: ImportJob[], show: boolean) => {
+    await deliverPendingNotifications(values, {
+      show,
+      handled: shownNotifications.current,
+      showJob: showTerminalJobToast,
+      acknowledge: acknowledgeJobNotification,
+      pauseBetweenToasts: () => new Promise((resolve) => setTimeout(resolve, 2_000)),
+    });
   }, []);
 
   const refresh = useCallback(
-    async (showNotifications = true, showLoading = true) => {
+    async (acknowledgeNotifications = true, showLoading = true) => {
       if (refreshInFlight.current) return;
       refreshInFlight.current = true;
       if (showLoading) setLoading(true);
@@ -666,7 +664,9 @@ export default function Command(props: LaunchProps<{ launchContext: ActivityCont
         setSnapshot((current) => (sameSnapshot(current, nextSnapshot) ? current : nextSnapshot));
         setJobs((current) => (sameSnapshot(current, nextJobs) ? current : nextJobs));
         setError(undefined);
-        if (showNotifications && !props.launchContext?.jobId) await showPending(nextJobs.pendingNotifications);
+        if (acknowledgeNotifications && props.launchType === LaunchType.UserInitiated) {
+          await handlePending(nextJobs.pendingNotifications, false);
+        }
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : String(caught));
       } finally {
@@ -674,25 +674,41 @@ export default function Command(props: LaunchProps<{ launchContext: ActivityCont
         if (showLoading) setLoading(false);
       }
     },
-    [props.launchContext?.jobId, showPending],
+    [handlePending, props.launchType],
   );
 
   useEffect(() => {
     async function initialLoad() {
       if (props.launchContext?.jobId && props.launchContext.terminalEvent) {
         try {
-          const job = await loadJob(props.launchContext.jobId);
-          shownNotifications.current.add(job.jobId);
-          await showTerminalJobToast(job);
-          await acknowledgeJobNotification(job.jobId);
+          const pending = (await loadJobs()).pendingNotifications;
+          let activityOpen = false;
+          try {
+            activityOpen = await isActivityOpen(LocalStorage);
+          } catch {
+            // Local presence is only a toast-suppression hint; delivery remains the safe default.
+          }
+          await handlePending(pending, !activityOpen);
         } catch {
-          // The durable Activity list remains the fallback if a terminal event races installation.
+          // Pending events remain durable for the next successful background or foreground launch.
         }
       }
-      await refresh(false);
+      await refresh(props.launchType === LaunchType.UserInitiated);
     }
     void initialLoad();
-  }, [props.launchContext?.jobId, props.launchContext?.terminalEvent, refresh]);
+  }, [handlePending, props.launchContext?.jobId, props.launchContext?.terminalEvent, props.launchType, refresh]);
+
+  useEffect(() => {
+    if (props.launchType !== LaunchType.UserInitiated) return;
+    const sessionId = activitySession.current;
+    const heartbeat = () => void markActivityOpen(LocalStorage, sessionId).catch(() => undefined);
+    heartbeat();
+    const timer = setInterval(heartbeat, 2_000);
+    return () => {
+      clearInterval(timer);
+      void clearActivityOpen(LocalStorage, sessionId).catch(() => undefined);
+    };
+  }, [props.launchType]);
 
   useEffect(() => {
     const active = jobs?.jobs.some((job) => job.status === "queued" || job.status === "running");

@@ -13,8 +13,8 @@ import {
 import { useCallback, useEffect, useState } from "react";
 
 import { previewSource, queueSource } from "./backend";
-import { compactText, compactToast } from "./notification-model";
-import { showCompactToast } from "./notifications";
+import { compactText } from "./notification-model";
+import { showCompactToast, updateCompactToast } from "./notifications";
 import type { PreviewRow, SourcePreview } from "./types";
 
 function previewStage(row: PreviewRow): { label: string; icon: Icon; color: Color } {
@@ -79,13 +79,6 @@ function previewSummary(preview: SourcePreview): string {
   return entries.map(([label, count]) => `${label} ${count}`).join(" · ");
 }
 
-function updateToast(toast: Toast, style: Toast.Style, title: string, message = "") {
-  const value = compactToast(title, message);
-  toast.style = style;
-  toast.title = value.title;
-  toast.message = value.message;
-}
-
 export function SourcePreviewView({ type, url }: { type: "album" | "playlist"; url: string }) {
   const [preview, setPreview] = useState<SourcePreview>();
   const [loading, setLoading] = useState(true);
@@ -130,14 +123,14 @@ export function SourcePreviewView({ type, url }: { type: "album" | "playlist"; u
           artists: row.artists,
         })),
       });
-      updateToast(
+      updateCompactToast(
         toast,
         Toast.Style.Success,
         `${type === "album" ? "Album" : "Playlist"} queued`,
         `${job.source.total || preview.rows.length} tracks`,
       );
     } catch (caught) {
-      updateToast(
+      updateCompactToast(
         toast,
         Toast.Style.Failure,
         "Could not queue import",

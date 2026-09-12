@@ -28,9 +28,7 @@ from crate_music_importer.ipod_import.spotify import parse_source_url
 
 ACTIVE_STATES = {"queued", "running"}
 TERMINAL_STATES = {"complete", "needs_attention", "ready_to_continue", "failed", "cancelled", "superseded"}
-RAYCAST_EXTENSION = os.environ.get("CRATE_RAYCAST_EXTENSION", "crate-music-importer")
 RAYCAST_ACTIVITY_COMMAND = "import-activity-problems"
-RAYCAST_AUTHOR = os.environ.get("CRATE_RAYCAST_AUTHOR", "elijahsanner")
 RECENT_COMPLETE_JOB_LIMIT = 50
 
 
@@ -162,7 +160,7 @@ def _new_job(
 ) -> dict[str, Any]:
 	source_type, source_id, canonical = parse_source_url(url)
 	expected_action = f"{source_type}_combined"
-	allowed_actions = {"source_combined", expected_action}
+	allowed_actions = {expected_action}
 	if source_type == "playlist":
 		allowed_actions.add("playlist_update_combined")
 	if action not in allowed_actions:
@@ -890,25 +888,43 @@ def _terminal_status(job: dict[str, Any], code: int) -> str:
 
 
 def _raycast_deeplink(job_id: str) -> str:
+	author = str(os.environ.get("CRATE_RAYCAST_AUTHOR") or "").strip()
+	extension = str(os.environ.get("CRATE_RAYCAST_EXTENSION") or "crate-music-importer").strip()
+	if not author:
+		raise ValueError("CRATE_RAYCAST_AUTHOR is required for background notifications.")
 	context = quote(json.dumps({"jobId": job_id, "terminalEvent": True}, separators=(",", ":")))
 	return (
-		f"raycast://extensions/{RAYCAST_AUTHOR}/{RAYCAST_EXTENSION}/{RAYCAST_ACTIVITY_COMMAND}"
+		f"raycast://extensions/{author}/{extension}/{RAYCAST_ACTIVITY_COMMAND}"
 		f"?launchType=background&context={context}"
 	)
 
 
-def notify_raycast(job_id: str, *, opener: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> None:
+def notify_raycast(
+	job_id: str,
+	*,
+	opener: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+	sleeper: Callable[[float], None] = time.sleep,
+) -> None:
 	try:
-		opener(
-			["/usr/bin/open", "-g", _raycast_deeplink(job_id)],
-			capture_output=True,
-			text=True,
-			timeout=10,
-			check=False,
-		)
-	except (OSError, subprocess.TimeoutExpired):
-		# The pending event remains durable and will be shown next time Activity opens.
+		url = _raycast_deeplink(job_id)
+	except ValueError:
 		return
+	for attempt in range(3):
+		try:
+			result = opener(
+				["/usr/bin/open", "-g", url],
+				capture_output=True,
+				text=True,
+				timeout=10,
+				check=False,
+			)
+		except (OSError, subprocess.TimeoutExpired):
+			result = None
+		if result is not None and getattr(result, "returncode", 1) == 0:
+			return
+		if attempt < 2:
+			sleeper(0.25 * (2 ** attempt))
+	# The pending event remains durable and the next successful launch drains it.
 
 
 def run_job(
@@ -964,7 +980,11 @@ def run_job(
 		job["errorSummary"] = "The import stopped before completion."
 	job["notification"] = {"pending": True, "notifiedAt": None}
 	store.save(job)
-	notifier(str(job["jobId"]))
+	try:
+		notifier(str(job["jobId"]))
+	except Exception:
+		# Notification delivery is best effort; durable pending state must not stop the import queue.
+		pass
 	return job
 
 
