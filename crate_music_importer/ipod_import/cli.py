@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from crate_music_importer.ipod_import.constants import MANAGED_ROOT
-from crate_music_importer.ipod_import.manifest import ManagedPaths, load_manifest, save_manifest, seed_known_playlist_urls, update_manifest
+from crate_music_importer.ipod_import.manifest import ManagedPaths, backfill_playlist_urls, load_manifest, save_manifest, update_manifest
 from crate_music_importer.ipod_import.media import check_tools
 from crate_music_importer.ipod_import.music import load_music_fixture, lookup_importer_owned_music_track, lookup_music_track, scan_music_library_for_health, verify_music_tracks
 from crate_music_importer.ipod_import.music_cache import (
@@ -224,19 +224,6 @@ def _find_album_id(manifest: dict[str, Any], value: str) -> str:
 	raise ValueError(f"No saved album matches: {value}")
 
 
-def _album_saved_music_ids(manifest: dict[str, Any], album_id: str) -> list[str]:
-	album = manifest.get("albums", {}).get(album_id) or {}
-	values: list[str] = []
-	for item in album.get("items") or []:
-		recording = manifest.get("recordings", {}).get(item.get("recording_id")) or {}
-		music = recording.get("music") or {}
-		active = recording.get("active_reference") or {}
-		persistent_id = str(music.get("persistent_id") or active.get("persistent_id") or "")
-		if persistent_id:
-			values.append(persistent_id)
-	return list(dict.fromkeys(values))
-
-
 def _print_preview(preview: Any, *, as_json: bool) -> None:
 	if as_json:
 		playlist = preview.manifest["playlists"][preview.playlist_id]
@@ -402,7 +389,7 @@ def _run(
 		return 0
 	manifest = load_manifest(paths)
 	if args.command == "saved-playlists":
-		update_manifest(paths, seed_known_playlist_urls)
+		update_manifest(paths, backfill_playlist_urls)
 		manifest = load_manifest(paths)
 		values = saved_playlists(manifest)
 		print(json.dumps({"playlists": values}, ensure_ascii=False, indent=2) if args.json else "\n".join(f"{value['name']}\t{value['track_count']}\t{value['spotify_url']}" for value in values))

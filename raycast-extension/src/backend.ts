@@ -88,10 +88,6 @@ export function loadJobs(): Promise<JobsSnapshot> {
   return runRaycastJson<JobsSnapshot>(["jobs-json"]);
 }
 
-export function loadJob(jobId: string): Promise<ImportJob> {
-  return runRaycastJson<ImportJob>(["job-json", jobId]);
-}
-
 export function acknowledgeJobNotification(jobId: string): Promise<ImportJob> {
   return runRaycastJson<ImportJob>(["ack-notification", jobId]);
 }

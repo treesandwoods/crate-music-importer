@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { changePlaylistLink, loadSavedPlaylists, previewPlaylistUpdate, queuePlaylistUpdate } from "./backend";
 import { compactText } from "./notification-model";
-import { showCompactToast } from "./notifications";
+import { showCompactToast, updateCompactToast } from "./notifications";
 import { canQueuePlaylistUpdate, playlistUpdateConfirmation, removalLabel } from "./playlist-update-model";
 import { SourcePreviewView } from "./source-preview";
 import type { PlaylistUpdatePreview, SavedPlaylistSummary } from "./types";
@@ -130,13 +130,14 @@ export function PlaylistUpdatePreviewView({ playlist }: { playlist: SavedPlaylis
     const toast = await showCompactToast(Toast.Style.Animated, "Queueing playlist update");
     try {
       const job = await queuePlaylistUpdate(playlist, preview);
-      toast.style = Toast.Style.Success;
-      toast.title = "Playlist update queued";
-      toast.message = `${job.source.total} changes`;
+      updateCompactToast(toast, Toast.Style.Success, "Playlist update queued", `${job.source.total} changes`);
     } catch (caught) {
-      toast.style = Toast.Style.Failure;
-      toast.title = "Could not queue update";
-      toast.message = caught instanceof Error ? caught.message : String(caught);
+      updateCompactToast(
+        toast,
+        Toast.Style.Failure,
+        "Could not queue update",
+        caught instanceof Error ? caught.message : String(caught),
+      );
     }
   }
 

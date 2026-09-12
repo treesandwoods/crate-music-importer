@@ -26,10 +26,6 @@ class MusicCacheUnavailableError(MusicCacheError):
 	pass
 
 
-class MusicCacheStaleError(MusicCacheError):
-	pass
-
-
 def _now() -> str:
 	return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 

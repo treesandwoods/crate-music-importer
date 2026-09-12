@@ -31,6 +31,12 @@ export function compactToast(title: string, message = ""): { title: string; mess
   return result;
 }
 
+function namedDetail(name: string, detail: string): string {
+  const suffix = ` · ${detail}`;
+  const available = Math.max(1, TOAST_MESSAGE_LIMIT - graphemes(suffix).length);
+  return `${compactText(name, available)}${suffix}`;
+}
+
 export function jobToast(job: ImportJob): {
   style: "success" | "failure";
   title: string;
@@ -38,21 +44,31 @@ export function jobToast(job: ImportJob): {
 } {
   const kind = job.source.type === "album" ? "Album" : "Playlist";
   const tracks = `${job.counts.total || job.source.total || 0} ${job.mode === "update" ? "changes" : "tracks"}`;
+  const sourceName = job.source.name || kind;
   if (job.status === "complete") {
     return {
       style: "success",
-      ...compactToast(job.mode === "update" ? "Playlist update complete" : `${kind} added to Music`, tracks),
+      ...compactToast(
+        job.mode === "update" ? "Playlist update complete" : `${kind} added to Music`,
+        namedDetail(sourceName, tracks),
+      ),
     };
   }
   if (job.status === "needs_attention") {
     const count = job.counts.review + job.counts.failed;
     return {
       style: "failure",
-      ...compactToast(`${kind} needs attention`, `${count} ${count === 1 ? "track needs" : "tracks need"} review`),
+      ...compactToast(
+        `${kind} needs approval`,
+        namedDetail(sourceName, `${count} ${count === 1 ? "track" : "tracks"}`),
+      ),
     };
   }
   return {
     style: "failure",
-    ...compactToast(job.mode === "update" ? "Playlist update failed" : `${kind} import failed`, "Open Import Activity"),
+    ...compactToast(
+      job.mode === "update" ? "Playlist update failed" : `${kind} import failed`,
+      namedDetail(sourceName, "Open Activity"),
+    ),
   };
 }

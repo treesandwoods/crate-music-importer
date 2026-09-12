@@ -24,20 +24,19 @@ _YOUTUBE_SELECTION_ERRORS = {
 	"No verified YouTube recording met the automatic identity and duration requirements.",
 }
 
-_SEEDED_PLAYLIST_URLS = {
-	"7e9ZbYY2MshqF4APO1GdMm": "https://open.spotify.com/playlist/7e9ZbYY2MshqF4APO1GdMm",
-	"6iV3fAswdxYDitegoVjo72": "https://open.spotify.com/playlist/6iV3fAswdxYDitegoVjo72",
-	"1CZPh4vz1diXjmNw3b3HgK": "https://open.spotify.com/playlist/1CZPh4vz1diXjmNw3b3HgK",
-}
+_SPOTIFY_PLAYLIST_ID = re.compile(r"^[A-Za-z0-9]{16,32}$")
 
 
-def seed_known_playlist_urls(manifest: dict[str, Any]) -> int:
-	"""Backfill the three explicitly supplied legacy playlist links."""
+def backfill_playlist_urls(manifest: dict[str, Any]) -> int:
+	"""Recover canonical Spotify URLs for saved playlists that predate URL storage."""
 	updated = 0
-	for playlist_id, url in _SEEDED_PLAYLIST_URLS.items():
-		playlist = manifest.get("playlists", {}).get(playlist_id)
-		if isinstance(playlist, dict) and not playlist.get("spotify_url"):
-			playlist["spotify_url"] = url
+	for playlist_id, playlist in manifest.get("playlists", {}).items():
+		if (
+			isinstance(playlist, dict)
+			and not playlist.get("spotify_url")
+			and _SPOTIFY_PLAYLIST_ID.fullmatch(str(playlist_id))
+		):
+			playlist["spotify_url"] = f"https://open.spotify.com/playlist/{playlist_id}"
 			updated += 1
 	return updated
 
@@ -116,7 +115,7 @@ def _load_manifest_unlocked(paths: ManagedPaths) -> dict[str, Any]:
 		if isinstance(recording, dict):
 			recording.setdefault("album_metadata", None)
 			recording.setdefault("album_memberships", {})
-	seed_known_playlist_urls(data)
+	backfill_playlist_urls(data)
 	return data
 
 

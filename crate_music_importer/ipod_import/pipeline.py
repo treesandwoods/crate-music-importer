@@ -11,7 +11,6 @@ from crate_music_importer.ipod_import.manifest import (
 	ManagedPaths,
 	clone_manifest,
 	file_sha256,
-	load_manifest,
 	refresh_manual_youtube_overrides,
 	save_manifest,
 	set_album,

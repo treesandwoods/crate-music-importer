@@ -10,7 +10,7 @@ The importer does not operate an iPod or change Finder's whole-library sync sett
 
 - macOS, Music.app, and [Raycast](https://www.raycast.com/).
 - Python **3.10 or newer**, with `venv` support.
-- Node.js **22 or newer** and npm, for building the extension from this repository.
+- Node.js **22.22.2 or newer** and npm, for building the extension from this repository.
 - [Homebrew](https://brew.sh/) for the external downloader stack: `yt-dlp`, `ffmpeg` (including `ffprobe`), and Deno for modern yt-dlp JavaScript challenges.
 - Your own [Spotify developer app](https://developer.spotify.com/dashboard) for album search. Public playlist-link imports do not require album-search OAuth. Spotify account eligibility and development-mode limits are controlled by Spotify.
 
@@ -79,7 +79,7 @@ Saved-playlist updates compare Spotify track IDs by occurrence count against the
 
 Automatic YouTube selection requires a score strictly greater than `0.87`. Manual choices remain deliberate. Incomplete Spotify responses, missing per-track artwork, and incorrect downloaded durations stop progress instead of silently producing partial or incorrect imports.
 
-Jobs run sequentially in a detached worker and survive closing Raycast. Keep the configured directory stable while jobs are queued or active. Do not reinstall the extension during an active job. Completion and attention notices use Raycast's compact notifications. Continue using your normal whole-library Finder/iPod sync afterward.
+Jobs run sequentially in a detached worker and survive closing Raycast. Keep the configured directory stable while jobs are queued or active. Do not reinstall the extension during an active job. Every completed album or playlist import and every approval-needed stop triggers a compact Raycast toast with the source name and count. If **Review Activity & Problems** is already open, the visible activity list replaces the redundant toast. Continue using your normal whole-library Finder/iPod sync afterward.
 
 ## Configuration and storage
 

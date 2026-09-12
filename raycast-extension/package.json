@@ -7,6 +7,9 @@
   "icon": "icon.png",
   "author": "elijahsanner",
   "license": "MIT",
+  "engines": {
+    "node": ">=22.22.2"
+  },
   "platforms": [
     "macOS"
   ],

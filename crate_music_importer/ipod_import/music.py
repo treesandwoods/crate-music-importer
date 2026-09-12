@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import time
 from pathlib import Path
@@ -423,55 +422,6 @@ end run
 '''
 
 
-_MERGE_EXACT_DUPLICATE_SCRIPT = r'''
-on run argv
-	set canonicalID to item 1 of argv as text
-	set duplicateID to item 2 of argv as text
-	set ratingValue to item 3 of argv as integer
-	set favoritedValue to item 4 of argv is "true"
-	set playedCountValue to item 5 of argv as integer
-	set skippedCountValue to item 6 of argv as integer
-	tell application "Music"
-		set canonicalMatches to every track of library playlist 1 whose persistent ID is canonicalID
-		set duplicateMatches to every track of library playlist 1 whose persistent ID is duplicateID
-		if (count of canonicalMatches) is not 1 then error "The canonical Music track is missing: " & canonicalID
-		if (count of duplicateMatches) is not 1 then error "The duplicate Music track is missing: " & duplicateID
-		set canonicalTrack to item 1 of canonicalMatches
-		set duplicateTrack to item 1 of duplicateMatches
-		set rating of canonicalTrack to ratingValue
-		set favorited of canonicalTrack to favoritedValue
-		set played count of canonicalTrack to playedCountValue
-		set skipped count of canonicalTrack to skippedCountValue
-		repeat with targetPlaylist in every user playlist
-			try
-				set originalTracks to every track of targetPlaylist
-				set replacementTracks to {}
-				set needsReplacement to false
-				repeat with sourceTrack in originalTracks
-					if (persistent ID of sourceTrack as text) is duplicateID then
-						set end of replacementTracks to canonicalTrack
-						set needsReplacement to true
-					else
-						set end of replacementTracks to sourceTrack
-					end if
-				end repeat
-				if needsReplacement then
-					delete every track of targetPlaylist
-					repeat with sourceTrack in replacementTracks
-						duplicate sourceTrack to targetPlaylist
-					end repeat
-				end if
-			on error errorMessage number errorNumber
-				error "Could not preserve playlist membership before duplicate removal: " & errorMessage number errorNumber
-			end try
-		end repeat
-		delete duplicateTrack
-		return "OK"
-	end tell
-end run
-'''
-
-
 _PLAYLIST_STATUS_SCRIPT = r'''
 on run argv
 	set requestedName to item 1 of argv
@@ -873,30 +823,6 @@ def verify_music_tracks(persistent_ids: list[str], *, settle_seconds: float = 2.
 		for track in scan_playlist_imports(requested)
 		if str(track.get("persistent_id") or "") in requested_set
 	}
-
-
-def merge_exact_duplicate_music_tracks(
-	canonical_persistent_id: str,
-	duplicate_persistent_id: str,
-	*,
-	rating: int,
-	favorited: bool,
-	played_count: int,
-	skipped_count: int,
-) -> None:
-	"""Replace a byte-identical duplicate in ordinary user playlists, then delete it."""
-	if canonical_persistent_id == duplicate_persistent_id:
-		raise MusicAutomationError("A duplicate Music track must differ from its canonical persistent ID.")
-	result = _osascript(_MERGE_EXACT_DUPLICATE_SCRIPT, [
-		canonical_persistent_id,
-		duplicate_persistent_id,
-		str(max(0, min(100, int(rating)))),
-		"true" if favorited else "false",
-		str(max(0, int(played_count))),
-		str(max(0, int(skipped_count))),
-	], timeout=600)
-	if result != "OK":
-		raise MusicAutomationError(f"Music returned an unexpected duplicate-merge result: {result}")
 
 
 def update_managed_music_track(

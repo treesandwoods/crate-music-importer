@@ -7,7 +7,7 @@ from crate_music_importer.ipod_import.music import MusicAutomationError
 from crate_music_importer.ipod_import.playlist_update import apply_playlist_update, build_playlist_update_preview, save_pending_update, saved_playlists
 
 
-URL = "https://open.spotify.com/playlist/7e9ZbYY2MshqF4APO1GdMm"
+URL = "https://open.spotify.com/playlist/37i9dQZF1DXTESTFIXTURE1"
 
 
 def track(spotify_id, title=None):

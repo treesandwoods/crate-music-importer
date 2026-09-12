@@ -43,22 +43,22 @@ test("toast text truncates by grapheme within both visual budgets", () => {
   assert.ok(message.endsWith("…"));
 });
 
-test("terminal job toasts are concise and omit long source names", () => {
+test("terminal job toasts are concise and preserve names plus counts", () => {
   for (const status of ["complete", "needs_attention", "failed"] as const) {
     const value = jobToast(fixture(status));
     assert.ok(length(value.title) <= TOAST_TITLE_LIMIT);
     assert.ok(length(value.message || "") <= TOAST_MESSAGE_LIMIT);
-    assert.equal(value.title.includes("very long"), false);
+    assert.match(value.message || "", /A very long source name/);
   }
   assert.deepEqual(jobToast(fixture("complete")), {
     style: "success",
     title: "Album added to Music",
-    message: "12 tracks",
+    message: "A very long source name · 12 tracks",
   });
   assert.deepEqual(jobToast(fixture("complete", "playlist")), {
     style: "success",
     title: "Playlist added to Music",
-    message: "12 tracks",
+    message: "A very long source name · 12 tracks",
   });
 });
 
@@ -69,6 +69,15 @@ test("playlist update jobs use update language and change counts", () => {
   assert.deepEqual(jobToast(job), {
     style: "success",
     title: "Playlist update complete",
-    message: "12 changes",
+    message: "A very long source name · 12 changes",
   });
+});
+
+test("long names truncate without cutting off the event count", () => {
+  const job = fixture("needs_attention");
+  job.source.name = "A name made deliberately much longer than the toast message can display without truncation";
+  const value = jobToast(job);
+  assert.equal(value.title, "Album needs approval");
+  assert.ok((value.message || "").endsWith(" · 2 tracks"));
+  assert.ok(length(value.message || "") <= TOAST_MESSAGE_LIMIT);
 });
