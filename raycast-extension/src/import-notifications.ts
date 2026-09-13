@@ -12,7 +12,7 @@ export default async function Command() {
   for (const [index, job] of pending.entries()) {
     if (environment.launchType === LaunchType.Background && (await isRaycastWindowVisible())) {
       // Toasts require a foreground launch. Leave this event pending for it.
-      await launchCommand({ name: "import-notifications", type: LaunchType.UserInitiated });
+      await launchCommand({ name: "import-notification-toast", type: LaunchType.UserInitiated });
       return;
     }
     await deliverPendingNotifications([job], {

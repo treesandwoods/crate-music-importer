@@ -85,5 +85,10 @@ test("visible Raycast hands off to foreground toast without acknowledging or dis
     },
   );
   await module.exports.default();
-  assert.deepEqual(launches, [{ name: "import-notifications", type: "userInitiated" }]);
+  const manifest = JSON.parse(readFileSync("package.json", "utf8"));
+  assert.equal(
+    manifest.commands.find((command: { name: string }) => command.name === "import-notification-toast").mode,
+    "no-view",
+  );
+  assert.deepEqual(launches, [{ name: "import-notification-toast", type: "userInitiated" }]);
 });
