@@ -614,14 +614,14 @@ class DurableJobTests(unittest.TestCase):
 			self.assertFalse(reopened_again["notification"]["pending"])
 			self.assertIsNotNone(reopened_again["notification"]["notifiedAt"])
 
-	def test_terminal_deeplink_passes_only_durable_job_context(self):
+	def test_terminal_deeplink_targets_activity_and_passes_only_durable_job_context(self):
 		with patch.dict(os.environ, {"CRATE_RAYCAST_AUTHOR": "fixture-author", "CRATE_RAYCAST_EXTENSION": "fixture-extension"}):
 			url = _raycast_deeplink("job-id")
-		self.assertIn("fixture-author/fixture-extension", url)
-		self.assertIn("import-notifications", url)
-		self.assertIn("launchType=background", url)
-		self.assertIn("job-id", url)
-		self.assertNotIn("Album added", url)
+			self.assertIn("fixture-author/fixture-extension", url)
+			self.assertIn("import-activity-problems", url)
+			self.assertIn("launchType=background", url)
+			self.assertIn("job-id", url)
+			self.assertNotIn("Album added", url)
 
 	def test_terminal_notification_retries_failed_raycast_launches(self):
 		from crate_music_importer.ipod_import.jobs import notify_raycast
