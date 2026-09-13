@@ -28,7 +28,7 @@ from crate_music_importer.ipod_import.spotify import parse_source_url
 
 ACTIVE_STATES = {"queued", "running"}
 TERMINAL_STATES = {"complete", "needs_attention", "ready_to_continue", "failed", "cancelled", "superseded"}
-RAYCAST_NOTIFICATION_COMMAND = "import-notifications"
+RAYCAST_ACTIVITY_COMMAND = "import-activity-problems"
 
 
 def _now() -> str:
@@ -893,7 +893,7 @@ def _raycast_deeplink(job_id: str) -> str:
 		raise ValueError("CRATE_RAYCAST_AUTHOR is required for background notifications.")
 	context = quote(json.dumps({"jobId": job_id, "terminalEvent": True}, separators=(",", ":")))
 	return (
-		f"raycast://extensions/{author}/{extension}/{RAYCAST_NOTIFICATION_COMMAND}"
+		f"raycast://extensions/{author}/{extension}/{RAYCAST_ACTIVITY_COMMAND}"
 		f"?launchType=background&context={context}"
 	)
 

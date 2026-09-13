@@ -44,18 +44,6 @@
       "subtitle": "Crate Music Importer",
       "description": "Run a read-only library audit and check for safe, stable downloader updates.",
       "mode": "view"
-    },
-    {
-      "name": "import-notifications",
-      "title": "Import Notifications",
-      "description": "Deliver pending import completion and review notifications.",
-      "mode": "no-view"
-    },
-    {
-      "name": "import-notification-toast",
-      "title": "Import Notification Toast",
-      "description": "Display pending import notifications inside the open Raycast window.",
-      "mode": "no-view"
     }
   ],
   "scripts": {
