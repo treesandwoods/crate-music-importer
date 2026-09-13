@@ -6,7 +6,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import signal
 import subprocess
 from datetime import datetime, timezone
@@ -15,6 +14,7 @@ from urllib.request import Request, urlopen
 
 from crate_music_importer.ipod_import.constants import MANAGED_ROOT
 from crate_music_importer.ipod_import.dependency_lock import dependency_lock, state_directory
+from crate_music_importer.ipod_import.tooling import resolve_executable
 
 FORMULAE = {"yt-dlp": "yt-dlp", "ffmpeg": "ffmpeg", "deno": "deno"}
 # Public YouTube metadata probe; no media or playlist downloads.
@@ -30,10 +30,7 @@ def redact(value: str) -> str:
 
 
 def resolve_tool(name: str) -> str | None:
-	for candidate in (shutil.which(name), f"/opt/homebrew/bin/{name}", f"/usr/local/bin/{name}"):
-		if candidate and Path(candidate).is_file():
-			return str(candidate)
-	return None
+	return resolve_executable(name)
 
 
 def run_command(command: list[str], timeout: int = 30) -> str:

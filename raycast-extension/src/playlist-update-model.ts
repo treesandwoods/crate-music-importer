@@ -11,7 +11,7 @@ export function canQueuePlaylistUpdate(preview?: PlaylistUpdatePreview): boolean
 export function playlistUpdateConfirmation(preview: PlaylistUpdatePreview): string {
   const removals = preview.removals.map((row) => `${row.artists} — ${row.title}: ${removalLabel(row)}`);
   return [
-    `${preview.additions.length} additions will be appended. ${preview.removals.length} imported occurrences will be removed. Manual Music entries and surviving order are preserved.`,
+    `${preview.additions.length} additions will be placed in Spotify order. ${preview.removals.length} imported occurrences will be removed. Manual Music entries and surviving order are preserved.`,
     ...(removals.length ? ["Removals:", ...removals] : []),
   ].join("\n");
 }

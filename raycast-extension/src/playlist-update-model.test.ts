@@ -96,4 +96,7 @@ test("command keeps new import first and exposes saved playlist, update, and inc
   assert.match(source, /Playlist is up to date/);
   assert.match(source, /Spotify Data Incomplete/);
   assert.match(source, /Change Stored Spotify Link/);
+  assert.match(source, /title=\{primaryActionTitle\}/);
+  assert.match(source, /Spotify #\$\{row.position\}/);
+  assert.doesNotMatch(source, /<List\s[^>]+actions=\{actions\}/);
 });

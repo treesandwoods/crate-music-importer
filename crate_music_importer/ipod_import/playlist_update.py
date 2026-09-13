@@ -220,6 +220,7 @@ def build_playlist_update_preview(
 			addition_rows.append(row)
 			addition_items.append(item)
 			current_links[spotify_position - 1]["recording_id"] = item["recording_id"]
+			current_links[spotify_position - 1]["saved_position"] = item["position"]
 	# build_preview replaces the playlist and its memberships; restore the saved state until apply succeeds.
 	planned["playlists"][playlist_id] = copy.deepcopy(saved)
 	for recording_id, recording in planned.get("recordings", {}).items():
@@ -295,6 +296,119 @@ def _align_imported_positions(membership: list[str], imported: list[str]) -> lis
 		positions.append(index)
 		start = index + 1
 	return positions
+
+
+def _addition_anchors(
+	original_items: list[dict[str, Any]],
+	addition_items: list[dict[str, Any]],
+	spotify_snapshot: list[dict[str, Any]],
+	remove_saved: set[int],
+) -> list[tuple[dict[str, Any], int | None]]:
+	"""Place additions before the next surviving imported occurrence in Spotify order."""
+	surviving_positions = {
+		int(item.get("position") or 0)
+		for item in original_items
+		if int(item.get("position") or 0) not in remove_saved
+	}
+	addition_by_spotify_position = {
+		int(item.get("spotify_position") or 0): item
+		for item in addition_items
+	}
+	ordered_snapshot = sorted(spotify_snapshot, key=lambda row: int(row.get("spotify_position") or 0))
+	snapshot_index_by_position = {
+		int(row.get("spotify_position") or 0): index
+		for index, row in enumerate(ordered_snapshot)
+	}
+	anchors: list[tuple[dict[str, Any], int | None]] = []
+	for spotify_position, addition in sorted(addition_by_spotify_position.items()):
+		index = snapshot_index_by_position.get(spotify_position, len(ordered_snapshot))
+		anchor = next((
+			int(candidate.get("saved_position") or 0)
+			for candidate in ordered_snapshot[index + 1:]
+			if int(candidate.get("spotify_position") or 0) not in addition_by_spotify_position
+			and int(candidate.get("saved_position") or 0) in surviving_positions
+		), None)
+		anchors.append((addition, anchor))
+	return anchors
+
+
+def _target_music_membership(
+	current: list[str],
+	original_items: list[dict[str, Any]],
+	music_positions: list[int],
+	remove_saved: set[int],
+	remove_indexes: list[int],
+	addition_items: list[dict[str, Any]],
+	addition_ids: list[str],
+	spotify_snapshot: list[dict[str, Any]],
+) -> list[str]:
+	survivors = [value for index, value in enumerate(current) if index not in set(remove_indexes)]
+	addition_id_by_position = {
+		int(item.get("spotify_position") or 0): persistent_id
+		for item, persistent_id in zip(addition_items, addition_ids)
+	}
+	index_by_saved_position: dict[int, int] = {}
+	removed = set(remove_indexes)
+	for item, current_index in zip(original_items, music_positions):
+		saved_position = int(item.get("position") or 0)
+		if saved_position in remove_saved:
+			continue
+		index_by_saved_position[saved_position] = current_index - sum(index < current_index for index in removed)
+	before_index: dict[int, list[str]] = defaultdict(list)
+	suffix: list[str] = []
+	for addition, anchor in _addition_anchors(original_items, addition_items, spotify_snapshot, remove_saved):
+		persistent_id = addition_id_by_position[int(addition.get("spotify_position") or 0)]
+		if anchor is None:
+			suffix.append(persistent_id)
+		else:
+			before_index[index_by_saved_position[anchor]].append(persistent_id)
+	target: list[str] = []
+	for index, persistent_id in enumerate(survivors):
+		target.extend(before_index.get(index, []))
+		target.append(persistent_id)
+	target.extend(suffix)
+	return target
+
+
+def _updated_playlist_items(
+	original_items: list[dict[str, Any]],
+	addition_items: list[dict[str, Any]],
+	spotify_snapshot: list[dict[str, Any]],
+	remove_saved: set[int],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+	surviving = [dict(item) for item in original_items if int(item.get("position") or 0) not in remove_saved]
+	before_position: dict[int, list[tuple[dict[str, Any], bool]]] = defaultdict(list)
+	suffix: list[tuple[dict[str, Any], bool]] = []
+	for addition, anchor in _addition_anchors(original_items, addition_items, spotify_snapshot, remove_saved):
+		if anchor is None:
+			suffix.append((dict(addition), True))
+		else:
+			before_position[anchor].append((dict(addition), True))
+	ordered_values: list[tuple[dict[str, Any], bool]] = []
+	for item in surviving:
+		ordered_values.extend(before_position.get(int(item.get("position") or 0), []))
+		ordered_values.append((item, False))
+	ordered_values.extend(suffix)
+	old_to_new: dict[int, int] = {}
+	addition_to_new: dict[int, int] = {}
+	ordered: list[dict[str, Any]] = []
+	for position, (item, is_addition) in enumerate(ordered_values, start=1):
+		old_position = int(item.get("position") or 0)
+		spotify_position = int(item.get("spotify_position") or 0)
+		if is_addition:
+			addition_to_new[spotify_position] = position
+		else:
+			old_to_new[old_position] = position
+		item["position"] = position
+		ordered.append(item)
+	normalized_snapshot = []
+	for row in spotify_snapshot:
+		value = dict(row)
+		spotify_position = int(value.get("spotify_position") or 0)
+		old_position = int(value.get("saved_position") or 0)
+		value["saved_position"] = addition_to_new.get(spotify_position, old_to_new.get(old_position, old_position))
+		normalized_snapshot.append(value)
+	return ordered, normalized_snapshot
 
 
 def _safe_delete_file(paths: ManagedPaths, relative_path: str) -> None:
@@ -448,11 +562,30 @@ def apply_playlist_update(
 		remove_saved = set(int(value) for value in pending.get("removal_positions") or [])
 		remove_indexes = [music_positions[index] for index, item in enumerate(original_items) if int(item.get("position") or 0) in remove_saved]
 		survivors = [value for index, value in enumerate(current) if index not in set(remove_indexes)]
+		final = _target_music_membership(
+			current,
+			original_items,
+			music_positions,
+			remove_saved,
+			remove_indexes,
+			addition_items,
+			append_ids,
+			list(pending.get("spotify_snapshot") or []),
+		)
+		planned_append = append_ids
+		if final != survivors + append_ids:
+			prefix_length = 0
+			while prefix_length < min(len(current), len(final)) and current[prefix_length] == final[prefix_length]:
+				prefix_length += 1
+			survivors = current[:prefix_length]
+			remove_indexes = list(range(prefix_length, len(current)))
+			planned_append = final[prefix_length:]
 		checkpoint = {
 			"baseline": current,
 			"survivors": survivors,
-			"append_ids": append_ids,
+			"append_ids": planned_append,
 			"remove_indexes": remove_indexes,
+			"final": final,
 			"created_at": _now(),
 		}
 		pending["music_checkpoint"] = checkpoint
@@ -460,7 +593,7 @@ def apply_playlist_update(
 	baseline = list(checkpoint.get("baseline") or [])
 	survivors = list(checkpoint.get("survivors") or [])
 	planned_append = list(checkpoint.get("append_ids") or [])
-	final = survivors + planned_append
+	final = list(checkpoint.get("final") or [*survivors, *planned_append])
 	if current != final:
 		if current == baseline:
 			current = membership_editor(str(playlist.get("name") or "Spotify Playlist"), known_pid, current, list(checkpoint.get("remove_indexes") or []), planned_append)
@@ -476,8 +609,13 @@ def apply_playlist_update(
 	save_manifest(paths, manifest)
 
 	remove_saved = set(int(value) for value in pending.get("removal_positions") or [])
-	surviving_items = [dict(item) for item in playlist.get("items") or [] if int(item.get("position") or 0) not in remove_saved]
-	playlist["items"] = surviving_items + addition_items
+	original_items = sorted(playlist.get("items") or [], key=lambda item: int(item.get("position") or 0))
+	playlist["items"], spotify_snapshot = _updated_playlist_items(
+		original_items,
+		addition_items,
+		list(pending.get("spotify_snapshot") or []),
+		remove_saved,
+	)
 	for recording in manifest.get("recordings", {}).values():
 		(recording.get("playlist_memberships") or {}).pop(playlist_id, None)
 	positions: dict[str, list[int]] = defaultdict(list)
@@ -510,9 +648,9 @@ def apply_playlist_update(
 		deleted += 1
 		save_manifest(paths, manifest)
 
-	playlist["spotify_occurrence_snapshot"] = list(pending.get("spotify_snapshot") or [])
+	playlist["spotify_occurrence_snapshot"] = spotify_snapshot
 	playlist["spotify_occurrence_counts"] = _occurrence_counts(playlist["spotify_occurrence_snapshot"])
-	playlist["latest_observed_spotify_snapshot"] = list(pending.get("spotify_snapshot") or [])
+	playlist["latest_observed_spotify_snapshot"] = list(spotify_snapshot)
 	playlist["latest_observed_spotify_counts"] = dict(playlist["spotify_occurrence_counts"])
 	playlist["spotify_url"] = str(pending.get("spotify_url") or playlist.get("spotify_url") or "")
 	playlist["total_count"] = len(playlist["spotify_occurrence_snapshot"])

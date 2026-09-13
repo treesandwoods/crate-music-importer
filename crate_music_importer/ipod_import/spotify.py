@@ -9,7 +9,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -108,34 +108,49 @@ def fetch_playlist(
 	known_track_covers: dict[str, str] | None = None,
 ) -> SpotifyPlaylist:
 	playlist_id, canonical_url = parse_playlist_url(value)
-	pages: list[dict[str, Any]] = []
-	errors: list[str] = []
-	for url, parser in (
+	playlist = _fetch_public_source((
 		(canonical_url, _parse_initial_page),
 		(f"https://open.spotify.com/embed/playlist/{playlist_id}", _parse_embed_page),
-	):
-		try:
-			pages.append(parser(_get(url, timeout), playlist_id, canonical_url))
-		except SpotifyError as exc:
-			errors.append(str(exc))
-	playlist = _finalize_source(pages, errors, "playlist", playlist_id, canonical_url)
+	), "playlist", playlist_id, canonical_url, timeout)
 	_enrich_playlist_covers(playlist.tracks, timeout=timeout, known_track_covers=known_track_covers)
 	return playlist
 
 
 def fetch_album(value: str, *, timeout: int = 25) -> SpotifyPlaylist:
 	album_id, canonical_url = parse_album_url(value)
-	pages: list[dict[str, Any]] = []
-	errors: list[str] = []
-	for url, parser in (
+	return _fetch_public_source((
 		(canonical_url, _parse_initial_album_page),
 		(f"https://open.spotify.com/embed/album/{album_id}", _parse_embed_album_page),
-	):
-		try:
-			pages.append(parser(_get(url, timeout), album_id, canonical_url))
-		except SpotifyError as exc:
-			errors.append(str(exc))
-	return _finalize_source(pages, errors, "album", album_id, canonical_url)
+	), "album", album_id, canonical_url, timeout)
+
+
+def _fetch_public_source(
+	sources: tuple[tuple[str, Callable[[str, str, str], dict[str, Any]]], ...],
+	source_type: str,
+	source_id: str,
+	canonical_url: str,
+	timeout: int,
+	*,
+	attempts: int = 3,
+) -> SpotifyPlaylist:
+	"""Retry Spotify's occasionally truncated public embed before reporting an incomplete source."""
+	pages: list[dict[str, Any]] = []
+	errors: list[str] = []
+	latest: SpotifyPlaylist | None = None
+	for _attempt in range(max(1, attempts)):
+		for url, parser in sources:
+			try:
+				pages.append(parser(_get(url, timeout), source_id, canonical_url))
+			except SpotifyError as exc:
+				errors.append(str(exc))
+		if not pages:
+			continue
+		latest = _finalize_source(pages, errors, source_type, source_id, canonical_url)
+		if latest.complete:
+			return latest
+	if latest is None:
+		raise SpotifyError(errors[-1] if errors else f"Spotify returned no {source_type} data.")
+	return latest
 
 
 def _finalize_source(
