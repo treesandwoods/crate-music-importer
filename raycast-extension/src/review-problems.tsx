@@ -720,7 +720,7 @@ export default function Command(props: LaunchProps<{ launchContext: ActivityCont
   const sections = snapshot ? problemSections(snapshot) : [];
   const activeJobs = jobs?.jobs.filter((job) => job.status === "queued" || job.status === "running") || [];
   const attentionJobs = jobs?.jobs.filter((job) => job.status === "needs_attention" || job.status === "failed") || [];
-  const recentJobs = jobs?.jobs.filter((job) => job.status === "complete").slice(0, 50) || [];
+  const recentJobs = jobs?.jobs.filter((job) => job.status === "complete") || [];
 
   return (
     <List

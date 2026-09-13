@@ -7,6 +7,7 @@ import hashlib
 import json
 import shutil
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -69,9 +70,39 @@ def saved_playlists(manifest: dict[str, Any]) -> list[dict[str, Any]]:
 			"name": str(playlist.get("name") or "Spotify Playlist"),
 			"track_count": len(playlist.get("items") or []),
 			"spotify_url": str(playlist.get("spotify_url") or ""),
+			"cover_url": str(playlist.get("cover_url") or "") or None,
 			"music_playlist_persistent_id": str(playlist.get("music_playlist_persistent_id") or "") or None,
 		})
 	return sorted(values, key=lambda value: (value["name"].casefold(), value["id"]))
+
+
+def backfill_playlist_covers(
+	manifest: dict[str, Any],
+	cover_fetcher: Callable[[str], str | None],
+	*,
+	max_workers: int = 8,
+) -> int:
+	"""Best-effort cache of shared playlist thumbnails for legacy saved imports."""
+	missing = [
+		(str(playlist_id), str(playlist.get("spotify_url") or ""))
+		for playlist_id, playlist in manifest.get("playlists", {}).items()
+		if isinstance(playlist, dict) and not playlist.get("cover_url") and playlist.get("spotify_url")
+	]
+	if not missing:
+		return 0
+	updated = 0
+	with ThreadPoolExecutor(max_workers=min(max_workers, len(missing))) as executor:
+		futures = {executor.submit(cover_fetcher, url): playlist_id for playlist_id, url in missing}
+		for future in as_completed(futures):
+			try:
+				cover_url = str(future.result() or "")
+			except Exception:
+				continue
+			if not cover_url.startswith(("https://", "http://")):
+				continue
+			manifest["playlists"][futures[future]]["cover_url"] = cover_url
+			updated += 1
+	return updated
 
 
 def _baseline(playlist: dict[str, Any]) -> tuple[list[dict[str, Any]], bool, bool]:
@@ -166,6 +197,7 @@ def build_playlist_update_preview(
 		"id": playlist_id,
 		"name": str(saved.get("name") or current.get("name") or "Spotify Playlist"),
 		"url": str(current.get("url") or saved.get("spotify_url") or ""),
+		"cover_url": str(current.get("cover_url") or saved.get("cover_url") or "") or None,
 		"saved_total": len(saved.get("items") or []),
 		"current_total": int(current.get("total_count") or 0),
 	}
@@ -262,6 +294,7 @@ def save_pending_update(preview: PlaylistUpdatePreview, paths: ManagedPaths) -> 
 	playlist["pending_update"] = {
 		"created_at": _now(),
 		"spotify_url": preview.source["url"],
+		"cover_url": preview.source.get("cover_url"),
 		"spotify_snapshot": preview.spotify_snapshot,
 		"addition_items": preview.addition_items,
 		"removals": preview.removals,
@@ -653,6 +686,7 @@ def apply_playlist_update(
 	playlist["latest_observed_spotify_snapshot"] = list(spotify_snapshot)
 	playlist["latest_observed_spotify_counts"] = dict(playlist["spotify_occurrence_counts"])
 	playlist["spotify_url"] = str(pending.get("spotify_url") or playlist.get("spotify_url") or "")
+	playlist["cover_url"] = pending.get("cover_url") or playlist.get("cover_url")
 	playlist["total_count"] = len(playlist["spotify_occurrence_snapshot"])
 	playlist["complete"] = True
 	playlist["last_successful_update_at"] = _now()

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from crate_music_importer.ipod_import.spotify import SpotifyError, fetch_album, fetch_playlist, load_fixture, parse_album_url, parse_playlist_url
+from crate_music_importer.ipod_import.spotify import SpotifyError, fetch_album, fetch_playlist, fetch_playlist_cover, load_fixture, parse_album_url, parse_playlist_url
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -96,8 +96,19 @@ class SpotifyFixtureTests(unittest.TestCase):
 			oembed,
 		]):
 			playlist = fetch_playlist(f"https://open.spotify.com/playlist/{playlist_id}")
+		self.assertEqual(playlist.cover_url, "https://example.test/playlist-cover.jpg")
 		self.assertEqual(playlist.tracks[0]["cover_url"], "https://example.test/album-one.jpg")
 		self.assertNotEqual(playlist.tracks[0]["cover_url"], "https://example.test/playlist-cover.jpg")
+
+	def test_playlist_cover_uses_lightweight_oembed_metadata(self):
+		playlist_id = "37i9dQZF1DXTESTFIXTURE1"
+		with patch(
+			"crate_music_importer.ipod_import.spotify._get",
+			return_value=json.dumps({"thumbnail_url": "https://example.test/playlist-cover.jpg"}),
+		) as get:
+			cover_url = fetch_playlist_cover(f"https://open.spotify.com/playlist/{playlist_id}")
+		self.assertEqual(cover_url, "https://example.test/playlist-cover.jpg")
+		self.assertEqual(get.call_args.args[0], f"https://open.spotify.com/oembed?url=https://open.spotify.com/playlist/{playlist_id}")
 
 	def test_saved_track_artwork_survives_a_transient_oembed_omission(self):
 		playlist_id = "37i9dQZF1DXTESTFIXTURE1"
