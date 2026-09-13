@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import threading
 from pathlib import Path
@@ -14,6 +13,7 @@ from urllib.request import Request, urlopen
 
 from crate_music_importer.ipod_import.constants import IMPORT_ALBUM, IMPORT_ALBUM_ARTIST, IMPORT_GENRE
 from crate_music_importer.ipod_import.manifest import ManagedPaths, file_sha256, managed_relative_path
+from crate_music_importer.ipod_import.tooling import resolve_executable
 from crate_music_importer.ipod_import.youtube import YouTubeError, ytdlp_path
 
 
@@ -22,9 +22,9 @@ class MediaError(RuntimeError):
 
 
 def _tool(name: str) -> str:
-	for candidate in (shutil.which(name), f"/opt/homebrew/bin/{name}", f"/usr/local/bin/{name}"):
-		if candidate and Path(candidate).is_file():
-			return str(candidate)
+	resolved = resolve_executable(name)
+	if resolved:
+		return resolved
 	raise MediaError(f"{name} is required. Install the prerequisites in the README, then run Library Health & Updates in Raycast.")
 
 

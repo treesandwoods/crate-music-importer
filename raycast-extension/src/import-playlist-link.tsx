@@ -141,10 +141,12 @@ export function PlaylistUpdatePreviewView({ playlist }: { playlist: SavedPlaylis
     }
   }
 
+  const primaryActionTitle = preview?.removals.length ? "Apply All Playlist Changes" : "Add All Tracks";
+  const primaryActionIcon = preview?.removals.length ? Icon.ArrowClockwise : Icon.Plus;
   const actions = (
     <ActionPanel>
       {canQueuePlaylistUpdate(preview) ? (
-        <Action title="Queue Additions + Removals" icon={Icon.ArrowClockwise} onAction={queue} />
+        <Action title={primaryActionTitle} icon={primaryActionIcon} onAction={queue} />
       ) : null}
       <Action title="Refresh Preview" icon={Icon.ArrowClockwise} onAction={load} />
       <Action.Push
@@ -156,13 +158,14 @@ export function PlaylistUpdatePreviewView({ playlist }: { playlist: SavedPlaylis
     </ActionPanel>
   );
   return (
-    <List isLoading={loading} navigationTitle={`${playlist.name} · Update Preview`} actions={actions}>
+    <List isLoading={loading} navigationTitle={`${playlist.name} · Update Preview`}>
       {preview?.warning ? (
         <List.Section title={preview.incomplete_data ? "Spotify Data Incomplete" : "Update Notice"}>
           <List.Item
             title={preview.blocked ? "Update blocked" : "Removals deferred"}
             subtitle={preview.warning}
             icon={{ source: Icon.ExclamationMark, tintColor: Color.Orange }}
+            actions={actions}
           />
         </List.Section>
       ) : null}
@@ -174,14 +177,21 @@ export function PlaylistUpdatePreviewView({ playlist }: { playlist: SavedPlaylis
         />
       ) : null}
       {preview?.additions.length ? (
-        <List.Section title="Additions" subtitle={`${preview.additions.length} · appended in Spotify order`}>
+        <List.Section title="Additions" subtitle={`${preview.additions.length} · Spotify order`}>
+          <List.Item
+            title={primaryActionTitle}
+            subtitle={`${preview.additions.length} track${preview.additions.length === 1 ? "" : "s"}${preview.removals.length ? ` · ${preview.removals.length} removal${preview.removals.length === 1 ? "" : "s"}` : ""}`}
+            icon={{ source: primaryActionIcon, tintColor: Color.Green }}
+            actions={actions}
+          />
           {preview.additions.map((row) => (
             <List.Item
               key={`add-${row.position}-${row.recording_id}`}
               title={row.title}
               subtitle={row.artists}
               icon={{ source: Icon.Plus, tintColor: Color.Green }}
-              accessories={[{ tag: "append" }]}
+              accessories={[{ tag: `Spotify #${row.position}` }]}
+              actions={actions}
             />
           ))}
         </List.Section>
@@ -205,6 +215,7 @@ export function PlaylistUpdatePreviewView({ playlist }: { playlist: SavedPlaylis
                   },
                 },
               ]}
+              actions={actions}
             />
           ))}
         </List.Section>

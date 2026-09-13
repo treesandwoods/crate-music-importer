@@ -569,6 +569,13 @@ on run argv
 			set currentID to persistent ID of (item trackIndex of currentTracks) as text
 			if currentID is not (item trackIndex of expectedIDs as text) then error "Playlist membership changed before the guarded update."
 		end repeat
+		set sourceTracks to {}
+		repeat with requestedID in appendIDs
+			set wantedID to requestedID as text
+			set matches to every track of library playlist 1 whose persistent ID is wantedID
+			if (count of matches) is not 1 then error "A planned Music track is missing or colliding: " & wantedID
+			set end of sourceTracks to item 1 of matches
+		end repeat
 		repeat with removalValue in removalValues
 			if (removalValue as text) is not "" then
 				set removalPosition to (removalValue as integer) + 1
@@ -576,11 +583,8 @@ on run argv
 				delete (item removalPosition of currentTracks)
 			end if
 		end repeat
-		repeat with requestedID in appendIDs
-			set wantedID to requestedID as text
-			set matches to every track of library playlist 1 whose persistent ID is wantedID
-			if (count of matches) is not 1 then error "A planned Music track is missing or colliding: " & wantedID
-			duplicate (item 1 of matches) to targetPlaylist
+		repeat with sourceTrack in sourceTracks
+			duplicate sourceTrack to targetPlaylist
 		end repeat
 		set finalIDs to {}
 		repeat with playlistTrack in every track of targetPlaylist

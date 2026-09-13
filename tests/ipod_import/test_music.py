@@ -122,6 +122,7 @@ class MusicAutomationTests(unittest.TestCase):
 		self.assertEqual(result, ["MANUAL", "A", "C"])
 		self.assertEqual(run_script.call_args.args[1], ["Saved", "PLAYLIST-PID", "MANUAL\x1fA\x1fB", "2", "C"])
 		self.assertIn("Playlist membership changed before the guarded update", _EDIT_PLAYLIST_MEMBERSHIP_SCRIPT)
+		self.assertLess(_EDIT_PLAYLIST_MEMBERSHIP_SCRIPT.index("set sourceTracks to {}"), _EDIT_PLAYLIST_MEMBERSHIP_SCRIPT.index("repeat with removalValue"))
 		self.assertNotIn("delete every track of targetPlaylist", _EDIT_PLAYLIST_MEMBERSHIP_SCRIPT)
 
 	def test_permission_error_names_automation_settings(self):

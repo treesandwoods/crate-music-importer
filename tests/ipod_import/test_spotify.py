@@ -159,6 +159,36 @@ class SpotifyFixtureTests(unittest.TestCase):
 		self.assertEqual(album.tracks[0]["track_no"], 7)
 		self.assertEqual(album.tracks[0]["disc_no"], 2)
 
+	def test_incomplete_public_embed_is_retried_before_blocking(self):
+		playlist_id = "37i9dQZF1DXTESTFIXTURE1"
+		def initial(total):
+			state = {"entities": {"items": {f"spotify:playlist:{playlist_id}": {
+				"id": playlist_id, "name": "Retry Playlist", "content": {"totalCount": total, "items": []},
+			}}}}
+			return f'<script id="initialState">{base64.b64encode(json.dumps(state).encode()).decode()}</script>'
+		def embed(titles):
+			entity = {
+				"id": playlist_id,
+				"title": "Retry Playlist",
+				"trackCount": 2,
+				"trackList": [
+					{"entityType": "track", "uri": f"spotify:track:retrytrackfixture{i}", "title": title, "subtitle": "Artist", "duration": 100000}
+					for i, title in enumerate(titles, start=1)
+				],
+			}
+			return f'<script id="__NEXT_DATA__">{json.dumps({"props": {"pageProps": {"state": {"data": {"entity": entity}}}}})}</script>'
+
+		with patch("crate_music_importer.ipod_import.spotify._get", side_effect=[
+			initial(2), embed(["First"]),
+			initial(2), embed(["First", "Second"]),
+			json.dumps({"thumbnail_url": "https://example.test/first.jpg"}),
+			json.dumps({"thumbnail_url": "https://example.test/second.jpg"}),
+		]) as get:
+			playlist = fetch_playlist(f"https://open.spotify.com/playlist/{playlist_id}")
+		self.assertTrue(playlist.complete)
+		self.assertEqual([track["title"] for track in playlist.tracks], ["First", "Second"])
+		self.assertEqual(get.call_count, 6)
+
 
 if __name__ == "__main__":
 	unittest.main()

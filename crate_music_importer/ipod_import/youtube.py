@@ -4,16 +4,15 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from crate_music_importer.ipod_import.constants import YOUTUBE_CONFIDENCE_MIN
 from crate_music_importer.ipod_import.identity import clean_release_labels, duration_score, normalize_recording_title, normalize_text, normalized_artists, version_markers
+from crate_music_importer.ipod_import.tooling import resolve_executable
 
 
 class YouTubeError(RuntimeError):
@@ -24,9 +23,9 @@ _BAD_TERMS = ("cover", "tribute", "karaoke", "nightcore", "sped up", "slowed", "
 
 
 def ytdlp_path() -> str:
-	for candidate in (shutil.which("yt-dlp"), "/opt/homebrew/bin/yt-dlp", "/usr/local/bin/yt-dlp"):
-		if candidate and Path(candidate).is_file():
-			return str(candidate)
+	resolved = resolve_executable("yt-dlp")
+	if resolved:
+		return resolved
 	raise YouTubeError("yt-dlp is required. Install the prerequisites in the README, then run Library Health & Updates in Raycast.")
 
 
