@@ -50,6 +50,12 @@
       "title": "Import Notifications",
       "description": "Deliver pending import completion and review notifications.",
       "mode": "no-view"
+    },
+    {
+      "name": "import-notification-toast",
+      "title": "Import Notification Toast",
+      "description": "Display pending import notifications inside the open Raycast window.",
+      "mode": "no-view"
     }
   ],
   "scripts": {

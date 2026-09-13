@@ -27,7 +27,7 @@ import {
   searchYouTube,
 } from "./backend";
 import { deliverPendingNotifications } from "./notification-delivery";
-import { showCompactToast, showTerminalJobToast, updateCompactToast } from "./notifications";
+import { showCompactToast, showTerminalJobNotification, updateCompactToast } from "./notifications";
 import type {
   ImportJob,
   JobsSnapshot,
@@ -642,7 +642,7 @@ export default function Command(props: LaunchProps<{ launchContext: ActivityCont
   const handlePending = useCallback(async (values: ImportJob[]) => {
     await deliverPendingNotifications(values, {
       handled: shownNotifications.current,
-      showJob: showTerminalJobToast,
+      showJob: showTerminalJobNotification,
       acknowledge: acknowledgeJobNotification,
       pauseBetweenToasts: () => new Promise((resolve) => setTimeout(resolve, 2_000)),
     });
