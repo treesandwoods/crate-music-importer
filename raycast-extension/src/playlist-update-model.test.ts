@@ -98,10 +98,8 @@ test("command keeps new import first and exposes saved playlist, update, and inc
   assert.match(source, /Change Stored Spotify Link/);
   assert.match(source, /title=\{primaryActionTitle\}/);
   assert.match(source, /Spotify #\$\{row.position\}/);
-  assert.match(
-    source,
-    /playlist\.cover_url \? \{ source: playlist\.cover_url, mask: Image\.Mask\.RoundedRectangle \} : Icon\.List/,
-  );
+  assert.match(source, /source: artwork\[playlist\.cover_url\]/);
+  assert.doesNotMatch(source, /mask:/);
   assert.doesNotMatch(source, /<List\s[^>]+actions=\{actions\}/);
 });
 

@@ -6,11 +6,13 @@ import {
   Color,
   confirmAlert,
   Form,
+  environment,
   Icon,
-  Image,
   List,
   Toast,
 } from "@raycast/api";
+import { join } from "node:path";
+import { squarePlaylistArtwork } from "./playlist-artwork";
 import { useCallback, useEffect, useState } from "react";
 
 import { changePlaylistLink, loadSavedPlaylists, previewPlaylistUpdate, queuePlaylistUpdate } from "./backend";
@@ -257,13 +259,29 @@ export function PlaylistUpdatePreviewView({ playlist }: { playlist: SavedPlaylis
 }
 
 export default function Command() {
+  const [artwork, setArtwork] = useState<Record<string, string>>({});
   const [playlists, setPlaylists] = useState<SavedPlaylistSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setPlaylists(await loadSavedPlaylists());
+      const saved = await loadSavedPlaylists();
+      setPlaylists(saved);
+      await Promise.all(
+        saved.map(async (playlist) => {
+          if (!playlist.cover_url) return;
+          try {
+            const path = await squarePlaylistArtwork(
+              playlist.cover_url,
+              join(environment.supportPath, "playlist-artwork-v1"),
+            );
+            setArtwork((current) => ({ ...current, [playlist.cover_url!]: path }));
+          } catch (error) {
+            console.error("Could not crop playlist artwork", error);
+          }
+        }),
+      );
       setError(undefined);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -292,7 +310,9 @@ export default function Command() {
             key={playlist.id}
             title={playlist.name}
             subtitle={`${playlist.track_count} saved tracks`}
-            icon={playlist.cover_url ? { source: playlist.cover_url, mask: Image.Mask.RoundedRectangle } : Icon.List}
+            icon={
+              playlist.cover_url && artwork[playlist.cover_url] ? { source: artwork[playlist.cover_url] } : Icon.List
+            }
             accessories={[{ text: `${playlist.track_count} tracks` }]}
             actions={
               <ActionPanel>

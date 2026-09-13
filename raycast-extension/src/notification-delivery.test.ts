@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { deliverPendingNotifications } from "./notification-delivery";
+import { deliverPendingNotifications, notificationEventKey } from "./notification-delivery";
 import type { ImportJob } from "./types";
 
 function job(jobId: string): ImportJob {
@@ -35,7 +35,7 @@ test("background delivery drains every pending event and acknowledges each one",
   });
   assert.deepEqual(shown, ["one", "two"]);
   assert.deepEqual(acknowledged, ["one", "two"]);
-  assert.deepEqual([...handled], ["one", "two"]);
+  assert.deepEqual([...handled], [notificationEventKey(job("one")), notificationEventKey(job("two"))]);
   assert.equal(pauses, 1);
 });
 
@@ -53,4 +53,21 @@ test("failed display remains pending for a later delivery attempt", async () => 
   );
   assert.deepEqual(acknowledged, []);
   assert.deepEqual([...handled], []);
+});
+
+test("retry completion is delivered after review for the same job", async () => {
+  const handled = new Set<string>();
+  const shown: string[] = [];
+  const delivery = {
+    handled,
+    showJob: async (value: ImportJob) => {
+      shown.push(value.status);
+    },
+    acknowledge: async () => {},
+  };
+  const review = { ...job("same"), status: "needs_attention" as const, finishedAt: "first" };
+  const complete = { ...job("same"), finishedAt: "second" };
+  await deliverPendingNotifications([review], delivery);
+  await deliverPendingNotifications([review, complete], delivery);
+  assert.deepEqual(shown, ["needs_attention", "complete"]);
 });
