@@ -6,8 +6,16 @@ import test from "node:test";
 import { buildSync } from "esbuild";
 
 const source = readFileSync("src/import-notifications.ts", "utf8")
+  .replace(
+    /import .* from "@raycast\/api";/,
+    'const environment = { launchType: "background" }; const LaunchType = { Background: "background", UserInitiated: "userInitiated" }; const launchCommand = testHarness.launchCommand;',
+  )
+  .replace(
+    /import .* from "\.\/notification-window";/,
+    "const isRaycastFocused = async () => Boolean(testHarness.focused);",
+  )
   .replace(/import .* from "\.\/backend";/, "const { acknowledgeJobNotification, loadJobs } = testHarness;")
-  .replace(/import .* from "\.\/notifications";/, "const { showTerminalJobToast } = testHarness;");
+  .replace(/import .* from "\.\/notifications";/, "const { showTerminalJobNotification } = testHarness;");
 const bundled = buildSync({
   stdin: { contents: source, loader: "ts", resolveDir: resolve("src") },
   bundle: true,
@@ -34,7 +42,7 @@ test("worker notification target supports background launch and awaits display b
     module.exports,
     {
       loadJobs: async () => ({ pendingNotifications: [{ jobId: "job", updatedAt: "now", status: "complete" }] }),
-      showTerminalJobToast: async () => {
+      showTerminalJobNotification: async () => {
         events.push("display");
         await display;
       },
@@ -53,4 +61,29 @@ test("worker notification target supports background launch and awaits display b
   finishDisplay();
   await running;
   assert.deepEqual(events, ["display", "acknowledge"]);
+});
+
+test("focused Raycast hands off to foreground toast without acknowledging or displaying a HUD", async () => {
+  const module = { exports: {} as { default: () => Promise<void> } };
+  const launches: unknown[] = [];
+  new Function("require", "module", "exports", "testHarness", bundled)(
+    createRequire(resolve("package.json")),
+    module,
+    module.exports,
+    {
+      focused: true,
+      loadJobs: async () => ({ pendingNotifications: [{ jobId: "job", updatedAt: "now", status: "complete" }] }),
+      launchCommand: async (options: unknown) => {
+        launches.push(options);
+      },
+      showTerminalJobNotification: async () => {
+        assert.fail("must not display HUD while focused");
+      },
+      acknowledgeJobNotification: async () => {
+        assert.fail("handoff must not acknowledge delivery");
+      },
+    },
+  );
+  await module.exports.default();
+  assert.deepEqual(launches, [{ name: "import-notifications", type: "userInitiated" }]);
 });
