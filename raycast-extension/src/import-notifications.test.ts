@@ -12,7 +12,7 @@ const source = readFileSync("src/import-notifications.ts", "utf8")
   )
   .replace(
     /import .* from "\.\/notification-window";/,
-    "const isRaycastFocused = async () => Boolean(testHarness.focused);",
+    "const isRaycastWindowVisible = async () => Boolean(testHarness.focused);",
   )
   .replace(/import .* from "\.\/backend";/, "const { acknowledgeJobNotification, loadJobs } = testHarness;")
   .replace(/import .* from "\.\/notifications";/, "const { showTerminalJobNotification } = testHarness;");
@@ -63,7 +63,7 @@ test("worker notification target supports background launch and awaits display b
   assert.deepEqual(events, ["display", "acknowledge"]);
 });
 
-test("focused Raycast hands off to foreground toast without acknowledging or displaying a HUD", async () => {
+test("visible Raycast hands off to foreground toast without acknowledging or displaying a HUD", async () => {
   const module = { exports: {} as { default: () => Promise<void> } };
   const launches: unknown[] = [];
   new Function("require", "module", "exports", "testHarness", bundled)(

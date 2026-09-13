@@ -1,5 +1,5 @@
 import { environment, launchCommand, LaunchType } from "@raycast/api";
-import { isRaycastFocused } from "./notification-window";
+import { isRaycastWindowVisible } from "./notification-window";
 import { acknowledgeJobNotification, loadJobs } from "./backend";
 import { deliverPendingNotifications } from "./notification-delivery";
 import { showTerminalJobNotification } from "./notifications";
@@ -10,7 +10,7 @@ export default async function Command() {
   if (!pending.length) return;
   const handled = new Set<string>();
   for (const [index, job] of pending.entries()) {
-    if (environment.launchType === LaunchType.Background && (await isRaycastFocused())) {
+    if (environment.launchType === LaunchType.Background && (await isRaycastWindowVisible())) {
       // Toasts require a foreground launch. Leave this event pending for it.
       await launchCommand({ name: "import-notifications", type: LaunchType.UserInitiated });
       return;
