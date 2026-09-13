@@ -44,6 +44,12 @@
       "subtitle": "Crate Music Importer",
       "description": "Run a read-only library audit and check for safe, stable downloader updates.",
       "mode": "view"
+    },
+    {
+      "name": "import-notifications",
+      "title": "Import Notifications",
+      "description": "Deliver pending import completion and review notifications.",
+      "mode": "no-view"
     }
   ],
   "scripts": {

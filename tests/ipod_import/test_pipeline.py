@@ -453,6 +453,57 @@ class PipelineTests(unittest.TestCase):
 			self.assertEqual(removed, [{"FIRST-PID"}])
 			self.assertEqual([value["persistent_id"] for value in cache_updates], ["FIRST-PID", "RETRY-PID"])
 
+	def test_album_apply_recovers_first_track_that_disappears_after_initial_verification(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory))
+			paths.create()
+			manifest = new_manifest(paths)
+			track = {
+				"position": 1, "track_no": 1, "track_total": 1, "disc_no": 1, "disc_total": 1,
+				"title": "Album Song", "artists": "Artist", "album": "Album", "album_artist": "Artist",
+				"album_id": "album-id", "duration_ms": 180000, "sp_id": "track-id",
+			}
+			key, recording = upsert_recording(manifest, track, source_type="album")
+			relative = managed_relative_path(recording)
+			managed_path = paths.root / relative
+			managed_path.parent.mkdir(parents=True)
+			managed_path.write_bytes(b"album-mp3")
+			recording["managed_file"] = {"relative_path": relative, "tool_owned": True, "metadata_profile": "album"}
+			recording["active_reference"] = {"kind": "managed_file", "relative_path": relative}
+			set_album(
+				manifest,
+				{"id": "album-id", "name": "Album", "album_artist": "Artist", "url": "url", "total_count": 1},
+				[{"position": 1, "track_no": 1, "disc_no": 1, "recording_id": key, "spotify_id": "track-id", "status": "managed_ready"}],
+			)
+			verification_results = iter((
+				{"FIRST-PID": {"persistent_id": "FIRST-PID"}},
+				{},
+				{"RETRY-PID": {"persistent_id": "RETRY-PID"}},
+			))
+			cache_updates = []
+			removed = []
+			with patch("crate_music_importer.ipod_import.pipeline.extract_embedded_artwork", return_value=paths.staging / "art.jpg"), \
+				patch("crate_music_importer.ipod_import.pipeline.import_managed_file", side_effect=(
+					{"persistent_id": "FIRST-PID", "database_id": "2", "location": str(managed_path)},
+					{"persistent_id": "RETRY-PID", "database_id": "3", "location": str(managed_path)},
+				)) as imported:
+				result = apply_album_to_music(
+					manifest,
+					"album-id",
+					paths,
+					[],
+					cache_updater=cache_updates.append,
+					cache_remover=lambda persistent_ids: removed.append(persistent_ids) or len(persistent_ids),
+					owned_lookup=lambda _recording_id: None,
+					verify_music=lambda _persistent_ids: next(verification_results),
+				)
+			self.assertEqual(result["stability_recoveries"], 1)
+			self.assertEqual(recording["music"]["persistent_id"], "RETRY-PID")
+			self.assertEqual(imported.call_args_list[0].args, (managed_path, key))
+			self.assertEqual(imported.call_args_list[1].args, (managed_path, key))
+			self.assertEqual(removed, [{"FIRST-PID"}])
+			self.assertEqual([value["persistent_id"] for value in cache_updates], ["FIRST-PID", "RETRY-PID"])
+
 	def test_album_apply_stabilizes_the_first_new_addition_before_importing_the_rest(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory))

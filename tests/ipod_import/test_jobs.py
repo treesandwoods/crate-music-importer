@@ -618,7 +618,7 @@ class DurableJobTests(unittest.TestCase):
 		with patch.dict(os.environ, {"CRATE_RAYCAST_AUTHOR": "fixture-author", "CRATE_RAYCAST_EXTENSION": "fixture-extension"}):
 			url = _raycast_deeplink("job-id")
 		self.assertIn("fixture-author/fixture-extension", url)
-		self.assertIn("import-activity-problems", url)
+		self.assertIn("import-notifications", url)
 		self.assertIn("launchType=background", url)
 		self.assertIn("job-id", url)
 		self.assertNotIn("Album added", url)
