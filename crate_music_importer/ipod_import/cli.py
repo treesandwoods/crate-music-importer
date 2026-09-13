@@ -32,6 +32,7 @@ from crate_music_importer.ipod_import.pipeline import (
 )
 from crate_music_importer.ipod_import.playlist_update import (
 	apply_playlist_update,
+	backfill_playlist_covers,
 	build_playlist_update_preview,
 	save_pending_update,
 	saved_playlists,
@@ -42,7 +43,7 @@ from crate_music_importer.ipod_import.resolver import (
 	resolver_snapshot,
 	search_youtube as search_youtube_choices,
 )
-from crate_music_importer.ipod_import.spotify import fetch_album, fetch_playlist, load_fixture, parse_album_url, parse_playlist_url, parse_source_url
+from crate_music_importer.ipod_import.spotify import fetch_album, fetch_playlist, fetch_playlist_cover, load_fixture, parse_album_url, parse_playlist_url, parse_source_url
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -391,6 +392,21 @@ def _run(
 	if args.command == "saved-playlists":
 		update_manifest(paths, backfill_playlist_urls)
 		manifest = load_manifest(paths)
+		if backfill_playlist_covers(manifest, fetch_playlist_cover):
+			resolved_covers = {
+				playlist_id: playlist.get("cover_url")
+				for playlist_id, playlist in manifest.get("playlists", {}).items()
+				if isinstance(playlist, dict) and playlist.get("cover_url")
+			}
+
+			def cache_resolved_covers(latest: dict[str, Any]) -> None:
+				for playlist_id, cover_url in resolved_covers.items():
+					playlist = latest.get("playlists", {}).get(playlist_id)
+					if isinstance(playlist, dict) and not playlist.get("cover_url"):
+						playlist["cover_url"] = cover_url
+
+			update_manifest(paths, cache_resolved_covers)
+			manifest = load_manifest(paths)
 		values = saved_playlists(manifest)
 		print(json.dumps({"playlists": values}, ensure_ascii=False, indent=2) if args.json else "\n".join(f"{value['name']}\t{value['track_count']}\t{value['spotify_url']}" for value in values))
 		return 0

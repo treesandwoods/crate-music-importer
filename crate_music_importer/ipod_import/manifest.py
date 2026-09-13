@@ -335,6 +335,7 @@ def set_playlist(
 		"spotify_playlist_id": playlist_id,
 		"spotify_url": playlist.get("url") or "",
 		"name": playlist.get("name") or "Spotify Playlist",
+		"cover_url": playlist.get("cover_url") or prior.get("cover_url"),
 		"total_count": playlist.get("total_count"),
 		"complete": bool(playlist.get("complete", True)),
 		"warning": playlist.get("warning"),

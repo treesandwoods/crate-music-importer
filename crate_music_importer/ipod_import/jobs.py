@@ -29,7 +29,6 @@ from crate_music_importer.ipod_import.spotify import parse_source_url
 ACTIVE_STATES = {"queued", "running"}
 TERMINAL_STATES = {"complete", "needs_attention", "ready_to_continue", "failed", "cancelled", "superseded"}
 RAYCAST_ACTIVITY_COMMAND = "import-activity-problems"
-RECENT_COMPLETE_JOB_LIMIT = 50
 
 
 def _now() -> str:
@@ -1100,7 +1099,7 @@ def jobs_snapshot(*, root: Path = MANAGED_ROOT) -> dict[str, Any]:
 	store = JobStore(root)
 	jobs = reconcile_terminal_jobs(store)
 	visible = [job for job in jobs if job.get("status") in {"queued", "running", "needs_attention", "ready_to_continue", "failed"}]
-	visible.extend([job for job in jobs if job.get("status") == "complete"][:RECENT_COMPLETE_JOB_LIMIT])
+	visible.extend(job for job in jobs if job.get("status") == "complete")
 	return {
 		"version": 1,
 		"managedRoot": str(root),

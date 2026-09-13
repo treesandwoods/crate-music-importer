@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from crate_music_importer.ipod_import import cli
-from crate_music_importer.ipod_import.manifest import ManagedPaths, new_manifest, set_album, upsert_recording
+from crate_music_importer.ipod_import.manifest import ManagedPaths, load_manifest, new_manifest, save_manifest, set_album, set_playlist, upsert_recording
 from crate_music_importer.ipod_import.music_cache import build_full_cache, save_music_cache
 from crate_music_importer.ipod_import.spotify import load_fixture
 
@@ -17,6 +18,27 @@ ALBUM_URL = "https://open.spotify.com/album/48a7rOjTzpD1zzJAteeveE"
 
 
 class AlbumCliEfficiencyTests(unittest.TestCase):
+	def test_saved_playlists_backfills_and_returns_playlist_thumbnail(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory) / "managed")
+			manifest = new_manifest(paths)
+			set_playlist(manifest, {
+				"id": "37i9dQZF1DXTESTFIXTURE1",
+				"name": "Fixture Playlist",
+				"url": "https://open.spotify.com/playlist/37i9dQZF1DXTESTFIXTURE1",
+				"complete": True,
+				"total_count": 0,
+			}, [])
+			save_manifest(paths, manifest)
+			output = io.StringIO()
+			with patch("crate_music_importer.ipod_import.cli.ManagedPaths", return_value=paths), \
+				patch("crate_music_importer.ipod_import.cli.fetch_playlist_cover", return_value="https://example.test/playlist.jpg"), \
+				contextlib.redirect_stdout(output):
+				code = cli.run(["saved-playlists", "--json"])
+			self.assertEqual(code, 0)
+			self.assertEqual(json.loads(output.getvalue())["playlists"][0]["cover_url"], "https://example.test/playlist.jpg")
+			self.assertEqual(load_manifest(paths)["playlists"]["37i9dQZF1DXTESTFIXTURE1"]["cover_url"], "https://example.test/playlist.jpg")
+
 	def test_album_preview_never_scans_music(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")

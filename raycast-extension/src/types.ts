@@ -159,6 +159,7 @@ export interface SavedPlaylistSummary {
   name: string;
   track_count: number;
   spotify_url: string;
+  cover_url?: string | null;
   music_playlist_persistent_id?: string | null;
 }
 

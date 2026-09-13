@@ -98,5 +98,21 @@ test("command keeps new import first and exposes saved playlist, update, and inc
   assert.match(source, /Change Stored Spotify Link/);
   assert.match(source, /title=\{primaryActionTitle\}/);
   assert.match(source, /Spotify #\$\{row.position\}/);
+  assert.match(source, /playlist\.cover_url \? \{ source: playlist\.cover_url \} : Icon\.List/);
   assert.doesNotMatch(source, /<List\s[^>]+actions=\{actions\}/);
+});
+
+test("bulk playlist update is isolated above itemized track rows", () => {
+  const source = readFileSync("src/import-playlist-link.tsx", "utf8");
+  const bulkSection = source.indexOf('<List.Section title="Playlist Update">');
+  const additionsSection = source.indexOf('<List.Section title="Additions"');
+  const additionRowsStart = source.indexOf("{preview.additions.map", additionsSection);
+  const additionRowsEnd = source.indexOf("</List.Section>", additionRowsStart);
+  const removalRowsStart = source.indexOf("{preview.removals.map", additionRowsEnd);
+  const removalRowsEnd = source.indexOf("</List.Section>", removalRowsStart);
+
+  assert.ok(bulkSection >= 0 && bulkSection < additionsSection);
+  assert.equal(source.match(/actions=\{queueActions\}/g)?.length, 1);
+  assert.doesNotMatch(source.slice(additionRowsStart, additionRowsEnd), /actions=\{/);
+  assert.doesNotMatch(source.slice(removalRowsStart, removalRowsEnd), /actions=\{/);
 });

@@ -143,9 +143,20 @@ export function PlaylistUpdatePreviewView({ playlist }: { playlist: SavedPlaylis
 
   const primaryActionTitle = preview?.removals.length ? "Apply All Playlist Changes" : "Add All Tracks";
   const primaryActionIcon = preview?.removals.length ? Icon.ArrowClockwise : Icon.Plus;
-  const actions = (
+  const utilityActions = (
     <ActionPanel>
-      {canQueuePlaylistUpdate(preview) ? (
+      <Action title="Refresh Preview" icon={Icon.ArrowClockwise} onAction={load} />
+      <Action.Push
+        title="Change Stored Spotify Link"
+        icon={Icon.Link}
+        target={<ChangePlaylistLinkForm playlist={playlist} onChanged={load} />}
+      />
+      {playlist.spotify_url ? <Action.OpenInBrowser title="Open in Spotify" url={playlist.spotify_url} /> : null}
+    </ActionPanel>
+  );
+  const queueActions = (
+    <ActionPanel>
+      {preview && canQueuePlaylistUpdate(preview) ? (
         <Action title={primaryActionTitle} icon={primaryActionIcon} onAction={queue} />
       ) : null}
       <Action title="Refresh Preview" icon={Icon.ArrowClockwise} onAction={load} />
@@ -165,7 +176,7 @@ export function PlaylistUpdatePreviewView({ playlist }: { playlist: SavedPlaylis
             title={preview.blocked ? "Update blocked" : "Removals deferred"}
             subtitle={preview.warning}
             icon={{ source: Icon.ExclamationMark, tintColor: Color.Orange }}
-            actions={actions}
+            actions={utilityActions}
           />
         </List.Section>
       ) : null}
@@ -173,17 +184,21 @@ export function PlaylistUpdatePreviewView({ playlist }: { playlist: SavedPlaylis
         <List.EmptyView
           title="Playlist is up to date"
           description="There are no additions or removals. Reorders and moves are ignored."
-          actions={actions}
+          actions={utilityActions}
         />
       ) : null}
-      {preview?.additions.length ? (
-        <List.Section title="Additions" subtitle={`${preview.additions.length} · Spotify order`}>
+      {preview && canQueuePlaylistUpdate(preview) ? (
+        <List.Section title="Playlist Update">
           <List.Item
             title={primaryActionTitle}
             subtitle={`${preview.additions.length} track${preview.additions.length === 1 ? "" : "s"}${preview.removals.length ? ` · ${preview.removals.length} removal${preview.removals.length === 1 ? "" : "s"}` : ""}`}
             icon={{ source: primaryActionIcon, tintColor: Color.Green }}
-            actions={actions}
+            actions={queueActions}
           />
+        </List.Section>
+      ) : null}
+      {preview?.additions.length ? (
+        <List.Section title="Additions" subtitle={`${preview.additions.length} · Spotify order`}>
           {preview.additions.map((row) => (
             <List.Item
               key={`add-${row.position}-${row.recording_id}`}
@@ -191,7 +206,6 @@ export function PlaylistUpdatePreviewView({ playlist }: { playlist: SavedPlaylis
               subtitle={row.artists}
               icon={{ source: Icon.Plus, tintColor: Color.Green }}
               accessories={[{ tag: `Spotify #${row.position}` }]}
-              actions={actions}
             />
           ))}
         </List.Section>
@@ -215,13 +229,16 @@ export function PlaylistUpdatePreviewView({ playlist }: { playlist: SavedPlaylis
                   },
                 },
               ]}
-              actions={actions}
             />
           ))}
         </List.Section>
       ) : null}
       {error ? (
-        <List.EmptyView title="Could not preview update" description={compactText(error, 220)} actions={actions} />
+        <List.EmptyView
+          title="Could not preview update"
+          description={compactText(error, 220)}
+          actions={utilityActions}
+        />
       ) : null}
     </List>
   );
@@ -263,7 +280,7 @@ export default function Command() {
             key={playlist.id}
             title={playlist.name}
             subtitle={`${playlist.track_count} saved tracks`}
-            icon={Icon.List}
+            icon={playlist.cover_url ? { source: playlist.cover_url } : Icon.List}
             accessories={[{ text: `${playlist.track_count} tracks` }]}
             actions={
               <ActionPanel>

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from crate_music_importer.ipod_import.manifest import ManagedPaths, new_manifest, set_album, set_playlist, upsert_recording
 from crate_music_importer.ipod_import.music import MusicAutomationError
-from crate_music_importer.ipod_import.playlist_update import apply_playlist_update, build_playlist_update_preview, save_pending_update, saved_playlists
+from crate_music_importer.ipod_import.playlist_update import apply_playlist_update, backfill_playlist_covers, build_playlist_update_preview, save_pending_update, saved_playlists
 
 
 URL = "https://open.spotify.com/playlist/37i9dQZF1DXTESTFIXTURE1"
@@ -28,7 +28,7 @@ class PlaylistUpdateTests(unittest.TestCase):
 			recording["active_reference"] = {"kind": "existing_music", "persistent_id": persistent_id}
 			items.append({"position": position, "recording_id": key, "spotify_id": spotify_id, "status": "reused_music"})
 			music.append({"title": spotify_id, "artist": "Artist", "album": "Album", "duration_s": 180, "persistent_id": persistent_id, "database_id": str(position), "location": f"/Music/{spotify_id}.m4a", "comment": ""})
-		playlist = set_playlist(manifest, {"id": "saved", "name": "Saved", "url": URL, "complete": True, "total_count": len(items)}, items)
+		playlist = set_playlist(manifest, {"id": "saved", "name": "Saved", "url": URL, "cover_url": "https://example.test/saved.jpg", "complete": True, "total_count": len(items)}, items)
 		playlist["music_playlist_persistent_id"] = "PLAYLIST-PID"
 		return paths, manifest, music
 
@@ -47,6 +47,26 @@ class PlaylistUpdateTests(unittest.TestCase):
 		_paths, manifest, _music = self.fixture(("a", "a", "b"))
 		self.assertEqual(saved_playlists(manifest)[0]["track_count"], 3)
 		self.assertEqual(saved_playlists(manifest)[0]["spotify_url"], URL)
+		self.assertEqual(saved_playlists(manifest)[0]["cover_url"], "https://example.test/saved.jpg")
+
+	def test_backfills_missing_playlist_covers_without_replacing_cached_images(self):
+		_paths, manifest, _music = self.fixture()
+		manifest["playlists"]["saved"].pop("cover_url")
+		manifest["playlists"]["cached"] = {
+			"name": "Cached",
+			"spotify_url": "https://open.spotify.com/playlist/37i9dQZF1DXCACHEDFIXTURE",
+			"cover_url": "https://example.test/cached.jpg",
+			"items": [],
+		}
+		seen = []
+		updated = backfill_playlist_covers(
+			manifest,
+			lambda url: seen.append(url) or "https://example.test/backfilled.jpg",
+		)
+		self.assertEqual(updated, 1)
+		self.assertEqual(seen, [URL])
+		self.assertEqual(manifest["playlists"]["saved"]["cover_url"], "https://example.test/backfilled.jpg")
+		self.assertEqual(manifest["playlists"]["cached"]["cover_url"], "https://example.test/cached.jpg")
 
 	def test_first_update_backfills_and_reorder_is_noop(self):
 		_paths, manifest, music = self.fixture(("a", "b"))

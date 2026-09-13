@@ -646,7 +646,7 @@ class DurableJobTests(unittest.TestCase):
 			json.loads(store.job_path("fixture").read_text(encoding="utf-8"))
 			self.assertEqual(list(store.jobs_dir.glob("*.tmp")), [])
 
-	def test_jobs_snapshot_omits_internal_baselines_and_limits_completed_history(self):
+	def test_jobs_snapshot_omits_internal_baselines_and_keeps_all_completed_history(self):
 		with tempfile.TemporaryDirectory() as directory:
 			root = Path(directory)
 			store = JobStore(root)
@@ -670,7 +670,7 @@ class DurableJobTests(unittest.TestCase):
 
 			snapshot = jobs_snapshot(root=root)
 
-			self.assertEqual(len(snapshot["jobs"]), 50)
+			self.assertEqual(len(snapshot["jobs"]), 55)
 			self.assertNotIn("superseded", {job["status"] for job in snapshot["jobs"]})
 			self.assertTrue(all("cacheBaseline" not in job for job in snapshot["jobs"]))
 			self.assertNotIn("SECRET-INTERNAL-ID", json.dumps(snapshot))

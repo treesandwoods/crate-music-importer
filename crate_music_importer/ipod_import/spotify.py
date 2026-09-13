@@ -31,6 +31,7 @@ class SpotifyPlaylist:
 	source_type: str = "playlist"
 	album_artist: str = ""
 	release_year: int | None = None
+	cover_url: str | None = None
 
 	def to_dict(self) -> dict[str, Any]:
 		return asdict(self)
@@ -81,6 +82,7 @@ def load_fixture(path: Path) -> SpotifyPlaylist:
 		source_type=str(data.get("source_type") or "playlist"),
 		album_artist=str(data.get("album_artist") or ""),
 		release_year=_integer(data.get("release_year")),
+		cover_url=str(data.get("cover_url") or "") or None,
 	)
 
 
@@ -114,6 +116,17 @@ def fetch_playlist(
 	), "playlist", playlist_id, canonical_url, timeout)
 	_enrich_playlist_covers(playlist.tracks, timeout=timeout, known_track_covers=known_track_covers)
 	return playlist
+
+
+def fetch_playlist_cover(value: str, *, timeout: int = 8) -> str | None:
+	"""Resolve only the shared Spotify playlist thumbnail for saved-list display."""
+	_, canonical_url = parse_playlist_url(value)
+	try:
+		data = json.loads(_get(f"https://open.spotify.com/oembed?url={canonical_url}", timeout))
+	except (SpotifyError, ValueError, TypeError):
+		return None
+	cover_url = _clean(data.get("thumbnail_url")) if isinstance(data, dict) else ""
+	return cover_url if cover_url.startswith(("https://", "http://")) else None
 
 
 def fetch_album(value: str, *, timeout: int = 25) -> SpotifyPlaylist:
@@ -186,6 +199,7 @@ def _finalize_source(
 		)
 	album_artist = _clean(best.get("album_artist"))
 	release_year = _integer(best.get("release_year"))
+	cover_url = next((str(page.get("cover_url")) for page in pages if page.get("cover_url")), "") or None
 	if source_type == "album":
 		disc_total = max((_integer(track.get("disc_no")) or 1 for track in tracks), default=1)
 		for track in tracks:
@@ -208,6 +222,7 @@ def _finalize_source(
 		source_type=source_type,
 		album_artist=album_artist,
 		release_year=release_year,
+		cover_url=cover_url,
 	)
 
 
@@ -230,8 +245,10 @@ def _parse_initial_page(text: str, playlist_id: str, canonical_url: str) -> dict
 		raise SpotifyError("Spotify could not find the public playlist in its page state.")
 	content = entity.get("content") if isinstance(entity.get("content"), dict) else {}
 	rows = content.get("items") if isinstance(content.get("items"), list) else []
+	cover = entity.get("coverArt") if isinstance(entity.get("coverArt"), dict) else {}
 	return {
 		"name": _clean(entity.get("name")) or "Spotify Playlist",
+		"cover_url": _best_image(cover.get("sources", [])),
 		"tracks": _tracks_from_initial(rows),
 		"total_count": _integer(content.get("totalCount")),
 		"url": canonical_url,
@@ -266,6 +283,7 @@ def _parse_initial_album_page(text: str, album_id: str, canonical_url: str) -> d
 		"name": name,
 		"album_artist": album_artist,
 		"release_year": release_year,
+		"cover_url": cover_url,
 		"tracks": _tracks_from_initial(
 			rows,
 			album_name=name,
@@ -290,8 +308,10 @@ def _parse_embed_page(text: str, playlist_id: str, canonical_url: str) -> dict[s
 	if not isinstance(entity, dict) or entity.get("id") != playlist_id:
 		raise SpotifyError("Spotify embed returned the wrong playlist.")
 	rows = entity.get("trackList") if isinstance(entity.get("trackList"), list) else []
+	cover = entity.get("coverArt") if isinstance(entity.get("coverArt"), dict) else {}
 	return {
 		"name": _clean(entity.get("title") or entity.get("name")) or "Spotify Playlist",
+		"cover_url": _best_image(cover.get("sources", [])),
 		# A playlist embed exposes only the playlist cover, not each recording's
 		# album cover. Never attach that shared image to track metadata.
 		"tracks": _tracks_from_embed(rows, None),
@@ -319,6 +339,7 @@ def _parse_embed_album_page(text: str, album_id: str, canonical_url: str) -> dic
 		"name": name,
 		"album_artist": album_artist,
 		"release_year": _release_year(entity),
+		"cover_url": cover_url,
 		"tracks": _tracks_from_embed(rows, cover_url, album_name=name, album_artist=album_artist),
 		"total_count": _integer(entity.get("trackCount") or entity.get("totalCount")),
 		"url": canonical_url,
