@@ -814,7 +814,7 @@ def import_managed_file(path: Path, recording_id: str | None = None) -> dict[str
 	}
 
 
-def verify_music_tracks(persistent_ids: list[str], *, settle_seconds: float = 2.0) -> dict[str, dict[str, Any]]:
+def verify_music_tracks(persistent_ids: list[str], *, settle_seconds: float = 10.0) -> dict[str, dict[str, Any]]:
 	"""Verify recently added Music IDs after its Cloud Library has had time to react."""
 	requested = list(dict.fromkeys(str(value) for value in persistent_ids if str(value)))
 	if not requested:

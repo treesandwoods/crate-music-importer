@@ -975,7 +975,51 @@ def apply_album_to_music(
 	recovered_imports = 0
 	updated_tracks = 0
 	reused_tracks = 0
+	stability_recoveries = 0
 	new_recording_ids: list[str] = []
+
+	def recover_missing_addition(recording_id: str, previous_id: str) -> str:
+		nonlocal stability_recoveries
+		recording = manifest["recordings"][recording_id]
+		managed = recording.get("managed_file") or {}
+		path = paths.root / str(managed.get("relative_path") or "")
+		replacement = owned_lookup(recording_id) if owned_lookup else None
+		if replacement is None:
+			recording["music_import_pending"] = {
+				"relative_path": managed.get("relative_path"),
+				"started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+			}
+			save_manifest(paths, manifest)
+			replacement = import_managed_file(path, recording_id)
+		new_id = str(replacement.get("persistent_id") or "")
+		if not new_id:
+			raise MusicAutomationError("Crate Music Importer could not recover a Music track whose first addition disappeared.")
+		recording["music"] = {
+			"source": "managed_album_import",
+			"persistent_id": new_id,
+			"database_id": replacement.get("database_id"),
+			"location": replacement.get("location"),
+		}
+		recording["cache_sync_pending"] = {
+			"persistent_id": new_id,
+			"action": "album_import_stability_recovery",
+			"started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+		}
+		save_manifest(paths, manifest)
+		cached_track = cache_track_for_recording(recording, replacement, album_profile=True)
+		if cache_updater:
+			cache_updater(cached_track)
+		if cache_remover and previous_id != new_id:
+			cache_remover({previous_id})
+		recording.pop("music_import_pending", None)
+		recording.pop("cache_sync_pending", None)
+		recording.pop("last_error", None)
+		index.by_persistent_id[new_id] = replacement
+		index.by_recording_comment[recording_id] = cached_track
+		save_manifest(paths, manifest)
+		stability_recoveries += 1
+		return new_id
+
 	for item in sorted(album["items"], key=lambda value: int(value["position"])):
 		recording = manifest["recordings"][item["recording_id"]]
 		_progress(on_progress, "adding_to_music", recording_id=recording["recording_id"], position=int(item["position"]), title=recording["source_metadata"].get("title") or "", artists=recording["source_metadata"].get("artists") or "")
@@ -1056,49 +1100,20 @@ def apply_album_to_music(
 		index.by_persistent_id[persistent_id] = imported
 		index.by_recording_comment[recording["recording_id"]] = cached_track
 		save_manifest(paths, manifest)
+		if verify_music and len(new_recording_ids) == 1 and recording["recording_id"] == new_recording_ids[0]:
+			# Music can return an ID for the first file in a batch and then drop that
+			# entry while later additions are processed. Stabilize the first new
+			# addition before sending the rest of the album to Music.
+			if persistent_id not in verify_music([persistent_id]):
+				recover_missing_addition(recording["recording_id"], persistent_id)
 		_progress(on_progress, "complete", recording_id=recording["recording_id"], position=int(item["position"]), title=recording["source_metadata"].get("title") or "", artists=recording["source_metadata"].get("artists") or "")
-	stability_recoveries = 0
 	if verify_music and new_recording_ids:
 		expected_ids = [str((manifest["recordings"][recording_id].get("music") or {}).get("persistent_id") or "") for recording_id in new_recording_ids]
 		verified = verify_music(expected_ids)
 		for recording_id, previous_id in zip(new_recording_ids, expected_ids):
 			if previous_id in verified:
 				continue
-			recording = manifest["recordings"][recording_id]
-			managed = recording.get("managed_file") or {}
-			path = paths.root / str(managed.get("relative_path") or "")
-			replacement = owned_lookup(recording_id) if owned_lookup else None
-			if replacement is None:
-				recording["music_import_pending"] = {
-					"relative_path": managed.get("relative_path"),
-					"started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-				}
-				save_manifest(paths, manifest)
-				replacement = import_managed_file(path, recording_id)
-			new_id = str(replacement.get("persistent_id") or "")
-			if not new_id:
-				raise MusicAutomationError("Crate Music Importer could not recover a Music track whose first addition disappeared.")
-			recording["music"] = {
-				"source": "managed_album_import",
-				"persistent_id": new_id,
-				"database_id": replacement.get("database_id"),
-				"location": replacement.get("location"),
-			}
-			recording["cache_sync_pending"] = {
-				"persistent_id": new_id,
-				"action": "album_import_stability_recovery",
-				"started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-			}
-			save_manifest(paths, manifest)
-			if cache_updater:
-				cache_updater(cache_track_for_recording(recording, replacement, album_profile=True))
-			if cache_remover and previous_id != new_id:
-				cache_remover({previous_id})
-			recording.pop("music_import_pending", None)
-			recording.pop("cache_sync_pending", None)
-			recording.pop("last_error", None)
-			save_manifest(paths, manifest)
-			stability_recoveries += 1
+			recover_missing_addition(recording_id, previous_id)
 		if stability_recoveries:
 			final_ids = [str((manifest["recordings"][recording_id].get("music") or {}).get("persistent_id") or "") for recording_id in new_recording_ids]
 			confirmed = verify_music(final_ids)

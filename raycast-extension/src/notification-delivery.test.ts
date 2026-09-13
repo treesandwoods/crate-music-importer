@@ -26,7 +26,6 @@ test("background delivery drains every pending event and acknowledges each one",
   let pauses = 0;
   const handled = new Set<string>();
   await deliverPendingNotifications([job("one"), job("two")], {
-    show: true,
     handled,
     showJob: async (value) => shown.push(value.jobId),
     acknowledge: async (jobId) => acknowledged.push(jobId),
@@ -40,25 +39,11 @@ test("background delivery drains every pending event and acknowledges each one",
   assert.equal(pauses, 1);
 });
 
-test("foreground activity acknowledges pending events without showing more toasts", async () => {
-  const shown: string[] = [];
-  const acknowledged: string[] = [];
-  await deliverPendingNotifications([job("visible")], {
-    show: false,
-    handled: new Set<string>(),
-    showJob: async (value) => shown.push(value.jobId),
-    acknowledge: async (jobId) => acknowledged.push(jobId),
-  });
-  assert.deepEqual(shown, []);
-  assert.deepEqual(acknowledged, ["visible"]);
-});
-
 test("failed display remains pending for a later delivery attempt", async () => {
   const acknowledged: string[] = [];
   const handled = new Set<string>();
   await assert.rejects(
     deliverPendingNotifications([job("retry")], {
-      show: true,
       handled,
       showJob: async () => {
         throw new Error("toast unavailable");

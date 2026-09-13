@@ -1,4 +1,16 @@
-import { Action, ActionPanel, Alert, Clipboard, Color, confirmAlert, Form, Icon, List, Toast } from "@raycast/api";
+import {
+  Action,
+  ActionPanel,
+  Alert,
+  Clipboard,
+  Color,
+  confirmAlert,
+  Form,
+  Icon,
+  Image,
+  List,
+  Toast,
+} from "@raycast/api";
 import { useCallback, useEffect, useState } from "react";
 
 import { changePlaylistLink, loadSavedPlaylists, previewPlaylistUpdate, queuePlaylistUpdate } from "./backend";
@@ -280,7 +292,7 @@ export default function Command() {
             key={playlist.id}
             title={playlist.name}
             subtitle={`${playlist.track_count} saved tracks`}
-            icon={playlist.cover_url ? { source: playlist.cover_url } : Icon.List}
+            icon={playlist.cover_url ? { source: playlist.cover_url, mask: Image.Mask.RoundedRectangle } : Icon.List}
             accessories={[{ text: `${playlist.track_count} tracks` }]}
             actions={
               <ActionPanel>
