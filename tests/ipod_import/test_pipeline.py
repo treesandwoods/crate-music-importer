@@ -424,7 +424,11 @@ class PipelineTests(unittest.TestCase):
 				{"id": "album-id", "name": "Album", "album_artist": "Artist", "url": "url", "total_count": 1},
 				[{"position": 1, "track_no": 1, "disc_no": 1, "recording_id": key, "spotify_id": "track-id", "status": "managed_ready"}],
 			)
-			verification_results = iter(({}, {"RETRY-PID": {"persistent_id": "RETRY-PID"}}))
+			verification_results = iter((
+				{},
+				{"RETRY-PID": {"persistent_id": "RETRY-PID"}},
+				{"RETRY-PID": {"persistent_id": "RETRY-PID"}},
+			))
 			cache_updates = []
 			removed = []
 			with patch("crate_music_importer.ipod_import.pipeline.extract_embedded_artwork", return_value=paths.staging / "art.jpg"), \
@@ -448,6 +452,52 @@ class PipelineTests(unittest.TestCase):
 			self.assertEqual(imported.call_args_list[1].args, (managed_path, key))
 			self.assertEqual(removed, [{"FIRST-PID"}])
 			self.assertEqual([value["persistent_id"] for value in cache_updates], ["FIRST-PID", "RETRY-PID"])
+
+	def test_album_apply_stabilizes_the_first_new_addition_before_importing_the_rest(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory))
+			paths.create()
+			manifest = new_manifest(paths)
+			items = []
+			recording_ids = []
+			for position in (1, 2):
+				track = {
+					"position": position, "track_no": position, "track_total": 2, "disc_no": 1, "disc_total": 1,
+					"title": f"Album Song {position}", "artists": "Artist", "album": "Album", "album_artist": "Artist",
+					"album_id": "album-id", "duration_ms": 180000, "sp_id": f"track-{position}",
+				}
+				key, recording = upsert_recording(manifest, track, source_type="album")
+				relative = managed_relative_path(recording)
+				managed_path = paths.root / relative
+				managed_path.parent.mkdir(parents=True, exist_ok=True)
+				managed_path.write_bytes(b"album-mp3")
+				recording["managed_file"] = {"relative_path": relative, "tool_owned": True, "metadata_profile": "album"}
+				recording["active_reference"] = {"kind": "managed_file", "relative_path": relative}
+				items.append({"position": position, "track_no": position, "disc_no": 1, "recording_id": key, "spotify_id": f"track-{position}", "status": "managed_ready"})
+				recording_ids.append(key)
+			set_album(
+				manifest,
+				{"id": "album-id", "name": "Album", "album_artist": "Artist", "url": "url", "total_count": 2},
+				items,
+			)
+			events = []
+
+			def import_track(_path, recording_id):
+				position = recording_ids.index(recording_id) + 1
+				persistent_id = f"PID-{position}"
+				events.append(f"import:{persistent_id}")
+				return {"persistent_id": persistent_id, "database_id": str(position), "location": str(_path)}
+
+			def verify_tracks(persistent_ids):
+				events.append("verify:" + ",".join(persistent_ids))
+				return {persistent_id: {"persistent_id": persistent_id} for persistent_id in persistent_ids}
+
+			with patch("crate_music_importer.ipod_import.pipeline.extract_embedded_artwork", return_value=paths.staging / "art.jpg"), \
+				patch("crate_music_importer.ipod_import.pipeline.import_managed_file", side_effect=import_track):
+				result = apply_album_to_music(manifest, "album-id", paths, [], verify_music=verify_tracks)
+			self.assertEqual(result["new_imports"], 2)
+			self.assertEqual(result["stability_recoveries"], 0)
+			self.assertEqual(events, ["import:PID-1", "verify:PID-1", "import:PID-2", "verify:PID-1,PID-2"])
 
 	def test_album_apply_adopts_a_partial_import_by_managed_comment_without_duplication(self):
 		with tempfile.TemporaryDirectory() as directory:

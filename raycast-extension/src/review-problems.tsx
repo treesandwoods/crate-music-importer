@@ -1,5 +1,4 @@
 import { mergeYouTubeCandidates } from "./youtube-review";
-import { randomUUID } from "node:crypto";
 import {
   Action,
   ActionPanel,
@@ -8,10 +7,8 @@ import {
   confirmAlert,
   Form,
   Icon,
-  LaunchType,
   List,
   LaunchProps,
-  LocalStorage,
   Toast,
   useNavigation,
 } from "@raycast/api";
@@ -29,7 +26,6 @@ import {
   retryJob,
   searchYouTube,
 } from "./backend";
-import { clearActivityOpen, isActivityOpen, markActivityOpen } from "./activity-presence";
 import { deliverPendingNotifications } from "./notification-delivery";
 import { showCompactToast, showTerminalJobToast, updateCompactToast } from "./notifications";
 import type {
@@ -642,11 +638,9 @@ export default function Command(props: LaunchProps<{ launchContext: ActivityCont
   const [error, setError] = useState<string>();
   const shownNotifications = useRef(new Set<string>());
   const refreshInFlight = useRef(false);
-  const activitySession = useRef(randomUUID());
 
-  const handlePending = useCallback(async (values: ImportJob[], show: boolean) => {
+  const handlePending = useCallback(async (values: ImportJob[]) => {
     await deliverPendingNotifications(values, {
-      show,
       handled: shownNotifications.current,
       showJob: showTerminalJobToast,
       acknowledge: acknowledgeJobNotification,
@@ -655,7 +649,7 @@ export default function Command(props: LaunchProps<{ launchContext: ActivityCont
   }, []);
 
   const refresh = useCallback(
-    async (acknowledgeNotifications = true, showLoading = true) => {
+    async (deliverNotifications = true, showLoading = true) => {
       if (refreshInFlight.current) return;
       refreshInFlight.current = true;
       if (showLoading) setLoading(true);
@@ -664,9 +658,7 @@ export default function Command(props: LaunchProps<{ launchContext: ActivityCont
         setSnapshot((current) => (sameSnapshot(current, nextSnapshot) ? current : nextSnapshot));
         setJobs((current) => (sameSnapshot(current, nextJobs) ? current : nextJobs));
         setError(undefined);
-        if (acknowledgeNotifications && props.launchType === LaunchType.UserInitiated) {
-          await handlePending(nextJobs.pendingNotifications, false);
-        }
+        if (deliverNotifications) await handlePending(nextJobs.pendingNotifications);
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : String(caught));
       } finally {
@@ -674,7 +666,7 @@ export default function Command(props: LaunchProps<{ launchContext: ActivityCont
         if (showLoading) setLoading(false);
       }
     },
-    [handlePending, props.launchType],
+    [handlePending],
   );
 
   useEffect(() => {
@@ -682,33 +674,15 @@ export default function Command(props: LaunchProps<{ launchContext: ActivityCont
       if (props.launchContext?.jobId && props.launchContext.terminalEvent) {
         try {
           const pending = (await loadJobs()).pendingNotifications;
-          let activityOpen = false;
-          try {
-            activityOpen = await isActivityOpen(LocalStorage);
-          } catch {
-            // Local presence is only a toast-suppression hint; delivery remains the safe default.
-          }
-          await handlePending(pending, !activityOpen);
+          await handlePending(pending);
         } catch {
           // Pending events remain durable for the next successful background or foreground launch.
         }
       }
-      await refresh(props.launchType === LaunchType.UserInitiated);
+      await refresh();
     }
     void initialLoad();
-  }, [handlePending, props.launchContext?.jobId, props.launchContext?.terminalEvent, props.launchType, refresh]);
-
-  useEffect(() => {
-    if (props.launchType !== LaunchType.UserInitiated) return;
-    const sessionId = activitySession.current;
-    const heartbeat = () => void markActivityOpen(LocalStorage, sessionId).catch(() => undefined);
-    heartbeat();
-    const timer = setInterval(heartbeat, 2_000);
-    return () => {
-      clearInterval(timer);
-      void clearActivityOpen(LocalStorage, sessionId).catch(() => undefined);
-    };
-  }, [props.launchType]);
+  }, [handlePending, props.launchContext?.jobId, props.launchContext?.terminalEvent, refresh]);
 
   useEffect(() => {
     const active = jobs?.jobs.some((job) => job.status === "queued" || job.status === "running");
