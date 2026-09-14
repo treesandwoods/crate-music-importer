@@ -8,10 +8,26 @@ from pathlib import Path
 from unittest.mock import patch
 
 from crate_music_importer.ipod_import.manifest import ManagedPaths, file_sha256, new_manifest, upsert_recording
-from crate_music_importer.ipod_import.media import MediaError, _run, audio_sha256, download_recording, has_tcmp, retag_managed_recording_artwork
+from crate_music_importer.ipod_import.media import MediaError, _run, audio_sha256, available_managed_relative_path, download_recording, has_tcmp, retag_managed_recording_artwork
 
 
 class MediaFixtureTests(unittest.TestCase):
+	def test_canonical_path_collision_uses_stable_recording_suffix(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory))
+			recording = {
+				"recording_id": "rec_1234567890abcdef",
+				"source_metadata": {"title": "A Song"},
+				"album_metadata": None,
+			}
+			requested = paths.root / "Music/Compilations/Playlist Imports/A Song.mp3"
+			requested.parent.mkdir(parents=True)
+			requested.write_bytes(b"another recording")
+			self.assertEqual(
+				available_managed_relative_path(recording, paths),
+				"Music/Compilations/Playlist Imports/A Song — 1234567890.mp3",
+			)
+
 	@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg/ffprobe required")
 	def test_album_download_has_real_album_tags_and_is_not_a_compilation(self):
 		with tempfile.TemporaryDirectory() as directory:
@@ -46,6 +62,7 @@ class MediaFixtureTests(unittest.TestCase):
 			], check=True)
 			managed = download_recording(recording, paths)
 			target = paths.root / managed["relative_path"]
+			self.assertEqual(managed["relative_path"], "Music/Album Artist/Fixture Album/02 — Album Fixture Song.mp3")
 			self.assertEqual(managed["metadata_profile"], "album")
 			self.assertFalse(has_tcmp(target))
 			probe = subprocess.run([
@@ -95,6 +112,7 @@ class MediaFixtureTests(unittest.TestCase):
 			], check=True)
 			managed = download_recording(recording, paths)
 			target = paths.root / managed["relative_path"]
+			self.assertEqual(managed["relative_path"], "Music/Compilations/Playlist Imports/Fixture Song (Live).mp3")
 			self.assertTrue(target.is_file())
 			self.assertTrue(has_tcmp(target))
 			self.assertAlmostEqual(managed["duration_ms"], 1200, delta=100)

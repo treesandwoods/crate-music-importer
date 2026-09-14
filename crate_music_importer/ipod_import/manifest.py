@@ -10,12 +10,13 @@ import json
 import os
 import re
 import tempfile
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from crate_music_importer.ipod_import.constants import MANAGED_ROOT, MANIFEST_VERSION
+from crate_music_importer.ipod_import.constants import IMPORT_ALBUM, IMPORT_ALBUM_ARTIST, MANAGED_ROOT, MANIFEST_VERSION
 from crate_music_importer.ipod_import.identity import canonical_artist, clean_release_labels, normalize_recording_title, recording_id, recording_identity
 
 
@@ -76,11 +77,15 @@ class ManagedPaths:
 		return self.root / "tracks"
 
 	@property
+	def music(self) -> Path:
+		return self.root / "Music"
+
+	@property
 	def playlists(self) -> Path:
 		return self.root / "playlists"
 
 	def create(self) -> None:
-		for directory in (self.state_dir, self.staging, self.tracks, self.playlists):
+		for directory in (self.state_dir, self.staging, self.music, self.playlists):
 			directory.mkdir(parents=True, exist_ok=True)
 
 
@@ -390,11 +395,43 @@ def set_album(
 	return entry
 
 
-def managed_relative_path(recording: dict[str, Any]) -> str:
-	key = recording["recording_id"]
-	meta = recording["source_metadata"]
-	label = safe_name(f"{meta.get('artists', '')} - {meta.get('title', '')}", limit=100)
-	return f"tracks/{key[4:6]}/{key}--{label}.mp3"
+def path_component(value: Any, fallback: str) -> str:
+	"""Return one Finder-safe, Unicode-preserving canonical path component."""
+	text = unicodedata.normalize("NFC", str(value or "")).strip()
+	text = "".join(" " if character in "/:\\" or ord(character) < 32 else character for character in text)
+	text = re.sub(r"\s+", " ", text).strip(" .") or fallback
+	while len(text.encode("utf-8")) > 180:
+		text = text[:-1]
+	return text.rstrip(" .") or fallback
+
+
+def music_relative_path(track: dict[str, Any], *, suffix: str = "") -> str:
+	"""Plan a canonical path from the metadata Music displays for one file track."""
+	artist = "Compilations" if track.get("compilation") else path_component(track.get("album_artist"), "Unknown Artist")
+	album_folder = path_component(track.get("album"), "Unknown Album")
+	title = path_component(track.get("title"), "Untitled")
+	track_no = int(track.get("track_no") or 0)
+	disc_no = int(track.get("disc_no") or 0)
+	disc_total = int(track.get("disc_total") or 0)
+	prefix = f"{disc_no}-{track_no:02d} — " if track_no and (disc_no > 1 or disc_total > 1) else f"{track_no:02d} — " if track_no else ""
+	ending = f" — {suffix}" if suffix else ""
+	return str(Path("Music") / artist / album_folder / f"{prefix}{title}{ending}.mp3")
+
+
+def managed_relative_path(recording: dict[str, Any], *, suffix: str = "") -> str:
+	"""Plan the on-disk path from the exact tags Crate writes to the MP3."""
+	meta = recording.get("source_metadata") or {}
+	album = recording.get("album_metadata") or {}
+	track = {
+		"title": meta.get("title"),
+		"album": album.get("album") if album else IMPORT_ALBUM,
+		"album_artist": album.get("album_artist") if album else IMPORT_ALBUM_ARTIST,
+		"track_no": int(album.get("track_no") or 0) if album else 0,
+		"disc_no": int(album.get("disc_no") or 0) if album else 0,
+		"disc_total": int(album.get("disc_total") or 0) if album else 0,
+		"compilation": bool(album.get("is_compilation")) if album else True,
+	}
+	return music_relative_path(track, suffix=suffix)
 
 
 def file_sha256(path: Path) -> str:

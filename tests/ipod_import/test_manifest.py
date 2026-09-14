@@ -5,7 +5,10 @@ from pathlib import Path
 from crate_music_importer.ipod_import.manifest import (
 	ManagedPaths,
 	load_manifest,
+	managed_relative_path,
+	music_relative_path,
 	new_manifest,
+	path_component,
 	playlist_m3u8,
 	save_manifest,
 	set_album,
@@ -16,6 +19,64 @@ from crate_music_importer.ipod_import.manifest import (
 
 
 class ManifestTests(unittest.TestCase):
+	def test_managed_paths_create_only_the_canonical_music_tree(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory) / "managed")
+			paths.create()
+			self.assertTrue(paths.music.is_dir())
+			self.assertFalse(paths.tracks.exists())
+
+	def test_playlist_download_path_matches_written_compilation_tags(self):
+		recording = {
+			"recording_id": "rec_1234567890abcdef",
+			"source_metadata": {"title": "A Song"},
+			"album_metadata": None,
+		}
+		self.assertEqual(
+			managed_relative_path(recording),
+			"Music/Compilations/Playlist Imports/A Song.mp3",
+		)
+
+	def test_album_download_path_uses_album_artist_album_disc_and_track(self):
+		recording = {
+			"recording_id": "rec_1234567890abcdef",
+			"source_metadata": {"title": "A Song"},
+			"album_metadata": {
+				"album_artist": "Album Artist",
+				"album": "The Album",
+				"track_no": 3,
+				"disc_no": 2,
+				"disc_total": 2,
+				"is_compilation": False,
+			},
+		}
+		self.assertEqual(
+			managed_relative_path(recording),
+			"Music/Album Artist/The Album/2-03 — A Song.mp3",
+		)
+		self.assertEqual(
+			managed_relative_path(recording, suffix="1234567890"),
+			"Music/Album Artist/The Album/2-03 — A Song — 1234567890.mp3",
+		)
+
+	def test_path_components_preserve_unicode_and_replace_folder_separators(self):
+		self.assertEqual(path_component("  AC/DC: Live  ", "Unknown"), "AC DC Live")
+		self.assertEqual(path_component("E\u0301te\u0301", "Unknown"), "Été")
+
+	def test_current_music_metadata_can_drive_the_same_path_planner(self):
+		self.assertEqual(
+			music_relative_path({
+				"title": "Song",
+				"album": "Album",
+				"album_artist": "Various Artists",
+				"track_no": 1,
+				"disc_no": 1,
+				"disc_total": 1,
+				"compilation": True,
+			}),
+			"Music/Compilations/Album/01 — Song.mp3",
+		)
+
 	def test_missing_playlist_links_are_recovered_from_any_valid_spotify_id(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory))

@@ -314,6 +314,22 @@ def managed_duration_is_valid(recording: dict[str, Any], paths: ManagedPaths) ->
 	)
 
 
+def available_managed_relative_path(recording: dict[str, Any], paths: ManagedPaths) -> str:
+	"""Choose the readable canonical path without overwriting another recording."""
+	managed = recording.get("managed_file") or {}
+	relative = managed_relative_path(recording)
+	requested = paths.root / relative
+	if not requested.exists() or str(managed.get("relative_path") or "") == relative:
+		return relative
+	stable_suffix = str(recording.get("recording_id") or "recording").removeprefix("rec_")[:10]
+	relative = managed_relative_path(recording, suffix=stable_suffix)
+	counter = 1
+	while (paths.root / relative).exists() and str(managed.get("relative_path") or "") != relative:
+		counter += 1
+		relative = managed_relative_path(recording, suffix=f"{stable_suffix}-{counter}")
+	return relative
+
+
 def recover_moved_managed_file(
 	recording: dict[str, Any],
 	candidate: dict[str, Any],
@@ -428,7 +444,7 @@ def download_recording(
 	cover = _source_cover(staging, recording.get("source_metadata", {}).get("cover_url"), video_id)
 	if cover is None:
 		raise MediaError("No usable artwork was available; refusing to create an artwork-free iPod import.")
-	relative = managed_relative_path(recording)
+	relative = available_managed_relative_path(recording, paths)
 	target = paths.root / relative
 	target.parent.mkdir(parents=True, exist_ok=True)
 	if target.exists() and not managed.get("relative_path"):
