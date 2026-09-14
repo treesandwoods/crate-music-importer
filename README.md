@@ -93,7 +93,7 @@ Example (keep your real configuration outside the repository):
 
 Nonempty Raycast preferences override this file. `CRATE_CONFIG_FILE` selects a different config file. CLI processes may override the Music directory with `CRATE_MANAGED_ROOT`; Raycast passes its selected directory explicitly to its backend and detached workers. `CRATE_PYTHON` selects the checkout launcher's interpreter. Installed Python console scripts use their own environment.
 
-Managed storage contains `tracks/` and `.state/` with manifests, caches, jobs, and logs. Never publish these or downloaded media. Changing the configured path selects another library; it does **not** migrate or merge existing content. Preserve the complete folder when moving it deliberately.
+Managed storage keeps finished MP3s under `Music/Album Artist/Album/`, with compilations under `Music/Compilations/Album/`. `.state/` contains manifests, caches, jobs, and logs; `.staging/` contains resumable working material. Never publish these or downloaded media. Changing the configured path selects another library; it does **not** migrate or merge existing content. Preserve the complete folder when moving it deliberately.
 
 ## Troubleshooting
 
