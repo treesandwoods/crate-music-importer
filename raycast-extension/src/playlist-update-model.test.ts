@@ -55,6 +55,27 @@ const preview: PlaylistUpdatePreview = {
       action: "delete",
     },
   ],
+  reorders: [
+    {
+      spotify_id: "sp-moved",
+      recording_id: "moved",
+      title: "Moved",
+      artists: "Artist",
+      from_position: 3,
+      to_position: 1,
+    },
+  ],
+  music_changes: [
+    {
+      kind: "remove",
+      persistent_id: "MANUAL",
+      recording_id: "",
+      title: "Manual Track",
+      artists: "Artist",
+      from_position: 4,
+      to_position: null,
+    },
+  ],
   up_to_date: false,
   incomplete_data: false,
   blocked: false,
@@ -70,10 +91,22 @@ test("preview labels and confirmation itemize unlink and permanent deletion", ()
   assert.equal(removalLabel(preview.removals[1]), "delete permanently");
   assert.match(playlistUpdateConfirmation(preview), /Artist — Shared: unlink/);
   assert.match(playlistUpdateConfirmation(preview), /Artist — Sole: delete permanently/);
+  assert.match(playlistUpdateConfirmation(preview), /Manual Track: remove from this playlist only/);
+  assert.match(playlistUpdateConfirmation(preview), /exactly match Spotify/);
 });
 
 test("up-to-date and incomplete previews cannot be queued", () => {
   assert.equal(canQueuePlaylistUpdate(preview), true);
+  assert.equal(
+    canQueuePlaylistUpdate({
+      ...preview,
+      additions: [],
+      removals: [],
+      reorders: [],
+      music_changes: preview.music_changes,
+    }),
+    true,
+  );
   assert.equal(canQueuePlaylistUpdate({ ...preview, up_to_date: true, state: "up_to_date" }), false);
   assert.equal(
     canQueuePlaylistUpdate({ ...preview, blocked: true, incomplete_data: true, state: "incomplete_data" }),
@@ -86,7 +119,7 @@ test("queue payload uses the distinct update action and saved playlist identity"
   assert.deepEqual(args.slice(0, 3), ["queue-json", "playlist_update_combined", playlist.spotify_url]);
   const seed = JSON.parse(args[3]);
   assert.equal(seed.savedPlaylistId, "saved-id");
-  assert.equal(seed.total, 3);
+  assert.equal(seed.total, 5);
   assert.equal(seed.confirmationToken, "confirmed-preview");
 });
 
@@ -95,6 +128,9 @@ test("command keeps new import first and exposes saved playlist, update, and inc
   assert.ok(source.indexOf('title="Import a New Playlist"') < source.indexOf('title="Saved Imported Playlists"'));
   assert.match(source, /Playlist is up to date/);
   assert.match(source, /Spotify Data Incomplete/);
+  assert.match(source, /Spotify Position Changes/);
+  assert.match(source, /Music\.app Corrections/);
+  assert.match(source, /Sync Playlist with Spotify/);
   assert.match(source, /Change Stored Spotify Link/);
   assert.match(source, /title=\{primaryActionTitle\}/);
   assert.match(source, /Spotify #\$\{row.position\}/);

@@ -155,8 +155,8 @@ export function PlaylistUpdatePreviewView({ playlist }: { playlist: SavedPlaylis
     }
   }
 
-  const primaryActionTitle = preview?.removals.length ? "Apply All Playlist Changes" : "Add All Tracks";
-  const primaryActionIcon = preview?.removals.length ? Icon.ArrowClockwise : Icon.Plus;
+  const primaryActionTitle = "Sync Playlist with Spotify";
+  const primaryActionIcon = Icon.ArrowClockwise;
   const utilityActions = (
     <ActionPanel>
       <Action title="Refresh Preview" icon={Icon.ArrowClockwise} onAction={load} />
@@ -197,7 +197,7 @@ export function PlaylistUpdatePreviewView({ playlist }: { playlist: SavedPlaylis
       {preview?.up_to_date ? (
         <List.EmptyView
           title="Playlist is up to date"
-          description="There are no additions or removals. Reorders and moves are ignored."
+          description="Spotify order and the Music.app playlist membership match exactly."
           actions={utilityActions}
         />
       ) : null}
@@ -205,7 +205,7 @@ export function PlaylistUpdatePreviewView({ playlist }: { playlist: SavedPlaylis
         <List.Section title="Playlist Update">
           <List.Item
             title={primaryActionTitle}
-            subtitle={`${preview.additions.length} track${preview.additions.length === 1 ? "" : "s"}${preview.removals.length ? ` · ${preview.removals.length} removal${preview.removals.length === 1 ? "" : "s"}` : ""}`}
+            subtitle={`${preview.additions.length} additions · ${preview.removals.length} removals · ${preview.reorders.length} position changes · ${preview.music_changes.length} Music.app corrections`}
             icon={{ source: primaryActionIcon, tintColor: Color.Green }}
             actions={queueActions}
           />
@@ -225,7 +225,7 @@ export function PlaylistUpdatePreviewView({ playlist }: { playlist: SavedPlaylis
         </List.Section>
       ) : null}
       {preview?.removals.length ? (
-        <List.Section title="Removals" subtitle={`${preview.removals.length} · existing survivor order preserved`}>
+        <List.Section title="Removals" subtitle={`${preview.removals.length} · removed from Spotify`}>
           {preview.removals.map((row) => (
             <List.Item
               key={`remove-${row.saved_position}-${row.recording_id}`}
@@ -241,6 +241,47 @@ export function PlaylistUpdatePreviewView({ playlist }: { playlist: SavedPlaylis
                     value: removalLabel(row),
                     color: row.action === "delete" ? Color.Red : Color.Orange,
                   },
+                },
+              ]}
+            />
+          ))}
+        </List.Section>
+      ) : null}
+      {preview?.reorders.length ? (
+        <List.Section title="Spotify Position Changes" subtitle={`${preview.reorders.length} · exact occurrence order`}>
+          {preview.reorders.map((row) => (
+            <List.Item
+              key={`reorder-${row.from_position}-${row.to_position}-${row.recording_id}`}
+              title={row.title}
+              subtitle={row.artists}
+              icon={{ source: Icon.ArrowClockwise, tintColor: Color.Blue }}
+              accessories={[{ tag: `#${row.from_position} → #${row.to_position}` }]}
+            />
+          ))}
+        </List.Section>
+      ) : null}
+      {preview?.music_changes.length ? (
+        <List.Section
+          title="Music.app Corrections"
+          subtitle={`${preview.music_changes.length} · current playlist differs from Spotify`}
+        >
+          {preview.music_changes.map((row, index) => (
+            <List.Item
+              key={`music-${row.kind}-${row.persistent_id}-${row.from_position ?? "missing"}-${row.to_position ?? index}`}
+              title={row.title}
+              subtitle={row.artists || "Music.app playlist entry"}
+              icon={{
+                source: row.kind === "remove" ? Icon.Minus : row.kind === "restore" ? Icon.Plus : Icon.ArrowClockwise,
+                tintColor: row.kind === "remove" ? Color.Orange : row.kind === "restore" ? Color.Green : Color.Blue,
+              }}
+              accessories={[
+                {
+                  tag:
+                    row.kind === "remove"
+                      ? `remove Music #${row.from_position}`
+                      : row.kind === "restore"
+                        ? `missing from saved #${row.to_position}`
+                        : `Music #${row.from_position} · saved #${row.to_position}`,
                 },
               ]}
             />

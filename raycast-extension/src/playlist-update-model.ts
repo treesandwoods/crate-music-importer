@@ -10,9 +10,13 @@ export function canQueuePlaylistUpdate(preview?: PlaylistUpdatePreview): boolean
 
 export function playlistUpdateConfirmation(preview: PlaylistUpdatePreview): string {
   const removals = preview.removals.map((row) => `${row.artists} — ${row.title}: ${removalLabel(row)}`);
+  const musicRemovals = preview.music_changes
+    .filter((row) => row.kind === "remove")
+    .map((row) => `${row.artists ? `${row.artists} — ` : ""}${row.title}: remove from this playlist only`);
   return [
-    `${preview.additions.length} additions will be placed in Spotify order. ${preview.removals.length} imported occurrences will be removed. Manual Music entries and surviving order are preserved.`,
+    `This will make the Music.app playlist exactly match Spotify: ${preview.additions.length} additions, ${preview.removals.length} Spotify removals, ${preview.reorders.length} Spotify position changes, and ${preview.music_changes.length} Music.app corrections. Unexpected manual playlist entries will be removed from this playlist but not deleted from the Music library.`,
     ...(removals.length ? ["Removals:", ...removals] : []),
+    ...(musicRemovals.length ? ["Music.app-only entries:", ...musicRemovals] : []),
   ].join("\n");
 }
 
@@ -29,6 +33,22 @@ export function playlistUpdateQueueArgs(playlist: SavedPlaylistSummary, preview:
     ...preview.removals.map((row) => ({
       position: row.saved_position,
       trackNumber: row.saved_position,
+      discNumber: 1,
+      recordingId: row.recording_id,
+      title: row.title,
+      artists: row.artists,
+    })),
+    ...preview.reorders.map((row) => ({
+      position: row.to_position,
+      trackNumber: row.to_position,
+      discNumber: 1,
+      recordingId: row.recording_id,
+      title: row.title,
+      artists: row.artists,
+    })),
+    ...preview.music_changes.map((row) => ({
+      position: row.to_position ?? row.from_position ?? 0,
+      trackNumber: row.to_position ?? row.from_position ?? 0,
       discNumber: 1,
       recordingId: row.recording_id,
       title: row.title,

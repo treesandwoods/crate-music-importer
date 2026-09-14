@@ -697,6 +697,24 @@ def sync_from_manifest(job: dict[str, Any], store: JobStore) -> dict[str, Any]:
 				"status": "removal",
 			}
 			for removal in pending.get("removals") or []
+		] + [
+			{
+				"position": int(reorder.get("to_position") or 0),
+				"recording_id": str(reorder.get("recording_id") or ""),
+				"status": "reorder",
+				"title": str(reorder.get("title") or ""),
+				"artists": str(reorder.get("artists") or ""),
+			}
+			for reorder in pending.get("reorders") or []
+		] + [
+			{
+				"position": int(change.get("to_position") or change.get("from_position") or 0),
+				"recording_id": str(change.get("recording_id") or ""),
+				"status": "music_change",
+				"title": str(change.get("title") or ""),
+				"artists": str(change.get("artists") or ""),
+			}
+			for change in pending.get("music_changes") or []
 		]
 	else:
 		items = sorted(source_value.get("items") or [], key=lambda item: int(item.get("position") or 0))
@@ -725,7 +743,7 @@ def sync_from_manifest(job: dict[str, Any], store: JobStore) -> dict[str, Any]:
 	for item in items:
 		recording = manifest.get("recordings", {}).get(item.get("recording_id"), {})
 		metadata = recording.get("source_metadata") or {}
-		if job.get("action") == "playlist_update_combined" and item.get("status") == "removal":
+		if job.get("action") == "playlist_update_combined" and item.get("status") in {"removal", "reorder", "music_change"}:
 			checkpoint = (source_value.get("pending_update") or {}).get("music_checkpoint") or {}
 			state = "complete" if checkpoint.get("applied_at") else "not_started"
 		else:
@@ -774,8 +792,8 @@ def sync_from_manifest(job: dict[str, Any], store: JobStore) -> dict[str, Any]:
 			"trackNumber": int(item.get("track_no") or item.get("position") or 0),
 			"discNumber": int(item.get("disc_no") or 1),
 			"recordingId": str(item.get("recording_id") or ""),
-			"title": str(metadata.get("title") or ""),
-			"artists": str(metadata.get("artists") or ""),
+			"title": str(metadata.get("title") or item.get("title") or ""),
+			"artists": str(metadata.get("artists") or item.get("artists") or ""),
 			"state": state,
 			"detail": str(recording.get("last_error") or (recording.get("review") or {}).get("message") or ""),
 		})
