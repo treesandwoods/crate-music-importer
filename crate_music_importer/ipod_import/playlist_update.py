@@ -1,4 +1,4 @@
-"""Occurrence-based, append/remove updates for previously imported playlists."""
+"""Guarded full-order updates for previously imported Spotify playlists."""
 
 from __future__ import annotations
 
@@ -105,13 +105,27 @@ def backfill_playlist_covers(
 	return updated
 
 
-def _baseline(playlist: dict[str, Any]) -> tuple[list[dict[str, Any]], bool, bool]:
+def _baseline(playlist: dict[str, Any], manifest: dict[str, Any]) -> tuple[list[dict[str, Any]], bool, bool]:
 	saved = playlist.get("spotify_occurrence_snapshot")
 	if isinstance(saved, list):
 		values = [dict(item) for item in saved if isinstance(item, dict)]
-		return values, all(str(item.get("spotify_id") or "") for item in values), False
-	values = _snapshot([dict(item) for item in playlist.get("items") or [] if isinstance(item, dict)])
-	return values, all(str(item.get("spotify_id") or "") for item in values), True
+		backfilled = False
+	else:
+		values = _snapshot([dict(item) for item in playlist.get("items") or [] if isinstance(item, dict)])
+		backfilled = True
+	for item in values:
+		if item.get("spotify_id"):
+			continue
+		recording = manifest.get("recordings", {}).get(str(item.get("recording_id") or "")) or {}
+		known_ids = {
+			str(occurrence.get("spotify_id") or "")
+			for occurrence in recording.get("source_occurrences") or []
+			if isinstance(occurrence, dict) and occurrence.get("spotify_id")
+		}
+		if len(known_ids) == 1:
+			item["spotify_id"] = known_ids.pop()
+			backfilled = True
+	return values, all(str(item.get("spotify_id") or "") for item in values), backfilled
 
 
 def _recording_title(manifest: dict[str, Any], recording_id: str) -> tuple[str, str]:
@@ -137,6 +151,86 @@ def _delete_kind(manifest: dict[str, Any], playlist_id: str, recording_id: str, 
 	return "delete" if sole_playlist_import else "unlink"
 
 
+def _recording_persistent_id(manifest: dict[str, Any], recording_id: str) -> str:
+	recording = manifest.get("recordings", {}).get(recording_id) or {}
+	active = recording.get("active_reference") or {}
+	return str((recording.get("music") or {}).get("persistent_id") or active.get("persistent_id") or "")
+
+
+def _spotify_reorders(manifest: dict[str, Any], snapshot: list[dict[str, Any]], addition_positions: set[int]) -> list[dict[str, Any]]:
+	rows = []
+	for occurrence in snapshot:
+		from_position = int(occurrence.get("saved_position") or 0)
+		to_position = int(occurrence.get("spotify_position") or 0)
+		if not occurrence.get("recording_id") or to_position in addition_positions or from_position == to_position:
+			continue
+		title, artists = _recording_title(manifest, str(occurrence["recording_id"]))
+		rows.append({
+			"spotify_id": str(occurrence.get("spotify_id") or ""),
+			"recording_id": str(occurrence["recording_id"]),
+			"title": title,
+			"artists": artists,
+			"from_position": from_position,
+			"to_position": to_position,
+		})
+	return rows
+
+
+def _music_sync_changes(
+	membership: list[str],
+	expected_snapshot: list[dict[str, Any]],
+	manifest: dict[str, Any],
+	music_tracks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+	"""Describe manual Music drift from the saved imported occurrence sequence."""
+	positions: dict[str, deque[int]] = defaultdict(deque)
+	for position, persistent_id in enumerate(membership, start=1):
+		positions[persistent_id].append(position)
+	rows: list[dict[str, Any]] = []
+	for occurrence in sorted(expected_snapshot, key=lambda row: int(row.get("saved_position") or 0)):
+		to_position = int(occurrence.get("saved_position") or 0)
+		recording_id = str(occurrence.get("recording_id") or "")
+		persistent_id = _recording_persistent_id(manifest, recording_id)
+		if not persistent_id:
+			continue
+		from_position = positions[persistent_id].popleft() if positions[persistent_id] else None
+		title, artists = _recording_title(manifest, recording_id)
+		if from_position is None:
+			rows.append({
+				"kind": "restore",
+				"persistent_id": persistent_id,
+				"recording_id": recording_id,
+				"title": title,
+				"artists": artists,
+				"from_position": None,
+				"to_position": to_position,
+			})
+		elif from_position != to_position:
+			rows.append({
+				"kind": "reorder",
+				"persistent_id": persistent_id,
+				"recording_id": recording_id,
+				"title": title,
+				"artists": artists,
+				"from_position": from_position,
+				"to_position": to_position,
+			})
+	track_by_id = {str(track.get("persistent_id") or ""): track for track in music_tracks}
+	for persistent_id, remaining_positions in positions.items():
+		for from_position in remaining_positions:
+			track = track_by_id.get(persistent_id) or {}
+			rows.append({
+				"kind": "remove",
+				"persistent_id": persistent_id,
+				"recording_id": "",
+				"title": str(track.get("title") or f"Music track {persistent_id}"),
+				"artists": str(track.get("artist") or ""),
+				"from_position": from_position,
+				"to_position": None,
+			})
+	return sorted(rows, key=lambda row: (int(row.get("to_position") or 10**9), int(row.get("from_position") or 10**9), str(row.get("persistent_id") or "")))
+
+
 @dataclass
 class PlaylistUpdatePreview:
 	manifest: dict[str, Any]
@@ -144,9 +238,12 @@ class PlaylistUpdatePreview:
 	source: dict[str, Any]
 	additions: list[dict[str, Any]]
 	removals: list[dict[str, Any]]
+	reorders: list[dict[str, Any]]
+	music_changes: list[dict[str, Any]]
 	addition_items: list[dict[str, Any]]
 	removal_positions: list[int]
 	spotify_snapshot: list[dict[str, Any]]
+	music_membership: list[str]
 	baseline_backfilled: bool
 	removals_deferred: bool
 	state: str
@@ -156,8 +253,11 @@ class PlaylistUpdatePreview:
 		payload = {
 			"playlist_id": self.playlist_id,
 			"snapshot": self.spotify_snapshot,
+			"music_membership": self.music_membership,
 			"additions": [{"spotify_id": row.get("spotify_id"), "position": row.get("position")} for row in self.additions],
 			"removals": [{"spotify_id": row.get("spotify_id"), "saved_position": row.get("saved_position"), "action": row.get("action")} for row in self.removals],
+			"reorders": [{"spotify_id": row.get("spotify_id"), "from_position": row.get("from_position"), "to_position": row.get("to_position")} for row in self.reorders],
+			"music_changes": [{"kind": row.get("kind"), "persistent_id": row.get("persistent_id"), "from_position": row.get("from_position"), "to_position": row.get("to_position")} for row in self.music_changes],
 		}
 		return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
@@ -167,6 +267,8 @@ class PlaylistUpdatePreview:
 			"playlist_id": self.playlist_id,
 			"additions": self.additions,
 			"removals": self.removals,
+			"reorders": self.reorders,
+			"music_changes": self.music_changes,
 			"up_to_date": self.state == "up_to_date",
 			"incomplete_data": self.state == "incomplete_data",
 			"blocked": self.state not in {"ready", "up_to_date"},
@@ -178,6 +280,34 @@ class PlaylistUpdatePreview:
 		}
 
 
+def _blocked_preview(
+	manifest: dict[str, Any],
+	playlist_id: str,
+	source: dict[str, Any],
+	state: str,
+	warning: str,
+	*,
+	baseline_backfilled: bool = False,
+) -> PlaylistUpdatePreview:
+	return PlaylistUpdatePreview(
+		manifest=clone_manifest(manifest),
+		playlist_id=playlist_id,
+		source=source,
+		additions=[],
+		removals=[],
+		reorders=[],
+		music_changes=[],
+		addition_items=[],
+		removal_positions=[],
+		spotify_snapshot=[],
+		music_membership=[],
+		baseline_backfilled=baseline_backfilled,
+		removals_deferred=False,
+		state=state,
+		warning=warning,
+	)
+
+
 def build_playlist_update_preview(
 	current: dict[str, Any],
 	music_tracks: list[dict[str, Any]],
@@ -185,6 +315,7 @@ def build_playlist_update_preview(
 	paths: ManagedPaths,
 	*,
 	status_checker: Callable[[str, str | None], tuple[str, str | None]] = playlist_status,
+	membership_reader: Callable[[str, str], list[str]] = playlist_membership,
 ) -> PlaylistUpdatePreview:
 	from crate_music_importer.ipod_import.pipeline import build_preview
 
@@ -205,17 +336,21 @@ def build_playlist_update_preview(
 	tracks = [dict(track) for track in current.get("tracks") or []]
 	if not current.get("complete", True) or reported is None or int(reported) != len(tracks):
 		warning = str(current.get("warning") or f"Spotify reported {reported} tracks but only {len(tracks)} were fetched. Update blocked.")
-		return PlaylistUpdatePreview(clone_manifest(manifest), playlist_id, source, [], [], [], [], [], False, False, "incomplete_data", warning)
+		return _blocked_preview(manifest, playlist_id, source, "incomplete_data", warning)
 	known_pid = str(saved.get("music_playlist_persistent_id") or "")
 	if not known_pid:
-		return PlaylistUpdatePreview(clone_manifest(manifest), playlist_id, source, [], [], [], [], [], False, False, "missing_music_playlist", "The saved Music playlist persistent ID is missing. Update refused.")
+		return _blocked_preview(manifest, playlist_id, source, "missing_music_playlist", "The saved Music playlist persistent ID is missing. Update refused.")
 	status, found_id = status_checker(str(saved.get("name") or "Spotify Playlist"), known_pid)
 	if status == "MISSING":
-		return PlaylistUpdatePreview(clone_manifest(manifest), playlist_id, source, [], [], [], [], [], False, False, "missing_music_playlist", "The previously imported Music playlist is missing. Update refused.")
+		return _blocked_preview(manifest, playlist_id, source, "missing_music_playlist", "The previously imported Music playlist is missing. Update refused.")
 	if status == "COLLISION":
-		return PlaylistUpdatePreview(clone_manifest(manifest), playlist_id, source, [], [], [], [], [], False, False, "playlist_collision", f"A different Music playlist now uses this name ({found_id or 'unknown ID'}). Update refused.")
+		return _blocked_preview(manifest, playlist_id, source, "playlist_collision", f"A different Music playlist now uses this name ({found_id or 'unknown ID'}). Update refused.")
 
-	baseline, baseline_complete, backfilled = _baseline(saved)
+	baseline, baseline_complete, backfilled = _baseline(saved, manifest)
+	if not baseline_complete:
+		warning = "The saved Spotify occurrence baseline is incomplete, so an exact full-playlist sync cannot be proven safe. Reimport the playlist before updating it."
+		return _blocked_preview(manifest, playlist_id, source, "incomplete_baseline", warning, baseline_backfilled=backfilled)
+	music_membership = membership_reader(str(saved.get("name") or "Spotify Playlist"), known_pid)
 	remaining: dict[str, deque[int]] = defaultdict(deque)
 	for index, occurrence in enumerate(baseline):
 		spotify_id = str(occurrence.get("spotify_id") or "")
@@ -263,7 +398,7 @@ def build_playlist_update_preview(
 		else:
 			memberships.pop(playlist_id, None)
 
-	removal_indices = [index for index in range(len(baseline)) if index not in consumed] if baseline_complete else []
+	removal_indices = [index for index in range(len(baseline)) if index not in consumed]
 	removal_positions = [int(baseline[index].get("saved_position") or 0) for index in removal_indices]
 	removal_position_set = set(removal_positions)
 	surviving_items = [item for item in saved.get("items") or [] if int(item.get("position") or 0) not in removal_position_set]
@@ -281,12 +416,12 @@ def build_playlist_update_preview(
 			"artists": artists,
 			"action": _delete_kind(manifest, playlist_id, recording_id, surviving_ids),
 		})
-	warning = None
-	removals_deferred = not baseline_complete
-	if removals_deferred:
-		warning = "The saved baseline is incomplete because at least one existing entry lacks a Spotify track ID. This first update is additions-only; all removals are deferred."
-	state = "up_to_date" if not addition_rows and not removals else "ready"
-	return PlaylistUpdatePreview(planned, playlist_id, source, addition_rows, removals, addition_items, removal_positions, current_links, backfilled, removals_deferred, state, warning)
+	addition_positions = {int(item.get("spotify_position") or 0) for item in addition_items}
+	reorders = _spotify_reorders(manifest, current_links, addition_positions)
+	target_ids = [_recording_persistent_id(planned, str(row.get("recording_id") or "")) for row in current_links]
+	music_changes = [] if all(target_ids) and music_membership == target_ids else _music_sync_changes(music_membership, baseline, manifest, music_tracks)
+	state = "up_to_date" if not addition_rows and not removals and not reorders and not music_changes else "ready"
+	return PlaylistUpdatePreview(planned, playlist_id, source, addition_rows, removals, reorders, music_changes, addition_items, removal_positions, current_links, music_membership, backfilled, False, state, None)
 
 
 def save_pending_update(preview: PlaylistUpdatePreview, paths: ManagedPaths) -> dict[str, Any]:
@@ -296,8 +431,11 @@ def save_pending_update(preview: PlaylistUpdatePreview, paths: ManagedPaths) -> 
 		"spotify_url": preview.source["url"],
 		"cover_url": preview.source.get("cover_url"),
 		"spotify_snapshot": preview.spotify_snapshot,
+		"music_baseline": preview.music_membership,
 		"addition_items": preview.addition_items,
 		"removals": preview.removals,
+		"reorders": preview.reorders,
+		"music_changes": preview.music_changes,
 		"removal_positions": preview.removal_positions,
 		"removals_deferred": preview.removals_deferred,
 		"music_checkpoint": None,
@@ -312,134 +450,29 @@ def save_pending_update(preview: PlaylistUpdatePreview, paths: ManagedPaths) -> 
 	return playlist["pending_update"]
 
 
-def _persistent_id(manifest: dict[str, Any], item: dict[str, Any]) -> str:
-	recording = manifest["recordings"][item["recording_id"]]
-	active = recording.get("active_reference") or {}
-	return str((recording.get("music") or {}).get("persistent_id") or active.get("persistent_id") or "")
-
-
-def _align_imported_positions(membership: list[str], imported: list[str]) -> list[int]:
-	positions: list[int] = []
-	start = 0
-	for persistent_id in imported:
-		try:
-			index = membership.index(persistent_id, start)
-		except ValueError as exc:
-			raise MusicAutomationError("The Music playlist membership no longer contains the saved imported sequence. Update stopped for attention.") from exc
-		positions.append(index)
-		start = index + 1
-	return positions
-
-
-def _addition_anchors(
-	original_items: list[dict[str, Any]],
-	addition_items: list[dict[str, Any]],
-	spotify_snapshot: list[dict[str, Any]],
-	remove_saved: set[int],
-) -> list[tuple[dict[str, Any], int | None]]:
-	"""Place additions before the next surviving imported occurrence in Spotify order."""
-	surviving_positions = {
-		int(item.get("position") or 0)
-		for item in original_items
-		if int(item.get("position") or 0) not in remove_saved
-	}
-	addition_by_spotify_position = {
-		int(item.get("spotify_position") or 0): item
-		for item in addition_items
-	}
-	ordered_snapshot = sorted(spotify_snapshot, key=lambda row: int(row.get("spotify_position") or 0))
-	snapshot_index_by_position = {
-		int(row.get("spotify_position") or 0): index
-		for index, row in enumerate(ordered_snapshot)
-	}
-	anchors: list[tuple[dict[str, Any], int | None]] = []
-	for spotify_position, addition in sorted(addition_by_spotify_position.items()):
-		index = snapshot_index_by_position.get(spotify_position, len(ordered_snapshot))
-		anchor = next((
-			int(candidate.get("saved_position") or 0)
-			for candidate in ordered_snapshot[index + 1:]
-			if int(candidate.get("spotify_position") or 0) not in addition_by_spotify_position
-			and int(candidate.get("saved_position") or 0) in surviving_positions
-		), None)
-		anchors.append((addition, anchor))
-	return anchors
-
-
-def _target_music_membership(
-	current: list[str],
-	original_items: list[dict[str, Any]],
-	music_positions: list[int],
-	remove_saved: set[int],
-	remove_indexes: list[int],
-	addition_items: list[dict[str, Any]],
-	addition_ids: list[str],
-	spotify_snapshot: list[dict[str, Any]],
-) -> list[str]:
-	survivors = [value for index, value in enumerate(current) if index not in set(remove_indexes)]
-	addition_id_by_position = {
-		int(item.get("spotify_position") or 0): persistent_id
-		for item, persistent_id in zip(addition_items, addition_ids)
-	}
-	index_by_saved_position: dict[int, int] = {}
-	removed = set(remove_indexes)
-	for item, current_index in zip(original_items, music_positions):
-		saved_position = int(item.get("position") or 0)
-		if saved_position in remove_saved:
-			continue
-		index_by_saved_position[saved_position] = current_index - sum(index < current_index for index in removed)
-	before_index: dict[int, list[str]] = defaultdict(list)
-	suffix: list[str] = []
-	for addition, anchor in _addition_anchors(original_items, addition_items, spotify_snapshot, remove_saved):
-		persistent_id = addition_id_by_position[int(addition.get("spotify_position") or 0)]
-		if anchor is None:
-			suffix.append(persistent_id)
-		else:
-			before_index[index_by_saved_position[anchor]].append(persistent_id)
-	target: list[str] = []
-	for index, persistent_id in enumerate(survivors):
-		target.extend(before_index.get(index, []))
-		target.append(persistent_id)
-	target.extend(suffix)
-	return target
-
-
 def _updated_playlist_items(
 	original_items: list[dict[str, Any]],
 	addition_items: list[dict[str, Any]],
 	spotify_snapshot: list[dict[str, Any]],
-	remove_saved: set[int],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-	surviving = [dict(item) for item in original_items if int(item.get("position") or 0) not in remove_saved]
-	before_position: dict[int, list[tuple[dict[str, Any], bool]]] = defaultdict(list)
-	suffix: list[tuple[dict[str, Any], bool]] = []
-	for addition, anchor in _addition_anchors(original_items, addition_items, spotify_snapshot, remove_saved):
-		if anchor is None:
-			suffix.append((dict(addition), True))
-		else:
-			before_position[anchor].append((dict(addition), True))
-	ordered_values: list[tuple[dict[str, Any], bool]] = []
-	for item in surviving:
-		ordered_values.extend(before_position.get(int(item.get("position") or 0), []))
-		ordered_values.append((item, False))
-	ordered_values.extend(suffix)
-	old_to_new: dict[int, int] = {}
-	addition_to_new: dict[int, int] = {}
+	"""Rebuild saved items in exact Spotify occurrence order, including duplicates."""
+	original_by_position = {int(item.get("position") or 0): dict(item) for item in original_items}
+	addition_by_spotify_position = {int(item.get("spotify_position") or 0): dict(item) for item in addition_items}
 	ordered: list[dict[str, Any]] = []
-	for position, (item, is_addition) in enumerate(ordered_values, start=1):
-		old_position = int(item.get("position") or 0)
-		spotify_position = int(item.get("spotify_position") or 0)
-		if is_addition:
-			addition_to_new[spotify_position] = position
-		else:
-			old_to_new[old_position] = position
-		item["position"] = position
-		ordered.append(item)
 	normalized_snapshot = []
-	for row in spotify_snapshot:
+	for position, row in enumerate(sorted(spotify_snapshot, key=lambda value: int(value.get("spotify_position") or 0)), start=1):
 		value = dict(row)
 		spotify_position = int(value.get("spotify_position") or 0)
-		old_position = int(value.get("saved_position") or 0)
-		value["saved_position"] = addition_to_new.get(spotify_position, old_to_new.get(old_position, old_position))
+		item = addition_by_spotify_position.get(spotify_position) or original_by_position.get(int(value.get("saved_position") or 0))
+		if not item:
+			raise MusicAutomationError("A Spotify occurrence no longer maps to a saved playlist item. Update stopped for attention.")
+		item = dict(item)
+		item["position"] = position
+		item["spotify_position"] = position
+		item["spotify_id"] = str(value.get("spotify_id") or item.get("spotify_id") or "")
+		ordered.append(item)
+		value["spotify_position"] = position
+		value["saved_position"] = position
 		normalized_snapshot.append(value)
 	return ordered, normalized_snapshot
 
@@ -584,35 +617,25 @@ def apply_playlist_update(
 	if not isinstance(checkpoint, dict) or not checkpoint.get("applied_at"):
 		_validate_permanent_deletions(manifest, list(pending.get("removals") or []), paths, audio_hasher=audio_hasher, owned_lookup=owned_lookup)
 	addition_items = [dict(item) for item in pending.get("addition_items") or []]
-	append_ids, new_imports = _ensure_addition_ids(manifest, addition_items, paths, music_tracks, exact_lookup=exact_lookup, cache_updater=cache_updater, on_progress=on_progress)
 	current = membership_reader(str(playlist.get("name") or "Spotify Playlist"), known_pid)
 	if not isinstance(checkpoint, dict):
-		original_items = sorted(playlist.get("items") or [], key=lambda item: int(item.get("position") or 0))
-		imported_ids = [_persistent_id(manifest, item) for item in original_items]
-		if any(not value for value in imported_ids):
-			raise MusicAutomationError("A saved imported occurrence has no Music persistent ID. Update stopped for attention.")
-		music_positions = _align_imported_positions(current, imported_ids)
-		remove_saved = set(int(value) for value in pending.get("removal_positions") or [])
-		remove_indexes = [music_positions[index] for index, item in enumerate(original_items) if int(item.get("position") or 0) in remove_saved]
-		survivors = [value for index, value in enumerate(current) if index not in set(remove_indexes)]
-		final = _target_music_membership(
-			current,
-			original_items,
-			music_positions,
-			remove_saved,
-			remove_indexes,
-			addition_items,
-			append_ids,
-			list(pending.get("spotify_snapshot") or []),
-		)
-		planned_append = append_ids
-		if final != survivors + append_ids:
-			prefix_length = 0
-			while prefix_length < min(len(current), len(final)) and current[prefix_length] == final[prefix_length]:
-				prefix_length += 1
-			survivors = current[:prefix_length]
-			remove_indexes = list(range(prefix_length, len(current)))
-			planned_append = final[prefix_length:]
+		preview_baseline = list(pending.get("music_baseline") or [])
+		if current != preview_baseline:
+			raise MusicAutomationError("The Music playlist changed after its update preview. Refresh the preview and confirm the exact Spotify sync again.")
+	_append_ids, new_imports = _ensure_addition_ids(manifest, addition_items, paths, music_tracks, exact_lookup=exact_lookup, cache_updater=cache_updater, on_progress=on_progress)
+	if not isinstance(checkpoint, dict):
+		final = [
+			_recording_persistent_id(manifest, str(occurrence.get("recording_id") or ""))
+			for occurrence in sorted(pending.get("spotify_snapshot") or [], key=lambda row: int(row.get("spotify_position") or 0))
+		]
+		if any(not value for value in final):
+			raise MusicAutomationError("A Spotify playlist occurrence has no Music persistent ID. Update stopped for attention.")
+		prefix_length = 0
+		while prefix_length < min(len(current), len(final)) and current[prefix_length] == final[prefix_length]:
+			prefix_length += 1
+		survivors = current[:prefix_length]
+		remove_indexes = list(range(prefix_length, len(current)))
+		planned_append = final[prefix_length:]
 		checkpoint = {
 			"baseline": current,
 			"survivors": survivors,
@@ -647,7 +670,6 @@ def apply_playlist_update(
 		original_items,
 		addition_items,
 		list(pending.get("spotify_snapshot") or []),
-		remove_saved,
 	)
 	for recording in manifest.get("recordings", {}).values():
 		(recording.get("playlist_memberships") or {}).pop(playlist_id, None)
@@ -695,4 +717,12 @@ def apply_playlist_update(
 	playlist.pop("pending_update", None)
 	write_playlist_m3u8(manifest, playlist_id, paths)
 	save_manifest(paths, manifest)
-	return {"track_count": len(playlist["items"]), "additions": len(addition_items), "removals": len(remove_saved), "deleted": deleted, "new_imports": new_imports}
+	return {
+		"track_count": len(playlist["items"]),
+		"additions": len(addition_items),
+		"removals": len(remove_saved),
+		"reorders": len(pending.get("reorders") or []),
+		"music_repairs": len(pending.get("music_changes") or []),
+		"deleted": deleted,
+		"new_imports": new_imports,
+	}

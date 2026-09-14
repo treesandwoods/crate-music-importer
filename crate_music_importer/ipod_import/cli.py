@@ -68,16 +68,16 @@ def _parser() -> argparse.ArgumentParser:
 	apply.add_argument("--confirm-music-write", action="store_true", required=True)
 
 	subparsers.add_parser("saved-playlists", help="List saved imported playlists and stored Spotify links.").add_argument("--json", action="store_true")
-	update_preview = subparsers.add_parser("playlist-update-preview", help="Preview occurrence additions and itemized removals for a saved playlist.")
+	update_preview = subparsers.add_parser("playlist-update-preview", help="Preview an exact Spotify-order sync for a saved playlist.")
 	update_preview.add_argument("playlist")
 	update_preview.add_argument("--spotify-fixture", type=Path, help=argparse.SUPPRESS)
 	update_preview.add_argument("--music-fixture", type=Path, help=argparse.SUPPRESS)
 	update_preview.add_argument("--json", action="store_true")
-	update_prepare = subparsers.add_parser("playlist-update-prepare", help="Prepare only new occurrences for a confirmed combined update.")
+	update_prepare = subparsers.add_parser("playlist-update-prepare", help="Prepare a confirmed full Spotify playlist sync.")
 	update_prepare.add_argument("playlist")
 	update_prepare.add_argument("--confirmation-token")
 	update_prepare.add_argument("--confirm-download", action="store_true", required=True)
-	update_apply = subparsers.add_parser("playlist-update-apply", help="Apply a confirmed append/removal update without clearing the playlist.")
+	update_apply = subparsers.add_parser("playlist-update-apply", help="Apply a confirmed guarded full-order playlist sync.")
 	update_apply.add_argument("playlist")
 	update_apply.add_argument("--confirm-music-write", action="store_true", required=True)
 	link = subparsers.add_parser("playlist-link-set", help="Change the stored Spotify link for a saved imported playlist.")
@@ -430,13 +430,13 @@ def _run(
 		preview = build_playlist_update_preview(current, music_cache_tracks(load_music_cache(paths)), manifest, paths)
 		if preview.state != "ready":
 			raise ValueError(preview.warning or "Playlist is up to date; no update was queued.")
-		if preview.removals and args.confirmation_token != preview.confirmation_token():
-			raise ValueError("The playlist changed after its destructive preview. Refresh and confirm the itemized removals again.")
+		if (preview.removals or preview.reorders or preview.music_changes) and args.confirmation_token != preview.confirmation_token():
+			raise ValueError("Spotify or Music changed after the update preview. Refresh and confirm the exact playlist sync again.")
 		if preview.addition_items:
 			check_tools()
 			execute_import(preview=type("AdditionPreview", (), {"manifest": preview.manifest, "playlist_id": playlist_id})(), paths=paths, on_output=print, on_progress=on_progress, items_override=preview.addition_items)
 		save_pending_update(preview, paths)
-		print(f"Prepared {len(preview.additions)} additions and {len(preview.removals)} removals.")
+		print(f"Prepared {len(preview.additions)} additions, {len(preview.removals)} removals, {len(preview.reorders)} Spotify position changes, and {len(preview.music_changes)} Music repairs.")
 		statuses = {str(item.get("status") or "") for item in preview.addition_items}
 		return 2 if statuses & {"review_required", "failed", "review_music"} else 0
 	if args.command == "playlist-update-apply":
@@ -451,7 +451,7 @@ def _run(
 			cache_remover=lambda persistent_ids: remove_music_cache_tracks(paths, persistent_ids),
 			on_progress=on_progress,
 		)
-		print(f"Playlist update complete: {result['additions']} additions; {result['removals']} removals; {result['deleted']} permanently deleted.")
+		print(f"Playlist update complete: {result['additions']} additions; {result['removals']} removals; {result['reorders']} Spotify position changes; {result['music_repairs']} Music repairs; {result['deleted']} permanently deleted.")
 		print("Finder/iPod sync settings were not touched.")
 		return 0
 	if args.command == "status":

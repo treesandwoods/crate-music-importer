@@ -172,6 +172,25 @@ export interface PlaylistUpdateRemoval {
   action: "unlink" | "delete";
 }
 
+export interface PlaylistUpdateReorder {
+  spotify_id: string;
+  recording_id: string;
+  title: string;
+  artists: string;
+  from_position: number;
+  to_position: number;
+}
+
+export interface PlaylistMusicChange {
+  kind: "remove" | "restore" | "reorder";
+  persistent_id: string;
+  recording_id: string;
+  title: string;
+  artists: string;
+  from_position?: number | null;
+  to_position?: number | null;
+}
+
 export interface PlaylistUpdatePreview {
   source: {
     type: "playlist";
@@ -184,10 +203,18 @@ export interface PlaylistUpdatePreview {
   playlist_id: string;
   additions: PreviewRow[];
   removals: PlaylistUpdateRemoval[];
+  reorders: PlaylistUpdateReorder[];
+  music_changes: PlaylistMusicChange[];
   up_to_date: boolean;
   incomplete_data: boolean;
   blocked: boolean;
-  state: "ready" | "up_to_date" | "incomplete_data" | "missing_music_playlist" | "playlist_collision";
+  state:
+    | "ready"
+    | "up_to_date"
+    | "incomplete_data"
+    | "incomplete_baseline"
+    | "missing_music_playlist"
+    | "playlist_collision";
   warning?: string | null;
   baseline_backfilled: boolean;
   removals_deferred: boolean;

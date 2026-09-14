@@ -39,9 +39,20 @@ class PlaylistUpdateTests(unittest.TestCase):
 		self.directory.cleanup()
 
 	def preview(self, manifest, music, current_ids, **values):
+		music_membership = values.pop("music_membership", [
+			str((manifest["recordings"][item["recording_id"]].get("music") or {}).get("persistent_id") or "")
+			for item in sorted(manifest["playlists"]["saved"].get("items") or [], key=lambda item: int(item.get("position") or 0))
+		])
 		current = {"id": "saved", "name": "Saved", "url": URL, "tracks": [track(value) for value in current_ids], "total_count": len(current_ids), "complete": True}
 		current.update(values)
-		return build_playlist_update_preview(current, music, manifest, ManagedPaths(Path(self.directory.name)), status_checker=lambda _name, pid: ("OWNED", pid))
+		return build_playlist_update_preview(
+			current,
+			music,
+			manifest,
+			ManagedPaths(Path(self.directory.name)),
+			status_checker=lambda _name, pid: ("OWNED", pid),
+			membership_reader=lambda _name, _pid: music_membership,
+		)
 
 	def test_lists_saved_playlists_with_count_and_link(self):
 		_paths, manifest, _music = self.fixture(("a", "a", "b"))
@@ -68,13 +79,18 @@ class PlaylistUpdateTests(unittest.TestCase):
 		self.assertEqual(manifest["playlists"]["saved"]["cover_url"], "https://example.test/backfilled.jpg")
 		self.assertEqual(manifest["playlists"]["cached"]["cover_url"], "https://example.test/cached.jpg")
 
-	def test_first_update_backfills_and_reorder_is_noop(self):
+	def test_first_update_backfills_and_detects_reorder_only_change(self):
 		_paths, manifest, music = self.fixture(("a", "b"))
 		preview = self.preview(manifest, music, ("b", "a"))
 		self.assertTrue(preview.baseline_backfilled)
-		self.assertEqual(preview.state, "up_to_date")
+		self.assertEqual(preview.state, "ready")
 		self.assertEqual(preview.additions, [])
 		self.assertEqual(preview.removals, [])
+		self.assertEqual(
+			[(row["spotify_id"], row["from_position"], row["to_position"]) for row in preview.reorders],
+			[("b", 2, 1), ("a", 1, 2)],
+		)
+		self.assertEqual(preview.music_changes, [])
 
 	def test_occurrence_diff_detects_duplicate_addition_and_removal(self):
 		_paths, manifest, music = self.fixture(("a", "b"))
@@ -82,6 +98,37 @@ class PlaylistUpdateTests(unittest.TestCase):
 		self.assertEqual([row["spotify_id"] for row in added.additions], ["a"])
 		removed = self.preview(manifest, music, ("b",))
 		self.assertEqual([row["spotify_id"] for row in removed.removals], ["a"])
+
+	def test_duplicate_occurrences_reorder_and_persist_in_spotify_order(self):
+		paths, manifest, music = self.fixture(("a", "b", "a"))
+		preview = self.preview(manifest, music, ("a", "a", "b"))
+		self.assertEqual(preview.additions, [])
+		self.assertEqual(preview.removals, [])
+		self.assertEqual([(row["spotify_id"], row["from_position"], row["to_position"]) for row in preview.reorders], [("a", 3, 2), ("b", 2, 3)])
+		save_pending_update(preview, paths)
+		calls = []
+		def editor(_name, _pid, expected, removals, additions):
+			calls.append((expected, removals, additions))
+			return [value for index, value in enumerate(expected) if index not in set(removals)] + additions
+		result = apply_playlist_update(
+			preview.manifest,
+			"saved",
+			paths,
+			music,
+			exact_lookup=lambda pid: next((row for row in music if row["persistent_id"] == pid), None),
+			cache_updater=lambda _track: None,
+			cache_remover=lambda _ids: 0,
+			membership_reader=lambda _name, _pid: ["PID-A", "PID-B", "PID-A"],
+			membership_editor=editor,
+			music_deleter=lambda *_args: False,
+			status_checker=lambda _name, pid: ("OWNED", pid),
+			owned_lookup=lambda _recording_id: None,
+		)
+		self.assertEqual(calls, [(["PID-A", "PID-B", "PID-A"], [1, 2], ["PID-A", "PID-B"])])
+		self.assertEqual(result["reorders"], 2)
+		playlist = preview.manifest["playlists"]["saved"]
+		self.assertEqual([item["spotify_id"] for item in playlist["items"]], ["a", "a", "b"])
+		self.assertEqual([row["saved_position"] for row in playlist["spotify_occurrence_snapshot"]], [1, 2, 3])
 
 	def test_addition_snapshot_records_its_saved_position_for_future_updates(self):
 		_paths, manifest, music = self.fixture(("a", "b"))
@@ -91,13 +138,34 @@ class PlaylistUpdateTests(unittest.TestCase):
 		self.assertEqual(snapshot["recording_id"], addition["recording_id"])
 		self.assertEqual(snapshot["saved_position"], addition["position"])
 
-	def test_partial_legacy_baseline_defers_all_removals(self):
+	def test_partial_legacy_baseline_blocks_exact_sync(self):
+		_paths, manifest, music = self.fixture(("a", "b"))
+		item = manifest["playlists"]["saved"]["items"][1]
+		item.pop("spotify_id")
+		for occurrence in manifest["recordings"][item["recording_id"]]["source_occurrences"]:
+			occurrence["spotify_id"] = None
+		preview = self.preview(manifest, music, ("a",))
+		self.assertEqual(preview.state, "incomplete_baseline")
+		self.assertTrue(preview.to_dict()["blocked"])
+		self.assertEqual(preview.removals, [])
+		self.assertIn("exact full-playlist sync", preview.warning)
+
+	def test_legacy_item_recovers_unique_spotify_id_for_exact_sync(self):
 		_paths, manifest, music = self.fixture(("a", "b"))
 		manifest["playlists"]["saved"]["items"][1].pop("spotify_id")
-		preview = self.preview(manifest, music, ("a",))
-		self.assertTrue(preview.removals_deferred)
+		preview = self.preview(manifest, music, ("a", "b"))
+		self.assertTrue(preview.baseline_backfilled)
+		self.assertEqual(preview.state, "up_to_date")
+		self.assertEqual([row["spotify_id"] for row in preview.spotify_snapshot], ["a", "b"])
+
+	def test_music_only_discrepancy_is_previewed_and_queueable(self):
+		_paths, manifest, music = self.fixture(("a", "b"))
+		preview = self.preview(manifest, music, ("a", "b"), music_membership=["PID-B", "MANUAL", "PID-A"])
+		self.assertEqual(preview.additions, [])
 		self.assertEqual(preview.removals, [])
-		self.assertIn("additions-only", preview.warning)
+		self.assertEqual(preview.reorders, [])
+		self.assertEqual(preview.state, "ready")
+		self.assertEqual([row["kind"] for row in preview.music_changes], ["reorder", "reorder", "remove"])
 
 	def test_incomplete_fetch_blocks_even_when_spotify_reports_more(self):
 		_paths, manifest, music = self.fixture(("a", "b"))
@@ -128,7 +196,7 @@ class PlaylistUpdateTests(unittest.TestCase):
 		preview = self.preview(manifest, music, ())
 		self.assertEqual({row["spotify_id"]: row["action"] for row in preview.removals}, {"a": "unlink", "b": "unlink", "c": "delete"})
 
-	def test_apply_preserves_manual_order_removes_one_occurrence_and_appends(self):
+	def test_apply_removes_manual_entries_and_exactly_matches_spotify(self):
 		paths, manifest, music = self.fixture(("a", "b"))
 		b_item = manifest["playlists"]["saved"]["items"][1]
 		b = manifest["recordings"][b_item["recording_id"]]
@@ -139,7 +207,9 @@ class PlaylistUpdateTests(unittest.TestCase):
 		b["active_reference"] = {"kind": "managed_file", "relative_path": "tracks/b.mp3"}
 		b["music"]["source"] = "managed_import"
 		music.append({"title": "c", "artist": "Artist", "album": "Album", "duration_s": 180, "persistent_id": "PID-C", "database_id": "3", "location": "/Music/c.m4a", "comment": ""})
-		preview = self.preview(manifest, music, ("a", "c"))
+		preview = self.preview(manifest, music, ("a", "c"), music_membership=["MANUAL-1", "PID-A", "PID-B", "MANUAL-2"])
+		self.assertEqual([row["kind"] for row in preview.music_changes], ["reorder", "reorder", "remove", "remove"])
+		self.assertEqual({row["persistent_id"] for row in preview.music_changes if row["kind"] == "remove"}, {"MANUAL-1", "MANUAL-2"})
 		save_pending_update(preview, paths)
 		membership_calls = []
 		def editor(_name, _pid, expected, removals, additions):
@@ -161,7 +231,7 @@ class PlaylistUpdateTests(unittest.TestCase):
 			audio_hasher=lambda _path: "audio-b",
 			owned_lookup=lambda recording_id: {"persistent_id": "PID-B"} if recording_id == b_item["recording_id"] else None,
 		)
-		self.assertEqual(membership_calls[0], (["MANUAL-1", "PID-A", "PID-B", "MANUAL-2"], [2], ["PID-C"]))
+		self.assertEqual(membership_calls[0], (["MANUAL-1", "PID-A", "PID-B", "MANUAL-2"], [0, 1, 2, 3], ["PID-A", "PID-C"]))
 		self.assertEqual(result["additions"], 1)
 		self.assertEqual(result["removals"], 1)
 		self.assertEqual(len(deleted), 1)
@@ -169,10 +239,10 @@ class PlaylistUpdateTests(unittest.TestCase):
 		self.assertNotIn(b_item["recording_id"], preview.manifest["recordings"])
 		self.assertEqual([item["spotify_id"] for item in preview.manifest["playlists"]["saved"]["items"]], ["a", "c"])
 
-	def test_apply_inserts_addition_before_next_imported_track_without_losing_manual_entries(self):
+	def test_apply_combines_reorder_and_addition_in_exact_spotify_order(self):
 		paths, manifest, music = self.fixture(("a", "b"))
 		music.append({"title": "c", "artist": "Artist", "album": "Album", "duration_s": 180, "persistent_id": "PID-C", "database_id": "3", "location": "/Music/c.m4a", "comment": ""})
-		preview = self.preview(manifest, music, ("a", "c", "b"))
+		preview = self.preview(manifest, music, ("b", "c", "a"), music_membership=["MANUAL-1", "PID-A", "MANUAL-2", "PID-B", "MANUAL-3"])
 		save_pending_update(preview, paths)
 		membership_calls = []
 		def editor(_name, _pid, expected, removals, additions):
@@ -194,14 +264,48 @@ class PlaylistUpdateTests(unittest.TestCase):
 		)
 		self.assertEqual(membership_calls, [(
 			["MANUAL-1", "PID-A", "MANUAL-2", "PID-B", "MANUAL-3"],
-			[3, 4],
-			["PID-C", "PID-B", "MANUAL-3"],
+			[0, 1, 2, 3, 4],
+			["PID-B", "PID-C", "PID-A"],
 		)])
 		self.assertEqual(result["additions"], 1)
 		playlist = preview.manifest["playlists"]["saved"]
-		self.assertEqual([item["spotify_id"] for item in playlist["items"]], ["a", "c", "b"])
+		self.assertEqual([item["spotify_id"] for item in playlist["items"]], ["b", "c", "a"])
 		self.assertEqual([item["position"] for item in playlist["items"]], [1, 2, 3])
 		self.assertEqual([item["saved_position"] for item in playlist["spotify_occurrence_snapshot"]], [1, 2, 3])
+
+	def test_reorder_combined_with_addition_and_removal_fully_syncs(self):
+		paths, manifest, music = self.fixture(("a", "b", "d"))
+		music.append({"title": "c", "artist": "Artist", "album": "Album", "duration_s": 180, "persistent_id": "PID-C", "database_id": "4", "location": "/Music/c.m4a", "comment": ""})
+		preview = self.preview(manifest, music, ("d", "c", "a"))
+		self.assertEqual([row["spotify_id"] for row in preview.additions], ["c"])
+		self.assertEqual([row["spotify_id"] for row in preview.removals], ["b"])
+		self.assertEqual([(row["spotify_id"], row["to_position"]) for row in preview.reorders], [("d", 1), ("a", 3)])
+		save_pending_update(preview, paths)
+		calls = []
+		def editor(_name, _pid, expected, removals, additions):
+			calls.append((expected, removals, additions))
+			return [value for index, value in enumerate(expected) if index not in set(removals)] + additions
+		result = apply_playlist_update(
+			preview.manifest,
+			"saved",
+			paths,
+			music,
+			exact_lookup=lambda pid: next((row for row in music if row["persistent_id"] == pid), None),
+			cache_updater=lambda _track: None,
+			cache_remover=lambda _ids: 0,
+			membership_reader=lambda _name, _pid: ["PID-A", "PID-B", "PID-D"],
+			membership_editor=editor,
+			music_deleter=lambda *_args: False,
+			status_checker=lambda _name, pid: ("OWNED", pid),
+			owned_lookup=lambda _recording_id: None,
+		)
+		self.assertEqual(calls, [(["PID-A", "PID-B", "PID-D"], [0, 1, 2], ["PID-D", "PID-C", "PID-A"])])
+		self.assertEqual(result["additions"], 1)
+		self.assertEqual(result["removals"], 1)
+		self.assertEqual(result["reorders"], 2)
+		playlist = preview.manifest["playlists"]["saved"]
+		self.assertEqual([item["spotify_id"] for item in playlist["items"]], ["d", "c", "a"])
+		self.assertEqual([row["spotify_id"] for row in playlist["spotify_occurrence_snapshot"]], ["d", "c", "a"])
 
 	def test_retry_accepts_already_applied_suffix_and_refuses_drift(self):
 		paths, manifest, music = self.fixture(("a",))
@@ -226,6 +330,26 @@ class PlaylistUpdateTests(unittest.TestCase):
 		}
 		with self.assertRaisesRegex(MusicAutomationError, "changed unexpectedly"):
 			apply_playlist_update(manifest, "saved", paths, music, exact_lookup=lambda _pid: None, cache_updater=lambda _track: None, cache_remover=lambda _ids: 0, membership_reader=lambda _name, _pid: ["DRIFT"], membership_editor=lambda *_args: [], music_deleter=lambda *_args: False, status_checker=lambda _name, pid: ("OWNED", pid), owned_lookup=lambda _recording_id: None)
+
+	def test_apply_refuses_music_changes_made_after_preview(self):
+		paths, manifest, music = self.fixture(("a", "b"))
+		preview = self.preview(manifest, music, ("b", "a"))
+		save_pending_update(preview, paths)
+		with self.assertRaisesRegex(MusicAutomationError, "changed after its update preview"):
+			apply_playlist_update(
+				preview.manifest,
+				"saved",
+				paths,
+				music,
+				exact_lookup=lambda pid: next((row for row in music if row["persistent_id"] == pid), None),
+				cache_updater=lambda _track: None,
+				cache_remover=lambda _ids: 0,
+				membership_reader=lambda _name, _pid: ["PID-A", "MANUAL", "PID-B"],
+				membership_editor=lambda *_args: [],
+				music_deleter=lambda *_args: False,
+				status_checker=lambda _name, pid: ("OWNED", pid),
+				owned_lookup=lambda _recording_id: None,
+			)
 
 
 if __name__ == "__main__":
