@@ -352,6 +352,21 @@ end run
 '''
 
 
+_SET_OWNERSHIP_MARKER_SCRIPT = r'''
+on run argv
+	set requestedID to item 1 of argv as text
+	set ownershipComment to item 2 of argv as text
+	tell application "Music"
+		set matches to every track of library playlist 1 whose persistent ID is requestedID
+		if (count of matches) is 0 then error "The managed Music track is missing: " & requestedID
+		if (count of matches) is greater than 1 then error "Music returned duplicate tracks for persistent ID " & requestedID
+		set comment of item 1 of matches to ownershipComment
+		return "OK"
+	end tell
+end run
+'''
+
+
 _UPDATE_ALBUM_TRACK_SCRIPT = r'''
 on run argv
 	set requestedID to item 1 of argv
@@ -812,6 +827,16 @@ def import_managed_file(path: Path, recording_id: str | None = None) -> dict[str
 		"database_id": fields[1] if len(fields) > 1 else "",
 		"location": fields[2] if len(fields) > 2 and fields[2] else None,
 	}
+
+
+def set_music_ownership_marker(persistent_id: str, recording_id: str) -> None:
+	"""Persist the importer marker after Music has stabilized a new addition."""
+	if not persistent_id or not recording_id:
+		raise MusicAutomationError("A persistent ID and recording ID are required for the ownership marker.")
+	comment = f"Managed by Crate Music Importer; recording_id={recording_id}"
+	result = _osascript(_SET_OWNERSHIP_MARKER_SCRIPT, [persistent_id, comment], timeout=60)
+	if result != "OK":
+		raise MusicAutomationError(f"Music returned an unexpected ownership-marker result: {result}")
 
 
 def verify_music_tracks(persistent_ids: list[str], *, settle_seconds: float = 10.0) -> dict[str, dict[str, Any]]:
