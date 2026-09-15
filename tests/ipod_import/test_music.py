@@ -11,6 +11,7 @@ from crate_music_importer.ipod_import.music import (
 	_EDIT_PLAYLIST_MEMBERSHIP_SCRIPT,
 	_LOOKUP_TRACK_BY_RECORDING_ID_SCRIPT,
 	_LOOKUP_TRACK_BY_ID_SCRIPT,
+	_SET_OWNERSHIP_MARKER_SCRIPT,
 	_SCAN_PLAYLIST_IMPORTS_SCRIPT,
 	_SCAN_SCRIPT,
 	_PLAYLIST_MEMBERSHIP_SCRIPT,
@@ -25,6 +26,7 @@ from crate_music_importer.ipod_import.music import (
 	lookup_music_track,
 	playlist_membership,
 	scan_playlist_imports,
+	set_music_ownership_marker,
 	update_managed_music_artwork,
 	verify_music_tracks,
 )
@@ -93,6 +95,16 @@ class MusicAutomationTests(unittest.TestCase):
 			[str(path), "Managed by Crate Music Importer; recording_id=rec_one"],
 		)
 		self.assertIn("set comment of importedTrack to ownershipComment", _ADD_FILE_SCRIPT)
+
+	def test_ownership_marker_is_set_by_exact_persistent_id_after_import(self):
+		with patch("crate_music_importer.ipod_import.music._osascript", return_value="OK") as run_script:
+			set_music_ownership_marker("PID", "rec_one")
+		run_script.assert_called_once_with(
+			_SET_OWNERSHIP_MARKER_SCRIPT,
+			["PID", "Managed by Crate Music Importer; recording_id=rec_one"],
+			timeout=60,
+		)
+		self.assertIn("every track of library playlist 1 whose persistent ID is requestedID", _SET_OWNERSHIP_MARKER_SCRIPT)
 
 	def test_post_import_verification_returns_only_requested_ids(self):
 		with patch("crate_music_importer.ipod_import.music.time.sleep") as sleep, \

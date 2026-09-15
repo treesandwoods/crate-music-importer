@@ -33,6 +33,7 @@ from crate_music_importer.ipod_import.music import (
 	MusicIndex,
 	import_managed_file,
 	playlist_status,
+	set_music_ownership_marker,
 	sync_music_playlist,
 	update_managed_music_artwork,
 	update_managed_music_track,
@@ -932,33 +933,59 @@ def apply_album_to_music(
 ) -> dict[str, Any]:
 	album = manifest.get("albums", {})[album_id]
 	index = MusicIndex(music_tracks)
-	exact_lookup = exact_lookup or (lambda persistent_id: index.by_persistent_id.get(persistent_id))
+	raw_exact_lookup = exact_lookup or (lambda persistent_id: index.by_persistent_id.get(persistent_id))
+	exact_lookup_results: dict[str, dict[str, Any] | None] = {}
+
+	def exact_lookup_once(persistent_id: str) -> dict[str, Any] | None:
+		if persistent_id not in exact_lookup_results:
+			exact_lookup_results[persistent_id] = raw_exact_lookup(persistent_id)
+		return exact_lookup_results[persistent_id]
+
 	validated: dict[str, dict[str, Any]] = {}
 	artwork_paths: dict[str, Path] = {}
+	recoverable_missing_ids: dict[str, str] = {}
 	for item in sorted(album["items"], key=lambda value: int(value["position"])):
 		recording = manifest["recordings"][item["recording_id"]]
-		if (recording.get("review") or recording.get("last_error")) and not recording.get("cache_sync_pending"):
-			raise MusicAutomationError(
-				f"Album track {item['position']} is unresolved ({recording['source_metadata']['title']}). Resolve it before changing Music."
-			)
 		active = recording.get("active_reference") or {}
 		music = recording.get("music") or {}
 		persistent_id = str(music.get("persistent_id") or active.get("persistent_id") or "")
+		trusted_managed_location = _trusted_managed_location(recording, paths) if persistent_id else None
+		missing_importer_owned = bool(
+			persistent_id
+			and active.get("kind") == "managed_file"
+			and _music_reference_is_importer_owned(recording)
+			and trusted_managed_location
+			and exact_lookup_once(persistent_id) is None
+		)
+		review = recording.get("review") or {}
+		stale_review = review.get("kind") == "music_cache_stale"
+		stale_error = not recording.get("last_error") or recording.get("last_error") == review.get("message")
+		if (recording.get("review") or recording.get("last_error")) and not recording.get("cache_sync_pending") and not (missing_importer_owned and stale_review and stale_error):
+			raise MusicAutomationError(
+				f"Album track {item['position']} is unresolved ({recording['source_metadata']['title']}). Resolve it before changing Music."
+			)
 		if persistent_id:
 			_progress(on_progress, "checking_music_ids", recording_id=recording["recording_id"], position=int(item["position"]), title=recording["source_metadata"].get("title") or "", artists=recording["source_metadata"].get("artists") or "")
-			candidate = _validate_exact_reference(
-				manifest,
-				recording,
-				persistent_id,
-				index,
-				paths,
-				exact_lookup=exact_lookup,
-				cache_updater=cache_updater,
-				mark_stale=mark_stale,
-				validated=validated,
-			)
-			if active.get("kind") == "existing_music" and not _album_matches({"album": (recording.get("album_metadata") or {}).get("album")}, candidate):
-				_stale_music_reference(manifest, recording, persistent_id, "its album metadata no longer matches the planned album", paths, mark_stale)
+			if missing_importer_owned:
+				# A prior importer-owned addition can disappear while Music processes
+				# its Cloud Library. The unchanged managed MP3 is sufficient proof to
+				# recover this exact recording without treating it as a user-owned
+				# conflict or downloading another copy.
+				recoverable_missing_ids[recording["recording_id"]] = persistent_id
+			else:
+				candidate = _validate_exact_reference(
+					manifest,
+					recording,
+					persistent_id,
+					index,
+					paths,
+					exact_lookup=exact_lookup_once,
+					cache_updater=cache_updater,
+					mark_stale=mark_stale,
+					validated=validated,
+				)
+				if active.get("kind") == "existing_music" and not _album_matches({"album": (recording.get("album_metadata") or {}).get("album")}, candidate):
+					_stale_music_reference(manifest, recording, persistent_id, "its album metadata no longer matches the planned album", paths, mark_stale)
 		if active.get("kind") == "existing_music" and persistent_id:
 			continue
 		managed = recording.get("managed_file") or {}
@@ -1013,12 +1040,51 @@ def apply_album_to_music(
 			cache_remover({previous_id})
 		recording.pop("music_import_pending", None)
 		recording.pop("cache_sync_pending", None)
+		recording.pop("review", None)
 		recording.pop("last_error", None)
 		index.by_persistent_id[new_id] = replacement
 		index.by_recording_comment[recording_id] = cached_track
+		exact_lookup_results[new_id] = replacement
 		save_manifest(paths, manifest)
 		stability_recoveries += 1
 		return new_id
+
+	def confirm_new_additions() -> None:
+		if not verify_music or not new_recording_ids:
+			return
+		for _attempt in range(3):
+			expected_ids = [str((manifest["recordings"][recording_id].get("music") or {}).get("persistent_id") or "") for recording_id in new_recording_ids]
+			verified = verify_music(expected_ids)
+			missing = [(recording_id, persistent_id) for recording_id, persistent_id in zip(new_recording_ids, expected_ids) if persistent_id not in verified]
+			if missing:
+				for recording_id, previous_id in missing:
+					recover_missing_addition(recording_id, previous_id)
+				continue
+			marker_repairs = 0
+			for recording_id, persistent_id in zip(new_recording_ids, expected_ids):
+				recording = manifest["recordings"][recording_id]
+				actual = verified[persistent_id]
+				if all(field in actual for field in ("title", "artist", "album", "duration_s")):
+					expected = cache_track_for_recording(recording, actual, album_profile=True)
+					valid, reason = validate_exact_track(expected, actual)
+					if not valid:
+						raise MusicAutomationError(f"Music returned the wrong track after an album addition because {reason}.")
+				marker = f"recording_id={recording_id}"
+				if marker not in str(actual.get("comment") or ""):
+					set_music_ownership_marker(persistent_id, recording_id)
+					marker_repairs += 1
+			if marker_repairs:
+				continue
+			return
+		for recording_id in new_recording_ids:
+			recording = manifest["recordings"][recording_id]
+			recording["music_import_pending"] = {
+				"relative_path": (recording.get("managed_file") or {}).get("relative_path"),
+				"started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+			}
+			recording["last_error"] = "Crate Music Importer could not verify this track after Music processed the addition."
+		save_manifest(paths, manifest)
+		raise MusicAutomationError("Crate Music Importer could not stabilize every Music track and ownership marker, so the album was not marked complete.")
 
 	for item in sorted(album["items"], key=lambda value: int(value["position"])):
 		recording = manifest["recordings"][item["recording_id"]]
@@ -1033,12 +1099,18 @@ def apply_album_to_music(
 			continue
 		managed = recording.get("managed_file") or {}
 		path = paths.root / str(managed.get("relative_path") or "")
+		if recording["recording_id"] in recoverable_missing_ids:
+			recover_missing_addition(recording["recording_id"], recoverable_missing_ids[recording["recording_id"]])
+			new_recording_ids.append(recording["recording_id"])
+			confirm_new_additions()
+			_progress(on_progress, "complete", recording_id=recording["recording_id"], position=int(item["position"]), title=recording["source_metadata"].get("title") or "", artists=recording["source_metadata"].get("artists") or "")
+			continue
 		recorded_music = bool(music.get("persistent_id"))
 		imported = candidate or index.by_recording_comment.get(recording["recording_id"])
 		was_recovered = imported is not None and not recorded_music
 		if was_recovered:
 			recovered_id = str(imported.get("persistent_id") or "")
-			actual = exact_lookup(recovered_id) if recovered_id else None
+			actual = exact_lookup_once(recovered_id) if recovered_id else None
 			valid, reason = validate_exact_track(imported, actual, require_importer_owned=True, recording_id=recording["recording_id"])
 			if not valid:
 				_stale_music_reference(manifest, recording, recovered_id, reason, paths, mark_stale)
@@ -1100,34 +1172,13 @@ def apply_album_to_music(
 		index.by_persistent_id[persistent_id] = imported
 		index.by_recording_comment[recording["recording_id"]] = cached_track
 		save_manifest(paths, manifest)
-		if verify_music and len(new_recording_ids) == 1 and recording["recording_id"] == new_recording_ids[0]:
-			# Music can return an ID for the first file in a batch and then drop that
-			# entry while later additions are processed. Stabilize the first new
-			# addition before sending the rest of the album to Music.
-			if persistent_id not in verify_music([persistent_id]):
-				recover_missing_addition(recording["recording_id"], persistent_id)
+		if recording["recording_id"] in new_recording_ids:
+			# Do not burst another file into Music while any earlier addition is
+			# still provisional. Recheck the complete new set after each add so a
+			# disappearing entry is recovered before the next Music mutation.
+			confirm_new_additions()
 		_progress(on_progress, "complete", recording_id=recording["recording_id"], position=int(item["position"]), title=recording["source_metadata"].get("title") or "", artists=recording["source_metadata"].get("artists") or "")
-	if verify_music and new_recording_ids:
-		expected_ids = [str((manifest["recordings"][recording_id].get("music") or {}).get("persistent_id") or "") for recording_id in new_recording_ids]
-		verified = verify_music(expected_ids)
-		for recording_id, previous_id in zip(new_recording_ids, expected_ids):
-			if previous_id in verified:
-				continue
-			recover_missing_addition(recording_id, previous_id)
-		if stability_recoveries:
-			final_ids = [str((manifest["recordings"][recording_id].get("music") or {}).get("persistent_id") or "") for recording_id in new_recording_ids]
-			confirmed = verify_music(final_ids)
-			missing = [recording_id for recording_id, persistent_id in zip(new_recording_ids, final_ids) if persistent_id not in confirmed]
-			if missing:
-				for recording_id in missing:
-					recording = manifest["recordings"][recording_id]
-					recording["music_import_pending"] = {
-						"relative_path": (recording.get("managed_file") or {}).get("relative_path"),
-						"started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-					}
-					recording["last_error"] = "Crate Music Importer could not verify this track after Music processed the addition."
-				save_manifest(paths, manifest)
-				raise MusicAutomationError("Crate Music Importer could not verify every recovered Music track, so the album was not marked complete.")
+	confirm_new_additions()
 	return {
 		"track_count": len(album["items"]),
 		"new_imports": new_imports,

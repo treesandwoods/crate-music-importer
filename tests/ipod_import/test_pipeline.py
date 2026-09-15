@@ -424,10 +424,11 @@ class PipelineTests(unittest.TestCase):
 				{"id": "album-id", "name": "Album", "album_artist": "Artist", "url": "url", "total_count": 1},
 				[{"position": 1, "track_no": 1, "disc_no": 1, "recording_id": key, "spotify_id": "track-id", "status": "managed_ready"}],
 			)
+			marker = f"recording_id={key}"
 			verification_results = iter((
 				{},
-				{"RETRY-PID": {"persistent_id": "RETRY-PID"}},
-				{"RETRY-PID": {"persistent_id": "RETRY-PID"}},
+				{"RETRY-PID": {"persistent_id": "RETRY-PID", "comment": marker}},
+				{"RETRY-PID": {"persistent_id": "RETRY-PID", "comment": marker}},
 			))
 			cache_updates = []
 			removed = []
@@ -475,10 +476,11 @@ class PipelineTests(unittest.TestCase):
 				{"id": "album-id", "name": "Album", "album_artist": "Artist", "url": "url", "total_count": 1},
 				[{"position": 1, "track_no": 1, "disc_no": 1, "recording_id": key, "spotify_id": "track-id", "status": "managed_ready"}],
 			)
+			marker = f"recording_id={key}"
 			verification_results = iter((
-				{"FIRST-PID": {"persistent_id": "FIRST-PID"}},
+				{"FIRST-PID": {"persistent_id": "FIRST-PID", "comment": marker}},
 				{},
-				{"RETRY-PID": {"persistent_id": "RETRY-PID"}},
+				{"RETRY-PID": {"persistent_id": "RETRY-PID", "comment": marker}},
 			))
 			cache_updates = []
 			removed = []
@@ -532,6 +534,7 @@ class PipelineTests(unittest.TestCase):
 				items,
 			)
 			events = []
+			marked = set()
 
 			def import_track(_path, recording_id):
 				position = recording_ids.index(recording_id) + 1
@@ -541,14 +544,39 @@ class PipelineTests(unittest.TestCase):
 
 			def verify_tracks(persistent_ids):
 				events.append("verify:" + ",".join(persistent_ids))
-				return {persistent_id: {"persistent_id": persistent_id} for persistent_id in persistent_ids}
+				return {
+					persistent_id: {
+						"persistent_id": persistent_id,
+						"comment": (
+							f"recording_id={recording_ids[int(persistent_id.rsplit('-', 1)[1]) - 1]}"
+							if persistent_id in marked
+							else ""
+						),
+					}
+					for persistent_id in persistent_ids
+				}
+
+			def set_marker(persistent_id, _recording_id):
+				events.append(f"marker:{persistent_id}")
+				marked.add(persistent_id)
 
 			with patch("crate_music_importer.ipod_import.pipeline.extract_embedded_artwork", return_value=paths.staging / "art.jpg"), \
-				patch("crate_music_importer.ipod_import.pipeline.import_managed_file", side_effect=import_track):
+				patch("crate_music_importer.ipod_import.pipeline.import_managed_file", side_effect=import_track), \
+				patch("crate_music_importer.ipod_import.pipeline.set_music_ownership_marker", side_effect=set_marker):
 				result = apply_album_to_music(manifest, "album-id", paths, [], verify_music=verify_tracks)
 			self.assertEqual(result["new_imports"], 2)
 			self.assertEqual(result["stability_recoveries"], 0)
-			self.assertEqual(events, ["import:PID-1", "verify:PID-1", "import:PID-2", "verify:PID-1,PID-2"])
+			self.assertEqual(events, [
+				"import:PID-1",
+				"verify:PID-1",
+				"marker:PID-1",
+				"verify:PID-1",
+				"import:PID-2",
+				"verify:PID-1,PID-2",
+				"marker:PID-2",
+				"verify:PID-1,PID-2",
+				"verify:PID-1,PID-2",
+			])
 
 	def test_album_apply_adopts_a_partial_import_by_managed_comment_without_duplication(self):
 		with tempfile.TemporaryDirectory() as directory:

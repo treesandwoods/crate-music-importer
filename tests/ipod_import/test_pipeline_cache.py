@@ -10,6 +10,7 @@ from crate_music_importer.ipod_import.music_cache import (
 	load_music_cache,
 	mark_music_cache_entry_stale,
 	music_cache_tracks,
+	remove_music_cache_tracks,
 	save_music_cache,
 	upsert_music_cache_track,
 )
@@ -249,6 +250,57 @@ class PipelineCacheTests(unittest.TestCase):
 
 			self.assertEqual(result["updated_tracks"], 1)
 			updated.assert_called_once()
+
+	def test_album_apply_repairs_missing_importer_owned_track_from_verified_managed_file(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory) / "managed")
+			manifest = new_manifest(paths)
+			key, recording = upsert_recording(manifest, {
+				"title": "Song", "artists": "Artist", "album": "Real Album", "album_id": "album",
+				"duration_ms": 180000, "track_no": 1, "track_total": 1, "disc_no": 1, "disc_total": 1,
+			}, source_type="album")
+			managed_path = paths.root / "Music" / "Artist" / "Real Album" / "01 — Song.mp3"
+			managed_path.parent.mkdir(parents=True)
+			managed_path.write_bytes(b"managed-audio")
+			relative = str(managed_path.relative_to(paths.root))
+			recording["managed_file"] = {
+				"relative_path": relative, "tool_owned": True, "metadata_profile": "album",
+				"spotify_album_id": "album", "sha256": hashlib.sha256(b"managed-audio").hexdigest(),
+			}
+			recording["active_reference"] = {"kind": "managed_file", "relative_path": relative}
+			recording["music"] = {"source": "managed_album_import", "persistent_id": "PID-MISSING"}
+			recording["review"] = {"kind": "music_cache_stale", "message": "The saved ID is missing."}
+			recording["last_error"] = "The saved ID is missing."
+			set_album(manifest, {"id": "album", "name": "Real Album", "url": "url", "complete": True}, [{"position": 1, "recording_id": key}])
+			old = cached_track(
+				"PID-MISSING", title="Song", album="Real Album",
+				comment=f"Managed by Crate Music Importer; recording_id={key}", location=str(managed_path),
+			)
+			unrelated = cached_track("PID-UNRELATED", title="Elsewhere")
+			save_music_cache(paths, build_full_cache(paths, manifest, [old, unrelated]))
+			new_track = dict(old, persistent_id="PID-NEW", database_id="2")
+
+			with patch("crate_music_importer.ipod_import.pipeline.extract_embedded_artwork", return_value=paths.staging / "art.jpg"), \
+				patch("crate_music_importer.ipod_import.pipeline.import_managed_file", return_value=new_track) as imported:
+				result = apply_album_to_music(
+					manifest,
+					"album",
+					paths,
+					music_cache_tracks(load_music_cache(paths)),
+					exact_lookup=lambda _persistent_id: None,
+					cache_updater=lambda value: upsert_music_cache_track(paths, value),
+					cache_remover=lambda persistent_ids: remove_music_cache_tracks(paths, persistent_ids),
+					owned_lookup=lambda _recording_id: None,
+					verify_music=lambda persistent_ids: {persistent_id: new_track for persistent_id in persistent_ids},
+				)
+
+			self.assertEqual(result["stability_recoveries"], 1)
+			self.assertEqual(recording["music"]["persistent_id"], "PID-NEW")
+			self.assertNotIn("review", recording)
+			self.assertNotIn("last_error", recording)
+			imported.assert_called_once_with(managed_path, key)
+			cache = load_music_cache(paths)
+			self.assertEqual(set(cache["tracks"]), {"PID-UNRELATED", "PID-NEW"})
 
 
 if __name__ == "__main__":
