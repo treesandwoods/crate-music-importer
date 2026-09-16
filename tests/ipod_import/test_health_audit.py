@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,9 @@ class HealthAuditTests(unittest.TestCase):
 		self.paths = ManagedPaths(Path(self.temp.name))
 		self.report = {"schemaVersion": 1, "checkedAt": "2000-01-01", "status": "healthy", "summary": {}, "checks": {}, "issues": []}
 		audit.save_health_report(self.paths, self.report)
+		lock = patch.object(audit, "dependency_lock", return_value=contextlib.nullcontext())
+		lock.start()
+		self.addCleanup(lock.stop)
 
 	def start(self, deep=False):
 		with patch.object(audit.subprocess, "Popen", return_value=Mock(pid=os.getpid())) as launch:
@@ -46,7 +50,7 @@ class HealthAuditTests(unittest.TestCase):
 				return dict(self.report)
 			with patch.object(audit, "load_manifest", return_value={}), patch.object(audit, "scan_music_library_for_health", return_value=[]), patch.object(audit, "refresh_music_cache") as refresh, patch.object(audit, "build_health_report", side_effect=build), patch.object(audit, "_notify") as notify:
 				audit.run_worker(self.paths, state["runId"])
-				refresh.assert_called_once_with(self.paths, {}, [])
+				refresh.assert_called_once_with(self.paths, [])
 				notify.assert_called_once_with(False)
 			self.assertEqual(audit.load_health_audit(self.paths)["status"], "complete")
 
@@ -84,12 +88,10 @@ class HealthAuditTests(unittest.TestCase):
 		self.assertIn("Could not save", result["error"])
 
 	def test_status_only_does_not_read_report_or_acquire_dependency_lock(self):
-		from crate_music_importer.ipod_import.dependency_lock import dependency_lock
 		from crate_music_importer.ipod_import import cli
-		import contextlib
 		import io
 		self.start()
-		with dependency_lock(exclusive=True), patch.object(cli, "ManagedPaths", return_value=self.paths), patch.object(audit, "_read", wraps=audit._read) as read:
+		with patch.object(cli, "ManagedPaths", return_value=self.paths), patch.object(audit, "_read", wraps=audit._read) as read:
 			with contextlib.redirect_stdout(io.StringIO()) as output:
 				cli.run(["health-audit", "status", "--status-only"])
 			self.assertNotIn("lastReport", json.loads(output.getvalue()))

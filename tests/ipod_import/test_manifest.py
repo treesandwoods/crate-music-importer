@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import json
 from pathlib import Path
 
 from crate_music_importer.ipod_import.manifest import (
@@ -19,6 +20,33 @@ from crate_music_importer.ipod_import.manifest import (
 
 
 class ManifestTests(unittest.TestCase):
+	def test_v1_state_migrates_once_with_backup_and_single_music_binding(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory) / "managed")
+			paths.state_dir.mkdir(parents=True)
+			legacy = new_manifest(paths)
+			legacy["version"] = 1
+			key, recording = upsert_recording(legacy, {"title": "Song", "artists": "Artist", "duration_ms": 180000, "sp_id": "track"})
+			recording.pop("music_binding", None)
+			recording["music"] = {"persistent_id": "OLD-PID", "source": "managed_import"}
+			recording["active_reference"] = {"kind": "existing_music", "persistent_id": "OTHER-PID"}
+			recording["managed_file"] = {"relative_path": "Music/Song.mp3", "tool_owned": True, "retirement_candidate": True}
+			paths.manifest.write_text(json.dumps(legacy), encoding="utf-8")
+			paths.music_cache.write_text('{"legacy": true}', encoding="utf-8")
+
+			migrated = load_manifest(paths)
+
+			self.assertEqual(migrated["version"], 2)
+			self.assertEqual(migrated["recordings"][key]["music_binding"], {"persistent_id": "OLD-PID"})
+			self.assertEqual(migrated["recordings"][key]["managed_file"]["managed_by_crate"], True)
+			for obsolete in ("music", "active_reference", "cache_sync_pending", "promotion"):
+				self.assertNotIn(obsolete, migrated["recordings"][key])
+			backups = list((paths.state_dir / "backups").glob("state-model-v1-*"))
+			self.assertEqual(len(backups), 1)
+			self.assertTrue((backups[0] / paths.manifest.name).is_file())
+			self.assertTrue((backups[0] / paths.music_cache.name).is_file())
+			load_manifest(paths)
+			self.assertEqual(len(list((paths.state_dir / "backups").glob("state-model-v1-*"))), 1)
 	def test_managed_paths_create_only_the_canonical_music_tree(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")
@@ -219,17 +247,15 @@ class ManifestTests(unittest.TestCase):
 			manifest = new_manifest(paths)
 			one_key, one = upsert_recording(manifest, {"title": "Existing", "artists": "Artist", "duration_ms": 100000, "sp_id": "one"})
 			two_key, two = upsert_recording(manifest, {"title": "Managed", "artists": "Artist", "duration_ms": 120000, "sp_id": "two"})
-			one["music"] = {"persistent_id": "PID1", "location": "/Music/Existing.m4a"}
-			one["active_reference"] = {"kind": "existing_music", "persistent_id": "PID1"}
-			two["managed_file"] = {"relative_path": "tracks/aa/managed.mp3", "tool_owned": True}
-			two["active_reference"] = {"kind": "managed_file", "relative_path": "tracks/aa/managed.mp3"}
+			one["music_binding"] = {"persistent_id": "PID1"}
+			two["managed_file"] = {"relative_path": "tracks/aa/managed.mp3", "managed_by_crate": True}
 			set_playlist(manifest, {"id": "playlist", "name": "Order", "url": "url", "tracks": [], "complete": True, "total_count": 3}, [
 				{"position": 1, "recording_id": two_key, "spotify_id": "two", "status": "managed_ready"},
 				{"position": 2, "recording_id": one_key, "spotify_id": "one", "status": "reused_music"},
 				{"position": 3, "recording_id": two_key, "spotify_id": "two", "status": "managed_ready"},
 			])
 			content = playlist_m3u8(manifest, "playlist", paths)
-			self.assertLess(content.index("managed.mp3"), content.index("/Music/Existing.m4a"))
+			self.assertLess(content.index("managed.mp3"), content.index("#MUSIC-PERSISTENT-ID:PID1"))
 			self.assertEqual(content.count("managed.mp3"), 2)
 			self.assertNotIn("track=", content)
 
@@ -269,9 +295,8 @@ class ManifestTests(unittest.TestCase):
 			paths = ManagedPaths(Path(directory))
 			manifest = new_manifest(paths)
 			key, recording = upsert_recording(manifest, {"title": "Song", "artists": "Artist", "duration_ms": 100000, "sp_id": "one"})
-			recording["managed_file"] = {"relative_path": "tracks/old.mp3", "tool_owned": True, "retirement_candidate": True}
-			recording["music"] = {"persistent_id": "PROMOTED-PID", "location": None}
-			recording["active_reference"] = {"kind": "existing_music", "persistent_id": "PROMOTED-PID"}
+			recording["managed_file"] = {"relative_path": "tracks/old.mp3", "managed_by_crate": True}
+			recording["music_binding"] = {"persistent_id": "PROMOTED-PID"}
 			set_playlist(manifest, {"id": "playlist", "name": "Order", "url": "url", "tracks": [], "complete": True, "total_count": 1}, [
 				{"position": 1, "recording_id": key, "spotify_id": "one", "status": "reused_music"},
 			])

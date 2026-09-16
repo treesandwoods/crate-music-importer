@@ -75,7 +75,6 @@ const healthResult: HealthResult = {
       title: "Missing file",
       severity: "critical",
       category: "missing_file",
-      ownership: "user_owned",
       detail: "File unavailable",
       persistentIds: ["PID"],
       recordingIds: [],

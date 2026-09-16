@@ -18,6 +18,11 @@ ALBUM_URL = "https://open.spotify.com/album/48a7rOjTzpD1zzJAteeveE"
 
 
 class AlbumCliEfficiencyTests(unittest.TestCase):
+	def setUp(self):
+		lock = patch("crate_music_importer.ipod_import.dependency_lock.dependency_lock", return_value=contextlib.nullcontext())
+		lock.start()
+		self.addCleanup(lock.stop)
+
 	def test_saved_playlists_backfills_and_returns_playlist_thumbnail(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")
@@ -43,7 +48,7 @@ class AlbumCliEfficiencyTests(unittest.TestCase):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")
 			manifest = new_manifest(paths)
-			save_music_cache(paths, build_full_cache(paths, manifest, []))
+			save_music_cache(paths, build_full_cache(paths, []))
 			before = paths.music_cache.read_bytes()
 			with patch("crate_music_importer.ipod_import.cli.ManagedPaths", return_value=paths), \
 				patch("crate_music_importer.ipod_import.cli.load_manifest", return_value=manifest), \
@@ -63,7 +68,7 @@ class AlbumCliEfficiencyTests(unittest.TestCase):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")
 			manifest = new_manifest(paths)
-			save_music_cache(paths, build_full_cache(paths, manifest, []))
+			save_music_cache(paths, build_full_cache(paths, []))
 			album = load_fixture(FIXTURES / "spotify_album.json")
 			preview = SimpleNamespace(album_id=album.id)
 			result = {"album": {"items": [{"status": "managed_ready"}]}}
@@ -92,7 +97,7 @@ class AlbumCliEfficiencyTests(unittest.TestCase):
 				"duration_ms": 180000,
 				"sp_id": "track-id",
 			}, source_type="album")
-			recording["music"] = {"persistent_id": "SAVED-PID"}
+			recording["music_binding"] = {"persistent_id": "SAVED-PID"}
 			set_album(manifest, {
 				"id": "48a7rOjTzpD1zzJAteeveE",
 				"name": "Album",
@@ -106,7 +111,7 @@ class AlbumCliEfficiencyTests(unittest.TestCase):
 				"album": "Album", "album_artist": "Artist", "duration_s": 180, "location": "/Music/Song.m4a",
 				"comment": "", "track_no": 1, "track_total": 1, "disc_no": 1, "disc_total": 1, "compilation": False,
 			}
-			save_music_cache(paths, build_full_cache(paths, manifest, [cached_track]))
+			save_music_cache(paths, build_full_cache(paths, [cached_track]))
 			apply_result = {"track_count": 1, "new_imports": 0, "updated_tracks": 0, "reused_tracks": 1}
 			with patch("crate_music_importer.ipod_import.cli.ManagedPaths", return_value=paths), \
 				patch("crate_music_importer.ipod_import.cli.load_manifest", return_value=manifest), \
@@ -123,7 +128,7 @@ class AlbumCliEfficiencyTests(unittest.TestCase):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")
 			manifest = new_manifest(paths)
-			save_music_cache(paths, build_full_cache(paths, manifest, []))
+			save_music_cache(paths, build_full_cache(paths, []))
 			playlist = load_fixture(FIXTURES / "spotify_playlist.json")
 			preview = SimpleNamespace(playlist_id=playlist.id, manifest={"playlists": {playlist.id: {"name": "Fixture", "spotify_url": "", "warning": None}}}, rows=[], counts={})
 			result = {"playlist": {"items": []}, "m3u8": "/tmp/list.m3u8"}

@@ -8,7 +8,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from crate_music_importer.ipod_import.identity import match_music_track, normalize_recording_title
+from crate_music_importer.ipod_import.constants import MUSIC_CONFIDENCE_MIN
+from crate_music_importer.ipod_import.identity import clean_release_labels, match_music_track, normalize_recording_title, normalize_text, score_music_candidate
 
 
 class MusicAutomationError(RuntimeError):
@@ -248,70 +249,22 @@ end run
 '''
 
 
-_LOOKUP_TRACK_BY_RECORDING_ID_SCRIPT = r'''
-on replace_text(theText, findText, replacementText)
-	set oldDelimiters to AppleScript's text item delimiters
-	set AppleScript's text item delimiters to findText
-	set theItems to every text item of (theText as text)
-	set AppleScript's text item delimiters to replacementText
-	set theText to theItems as text
-	set AppleScript's text item delimiters to oldDelimiters
-	return theText
-end replace_text
-
-on clean_field(value)
-	set textValue to value as text
-	set textValue to my replace_text(textValue, character id 30, " ")
-	set textValue to my replace_text(textValue, character id 31, " ")
-	set textValue to my replace_text(textValue, return, " ")
-	set textValue to my replace_text(textValue, linefeed, " ")
-	return textValue
-end clean_field
-
-on run argv
-	set ownershipMarker to "recording_id=" & (item 1 of argv as text)
-	set fieldSeparator to character id 31
-	set rowSeparator to character id 30
-	with timeout of 60 seconds
-		tell application "Music"
-			set matches to every track of library playlist 1 whose comment contains ownershipMarker
-			if (count of matches) is 0 then return ""
-			if (count of matches) is greater than 1 then error "Music returned duplicate importer-owned tracks for " & ownershipMarker
-			set libraryTrack to item 1 of matches
-			set trackName to my clean_field(name of libraryTrack)
-			set trackArtist to my clean_field(artist of libraryTrack)
-			set trackAlbum to my clean_field(album of libraryTrack)
-			set trackDuration to duration of libraryTrack as real
-			set trackPersistentID to my clean_field(persistent ID of libraryTrack)
-			set trackDatabaseID to my clean_field(database ID of libraryTrack)
-			try
-				set trackLocation to my clean_field(POSIX path of (location of libraryTrack))
-			on error
-				set trackLocation to ""
-			end try
-			set trackComment to my clean_field(comment of libraryTrack)
-			return trackName & fieldSeparator & trackArtist & fieldSeparator & trackAlbum & fieldSeparator & trackDuration & fieldSeparator & trackPersistentID & fieldSeparator & trackDatabaseID & fieldSeparator & trackLocation & fieldSeparator & trackComment & rowSeparator
-		end tell
-	end timeout
-end run
-'''
-
-
-_DELETE_IMPORTER_OWNED_TRACK_SCRIPT = r'''
+_DELETE_MANAGED_TRACK_SCRIPT = r'''
 on run argv
 	set requestedID to item 1 of argv as text
-	set ownershipMarker to "recording_id=" & (item 2 of argv as text)
+	set expectedPath to item 2 of argv as text
 	with timeout of 60 seconds
 		tell application "Music"
 			set matches to every track of library playlist 1 whose persistent ID is requestedID
 			if (count of matches) is 0 then return "MISSING"
 			if (count of matches) is greater than 1 then error "Music returned duplicate tracks for persistent ID " & requestedID
 			set targetTrack to item 1 of matches
-			set targetComment to ""
 			try
-				set targetComment to comment of targetTrack as text
+				set actualPath to POSIX path of (location of targetTrack)
+			on error
+				error "Refusing to delete a Music track without a local managed-file location: " & requestedID
 			end try
-			if targetComment does not contain ownershipMarker then error "Refusing to delete a Music track without the importer ownership marker: " & requestedID
+			if actualPath is not expectedPath then error "Refusing to delete a Music track whose file is not the registered Crate-managed file: " & requestedID
 			delete targetTrack
 			return "DELETED"
 		end tell
@@ -323,8 +276,6 @@ end run
 _ADD_FILE_SCRIPT = r'''
 on run argv
 	set filePath to item 1 of argv
-	set ownershipComment to ""
-	if (count of argv) is greater than 1 then set ownershipComment to item 2 of argv as text
 	set fileAlias to POSIX file filePath as alias
 	tell application "Music"
 		set addedValue to add fileAlias
@@ -336,11 +287,6 @@ on run argv
 		end if
 		set importedPID to persistent ID of importedTrack as text
 		set importedDatabaseID to database ID of importedTrack as text
-		if ownershipComment is not "" then
-			try
-				set comment of importedTrack to ownershipComment
-			end try
-		end if
 		try
 			set importedLocation to POSIX path of (location of importedTrack)
 		on error
@@ -352,40 +298,31 @@ end run
 '''
 
 
-_SET_OWNERSHIP_MARKER_SCRIPT = r'''
-on run argv
-	set requestedID to item 1 of argv as text
-	set ownershipComment to item 2 of argv as text
-	tell application "Music"
-		set matches to every track of library playlist 1 whose persistent ID is requestedID
-		if (count of matches) is 0 then error "The managed Music track is missing: " & requestedID
-		if (count of matches) is greater than 1 then error "Music returned duplicate tracks for persistent ID " & requestedID
-		set comment of item 1 of matches to ownershipComment
-		return "OK"
-	end tell
-end run
-'''
-
-
 _UPDATE_ALBUM_TRACK_SCRIPT = r'''
 on run argv
 	set requestedID to item 1 of argv
-	set trackName to item 2 of argv
-	set trackArtist to item 3 of argv
-	set albumName to item 4 of argv
-	set albumArtist to item 5 of argv
-	set trackNumberValue to item 6 of argv as integer
-	set trackCountValue to item 7 of argv as integer
-	set discNumberValue to item 8 of argv as integer
-	set discCountValue to item 9 of argv as integer
-	set yearValue to item 10 of argv as integer
-	set compilationValue to item 11 of argv is "true"
-	set commentValue to item 12 of argv
+	set expectedPath to item 2 of argv
+	set trackName to item 3 of argv
+	set trackArtist to item 4 of argv
+	set albumName to item 5 of argv
+	set albumArtist to item 6 of argv
+	set trackNumberValue to item 7 of argv as integer
+	set trackCountValue to item 8 of argv as integer
+	set discNumberValue to item 9 of argv as integer
+	set discCountValue to item 10 of argv as integer
+	set yearValue to item 11 of argv as integer
+	set compilationValue to item 12 of argv is "true"
 	set artworkPath to item 13 of argv
 	tell application "Music"
 		set matches to every track of library playlist 1 whose persistent ID is requestedID
 		if (count of matches) is 0 then error "The managed Music track is missing: " & requestedID
 		set targetTrack to item 1 of matches
+		try
+			set actualPath to POSIX path of (location of targetTrack)
+		on error
+			error "The Music track has no local managed-file location."
+		end try
+		if actualPath is not expectedPath then error "The Music track does not use the registered Crate-managed file."
 		set name of targetTrack to trackName
 		set artist of targetTrack to trackArtist
 		set album of targetTrack to albumName
@@ -397,7 +334,6 @@ on run argv
 		set disc count of targetTrack to discCountValue
 		if yearValue is greater than 0 then set year of targetTrack to yearValue
 		set compilation of targetTrack to compilationValue
-		set comment of targetTrack to commentValue
 		if artworkPath is not "" then
 			set artworkFile to POSIX file artworkPath as alias
 			set artworkData to read artworkFile as picture
@@ -416,14 +352,18 @@ end run
 _UPDATE_MANAGED_ARTWORK_SCRIPT = r'''
 on run argv
 	set requestedID to item 1 of argv
-	set recordingToken to item 2 of argv
+	set expectedPath to item 2 of argv
 	set artworkPath to item 3 of argv
 	tell application "Music"
 		set matches to every track of library playlist 1 whose persistent ID is requestedID
 		if (count of matches) is 0 then error "The managed Music track is missing: " & requestedID
 		set targetTrack to item 1 of matches
-		set trackComment to comment of targetTrack as text
-		if trackComment does not contain recordingToken then error "The Music track is not importer-owned."
+		try
+			set actualPath to POSIX path of (location of targetTrack)
+		on error
+			error "The Music track has no local managed-file location."
+		end try
+		if actualPath is not expectedPath then error "The Music track does not use the registered Crate-managed file."
 		set artworkFile to POSIX file artworkPath as alias
 		set artworkData to read artworkFile as picture
 		try
@@ -443,19 +383,19 @@ on run argv
 	set knownPID to item 2 of argv
 	tell application "Music"
 		if knownPID is not "" then
-			set ownedPlaylist to missing value
+			set savedPlaylist to missing value
 			repeat with candidate in every user playlist
 				try
-					if (persistent ID of candidate as text) is knownPID then set ownedPlaylist to candidate
+					if (persistent ID of candidate as text) is knownPID then set savedPlaylist to candidate
 				end try
 			end repeat
-			if ownedPlaylist is missing value then return "MISSING" & tab & knownPID
+			if savedPlaylist is missing value then return "MISSING" & tab & knownPID
 			repeat with candidate in every user playlist
 				try
 					if (persistent ID of candidate as text) is not knownPID and (name of candidate as text) is requestedName then return "COLLISION" & tab & (persistent ID of candidate as text)
 				end try
 			end repeat
-			return "OWNED" & tab & knownPID
+			return "FOUND" & tab & knownPID
 		end if
 		repeat with candidate in every user playlist
 			try
@@ -481,7 +421,7 @@ on run argv
 					if (persistent ID of candidate as text) is knownPID then set targetPlaylist to candidate
 				end try
 			end repeat
-			if targetPlaylist is missing value then error "The importer-owned Music playlist no longer exists. Refusing to replace a different playlist."
+			if targetPlaylist is missing value then error "The saved Music playlist no longer exists. Refusing to replace a different playlist."
 			repeat with candidate in every user playlist
 				try
 					if (persistent ID of candidate as text) is not knownPID and (name of candidate as text) is requestedName then error "A different Music playlist now uses the requested name."
@@ -490,7 +430,7 @@ on run argv
 		else
 			repeat with candidate in every user playlist
 				try
-					if (name of candidate as text) is requestedName then error "A Music playlist with this name already exists and is not recorded as importer-owned."
+					if (name of candidate as text) is requestedName then error "A Music playlist with this name already exists and has not been linked to this Spotify playlist."
 				end try
 			end repeat
 		end if
@@ -530,7 +470,7 @@ on run argv
 				if (persistent ID of candidate as text) is knownPID then set targetPlaylist to candidate
 			end try
 		end repeat
-		if targetPlaylist is missing value then error "The importer-owned Music playlist no longer exists."
+		if targetPlaylist is missing value then error "The saved Music playlist no longer exists."
 		repeat with candidate in every user playlist
 			try
 				if (persistent ID of candidate as text) is not knownPID and (name of candidate as text) is requestedName then error "A different Music playlist now uses the requested name."
@@ -572,7 +512,7 @@ on run argv
 				if (persistent ID of candidate as text) is knownPID then set targetPlaylist to candidate
 			end try
 		end repeat
-		if targetPlaylist is missing value then error "The importer-owned Music playlist no longer exists."
+		if targetPlaylist is missing value then error "The saved Music playlist no longer exists."
 		repeat with candidate in every user playlist
 			try
 				if (persistent ID of candidate as text) is not knownPID and (name of candidate as text) is requestedName then error "A different Music playlist now uses the requested name."
@@ -731,23 +671,11 @@ def lookup_music_track(persistent_id: str) -> dict[str, Any] | None:
 	return tracks[0]
 
 
-def lookup_importer_owned_music_track(recording_id: str) -> dict[str, Any] | None:
-	"""Find one importer-owned Music track by its durable recording marker."""
-	if not recording_id:
-		raise MusicAutomationError("A recording ID is required for importer-owned lookup.")
-	tracks = _parse_scan_output(_osascript(_LOOKUP_TRACK_BY_RECORDING_ID_SCRIPT, [recording_id], timeout=60))
-	if not tracks:
-		return None
-	if len(tracks) != 1 or f"recording_id={recording_id}" not in str(tracks[0].get("comment") or ""):
-		raise MusicAutomationError(f"Music returned an unexpected importer-owned result for {recording_id}.")
-	return tracks[0]
-
-
-def delete_importer_owned_music_track(persistent_id: str, recording_id: str) -> bool:
-	"""Delete one exact Music item only after Music verifies its importer marker."""
-	if not persistent_id or not recording_id:
-		raise MusicAutomationError("A persistent ID and recording ID are required for safe Music deletion.")
-	result = _osascript(_DELETE_IMPORTER_OWNED_TRACK_SCRIPT, [persistent_id, recording_id], timeout=60)
+def delete_managed_music_track(persistent_id: str, managed_path: Path) -> bool:
+	"""Delete one exact Music item only when it uses the registered managed file."""
+	if not persistent_id or not managed_path.is_file():
+		raise MusicAutomationError("A persistent ID and existing managed file are required for safe Music deletion.")
+	result = _osascript(_DELETE_MANAGED_TRACK_SCRIPT, [persistent_id, str(managed_path)], timeout=60)
 	if result == "MISSING":
 		return False
 	if result != "DELETED":
@@ -775,21 +703,16 @@ class MusicIndex:
 		self.tracks = tracks
 		self.by_title: dict[str, list[dict[str, Any]]] = {}
 		self.by_persistent_id: dict[str, dict[str, Any]] = {}
-		self.stale_by_persistent_id: dict[str, dict[str, Any]] = {}
-		self.by_recording_comment: dict[str, dict[str, Any]] = {}
+		self.by_recording_comment: dict[str, list[dict[str, Any]]] = {}
 		for track in tracks:
 			persistent_id = str(track.get("persistent_id") or "")
-			if track.get("stale"):
-				if persistent_id:
-					self.stale_by_persistent_id[persistent_id] = track
-				continue
 			self.by_title.setdefault(normalize_recording_title(track.get("title")), []).append(track)
 			if persistent_id:
 				self.by_persistent_id[persistent_id] = track
 			comment = str(track.get("comment") or "")
 			if "recording_id=" in comment:
 				key = comment.split("recording_id=", 1)[1].split()[0].strip(";,")
-				self.by_recording_comment[key] = track
+				self.by_recording_comment.setdefault(key, []).append(track)
 
 	def candidates(self, source_track: dict[str, Any]) -> list[dict[str, Any]]:
 		title = normalize_recording_title(source_track.get("title"))
@@ -813,13 +736,79 @@ class MusicIndex:
 		return match_music_track(source_track, candidates)
 
 
-def import_managed_file(path: Path, recording_id: str | None = None) -> dict[str, Any]:
+def music_binding_id(recording: dict[str, Any]) -> str:
+	return str((recording.get("music_binding") or {}).get("persistent_id") or "")
+
+
+def bind_recording_to_music(recording: dict[str, Any], candidate: dict[str, Any]) -> bool:
+	persistent_id = str(candidate.get("persistent_id") or "")
+	if not persistent_id:
+		raise MusicAutomationError("A Music persistent ID is required to bind a recording.")
+	changed = music_binding_id(recording) != persistent_id
+	recording["music_binding"] = {"persistent_id": persistent_id}
+	return changed
+
+
+def _album_matches(name: str | None, candidate: dict[str, Any]) -> bool:
+	return bool(name and normalize_text(clean_release_labels(name)) == normalize_text(clean_release_labels(candidate.get("album"))))
+
+
+def reconcile_recording_music(
+	recording: dict[str, Any],
+	index: MusicIndex,
+	*,
+	preferred_album: str | None = None,
+) -> dict[str, Any]:
+	"""Resolve one recording against a current Music snapshot and repair its binding."""
+	metadata = recording.get("source_metadata") or {}
+	def resolved(candidate: dict[str, Any], candidates: list[dict[str, Any]], changed: bool) -> dict[str, Any]:
+		recording.pop("music_import_pending", None)
+		return {"status": "resolved", "candidate": candidate, "candidates": candidates, "binding_changed": changed}
+	saved_id = music_binding_id(recording)
+	saved = index.by_persistent_id.get(saved_id)
+	if saved:
+		score, reasons = score_music_candidate(metadata, saved)
+		if score >= MUSIC_CONFIDENCE_MIN:
+			if preferred_album and not _album_matches(preferred_album, saved):
+				album_match = match_music_track(metadata, [item for item in index.candidates(metadata) if _album_matches(preferred_album, item)])
+				if album_match["status"] == "reused":
+					candidate = album_match["candidate"]
+					changed = bind_recording_to_music(recording, candidate)
+					return resolved(candidate, album_match["candidates"], changed)
+				if album_match["status"] == "ambiguous":
+					return {"status": "ambiguous", "candidate": None, "candidates": album_match["candidates"], "binding_changed": False}
+				return {"status": "album_mismatch", "candidate": dict(saved, score=round(score, 4), reasons=reasons), "candidates": [saved], "binding_changed": False}
+			return resolved(dict(saved, score=round(score, 4), reasons=reasons), [saved], False)
+	marker_matches = index.by_recording_comment.get(str(recording.get("recording_id") or ""), [])
+	if len(marker_matches) == 1:
+		marker = marker_matches[0]
+		score, reasons = score_music_candidate(metadata, marker)
+		if score >= MUSIC_CONFIDENCE_MIN and (not preferred_album or _album_matches(preferred_album, marker)):
+			candidate = dict(marker, score=round(score, 4), reasons=reasons)
+			changed = bind_recording_to_music(recording, candidate)
+			return resolved(candidate, [candidate], changed)
+	if preferred_album:
+		album_match = match_music_track(metadata, [item for item in index.candidates(metadata) if _album_matches(preferred_album, item)])
+		if album_match["status"] == "reused":
+			candidate = album_match["candidate"]
+			changed = bind_recording_to_music(recording, candidate)
+			return resolved(candidate, album_match["candidates"], changed)
+		if album_match["status"] == "ambiguous":
+			return {"status": "ambiguous", "candidate": None, "candidates": album_match["candidates"], "binding_changed": False}
+	match = index.match(metadata)
+	if match["status"] == "reused":
+		candidate = match["candidate"]
+		if preferred_album and not _album_matches(preferred_album, candidate):
+			return {"status": "album_mismatch", "candidate": candidate, "candidates": match["candidates"], "binding_changed": False}
+		changed = bind_recording_to_music(recording, candidate)
+		return resolved(candidate, match["candidates"], changed)
+	return {"status": match["status"], "candidate": None, "candidates": match["candidates"], "binding_changed": False}
+
+
+def import_managed_file(path: Path) -> dict[str, Any]:
 	if not path.is_file():
 		raise MusicAutomationError(f"Managed MP3 is missing: {path}")
-	arguments = [str(path)]
-	if recording_id:
-		arguments.append(f"Managed by Crate Music Importer; recording_id={recording_id}")
-	fields = _osascript(_ADD_FILE_SCRIPT, arguments).split("\t", 2)
+	fields = _osascript(_ADD_FILE_SCRIPT, [str(path)]).split("\t", 2)
 	if not fields or not fields[0]:
 		raise MusicAutomationError("Music imported the file but did not return a persistent ID.")
 	return {
@@ -827,16 +816,6 @@ def import_managed_file(path: Path, recording_id: str | None = None) -> dict[str
 		"database_id": fields[1] if len(fields) > 1 else "",
 		"location": fields[2] if len(fields) > 2 and fields[2] else None,
 	}
-
-
-def set_music_ownership_marker(persistent_id: str, recording_id: str) -> None:
-	"""Persist the importer marker after Music has stabilized a new addition."""
-	if not persistent_id or not recording_id:
-		raise MusicAutomationError("A persistent ID and recording ID are required for the ownership marker.")
-	comment = f"Managed by Crate Music Importer; recording_id={recording_id}"
-	result = _osascript(_SET_OWNERSHIP_MARKER_SCRIPT, [persistent_id, comment], timeout=60)
-	if result != "OK":
-		raise MusicAutomationError(f"Music returned an unexpected ownership-marker result: {result}")
 
 
 def verify_music_tracks(persistent_ids: list[str], *, settle_seconds: float = 10.0) -> dict[str, dict[str, Any]]:
@@ -856,6 +835,7 @@ def verify_music_tracks(persistent_ids: list[str], *, settle_seconds: float = 10
 
 def update_managed_music_track(
 	persistent_id: str,
+	managed_path: Path,
 	recording: dict[str, Any],
 	artwork_path: Path | None,
 ) -> None:
@@ -863,9 +843,9 @@ def update_managed_music_track(
 	meta = recording.get("source_metadata") or {}
 	if not album:
 		raise MusicAutomationError("Album metadata is missing; refusing to update the Music track.")
-	comment = f"Managed by Crate Music Importer; recording_id={recording['recording_id']}"
 	result = _osascript(_UPDATE_ALBUM_TRACK_SCRIPT, [
 		persistent_id,
+		str(managed_path),
 		str(meta.get("title") or ""),
 		str(meta.get("artists") or ""),
 		str(album.get("album") or ""),
@@ -876,7 +856,6 @@ def update_managed_music_track(
 		str(int(album.get("disc_total") or 1)),
 		str(int(album.get("release_year") or 0)),
 		"true" if album.get("is_compilation") else "false",
-		comment,
 		str(artwork_path or ""),
 	])
 	if result != "OK":
@@ -885,12 +864,12 @@ def update_managed_music_track(
 
 def update_managed_music_artwork(
 	persistent_id: str,
-	recording_id: str,
+	managed_path: Path,
 	artwork_path: Path,
 ) -> None:
 	result = _osascript(_UPDATE_MANAGED_ARTWORK_SCRIPT, [
 		persistent_id,
-		f"recording_id={recording_id}",
+		str(managed_path),
 		str(artwork_path),
 	])
 	if result != "OK":

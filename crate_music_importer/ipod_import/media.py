@@ -1,4 +1,4 @@
-"""Download and atomically create tool-owned, iPod-compatible MP3 files."""
+"""Download and atomically create Crate-managed, iPod-compatible MP3 files."""
 
 from __future__ import annotations
 
@@ -218,21 +218,6 @@ def audio_sha256(path: Path, *, transcode_to_managed_mp3: bool = False) -> str:
 	return value.split("=", 1)[1].casefold()
 
 
-def _has_recording_marker(path: Path, recording_id: str) -> bool:
-	result = _run([
-		_tool("ffprobe"),
-		"-v", "error",
-		"-show_entries", "format_tags=comment",
-		"-of", "json",
-		str(path),
-	], timeout=60)
-	try:
-		comment = str(json.loads(result.stdout).get("format", {}).get("tags", {}).get("comment") or "")
-	except (TypeError, ValueError, json.JSONDecodeError):
-		return False
-	return f"recording_id={recording_id}" in comment
-
-
 def _retag_audio_is_unchanged(
 	recording: dict[str, Any],
 	paths: ManagedPaths,
@@ -243,8 +228,6 @@ def _retag_audio_is_unchanged(
 	managed = recording.get("managed_file") or {}
 	current_audio_sha = audio_sha256(target)
 	expected_audio_sha = str(managed.get("audio_sha256") or "").casefold()
-	if not _has_recording_marker(target, str(recording.get("recording_id") or "")):
-		return False
 	if expected_audio_sha:
 		return current_audio_sha == expected_audio_sha
 	video_id = str((recording.get("youtube") or {}).get("video_id") or "")
@@ -335,14 +318,13 @@ def recover_moved_managed_file(
 	candidate: dict[str, Any],
 	paths: ManagedPaths,
 ) -> str | None:
-	"""Recover a tool-owned MP3 after Music organized it inside the managed root."""
+	"""Recover a Crate-managed MP3 after Music organized it inside the managed root."""
 	managed = recording.get("managed_file") or {}
-	music = recording.get("music") or {}
+	persistent_id = str((recording.get("music_binding") or {}).get("persistent_id") or "")
 	if (
-		music.get("source") != "managed_import"
-		or not managed.get("tool_owned")
+		not managed.get("managed_by_crate")
 		or not managed.get("sha256")
-		or str(candidate.get("persistent_id") or "") != str(music.get("persistent_id") or "")
+		or str(candidate.get("persistent_id") or "") != persistent_id
 	):
 		return None
 	location = str(candidate.get("location") or "")
@@ -357,7 +339,6 @@ def recover_moved_managed_file(
 		return None
 	managed["relative_path"] = str(relative)
 	recording["managed_file"] = managed
-	recording["active_reference"] = {"kind": "managed_file", "relative_path": str(relative)}
 	return str(relative)
 
 
@@ -502,8 +483,7 @@ def download_recording(
 		"metadata_profile": "album" if album else "playlist",
 		"spotify_album_id": album.get("spotify_album_id") if album else None,
 		"artwork_source_url": album.get("cover_url") if album else recording.get("source_metadata", {}).get("cover_url"),
-		"tool_owned": True,
-		"retirement_candidate": False,
+		"managed_by_crate": True,
 	}
 
 
@@ -516,8 +496,8 @@ def retag_managed_recording_artwork(
 	if recording.get("album_metadata"):
 		raise MediaError("Use the album metadata workflow to update artwork for a real album recording.")
 	managed = dict(recording.get("managed_file") or {})
-	if not managed.get("tool_owned") or not managed.get("relative_path") or managed.get("metadata_profile") not in (None, "playlist"):
-		raise MediaError("Only an importer-owned Playlist Imports MP3 can receive repaired artwork.")
+	if not managed.get("managed_by_crate") or not managed.get("relative_path") or managed.get("metadata_profile") not in (None, "playlist"):
+		raise MediaError("Only a Crate-managed Playlist Imports MP3 can receive repaired artwork.")
 	target = paths.root / str(managed["relative_path"])
 	if not target.is_file():
 		raise MediaError(f"Managed MP3 is missing: {target}")
@@ -577,7 +557,6 @@ def retag_managed_recording_artwork(
 		"artwork": "600x600 baseline JPEG",
 		"metadata_profile": "playlist",
 		"artwork_source_url": cover_url,
-		"retirement_candidate": False,
 	})
 	return managed
 
@@ -592,8 +571,8 @@ def retag_managed_recording_as_album(
 	if not album:
 		raise MediaError("Album metadata is missing; refusing to retag the managed recording.")
 	managed = dict(recording.get("managed_file") or {})
-	if not managed.get("tool_owned") or not managed.get("relative_path"):
-		raise MediaError("Only an importer-owned managed MP3 can be upgraded to album metadata.")
+	if not managed.get("managed_by_crate") or not managed.get("relative_path"):
+		raise MediaError("Only a Crate-managed MP3 can be upgraded to album metadata.")
 	target = paths.root / str(managed["relative_path"])
 	if not target.is_file():
 		raise MediaError(f"Managed MP3 is missing: {target}")
@@ -608,7 +587,7 @@ def retag_managed_recording_as_album(
 	if cover is None:
 		raise MediaError("No usable Spotify album artwork was available; the existing playlist copy was left unchanged.")
 	if on_output:
-		on_output(f"Upgrading importer-owned MP3 to album metadata: {album.get('album', '')}")
+		on_output(f"Upgrading Crate-managed MP3 to album metadata: {album.get('album', '')}")
 	source_duration_ms = probe_duration_ms(target)
 	temporary = target.with_suffix(".album-retag.partial.mp3")
 	_run([
@@ -655,7 +634,6 @@ def retag_managed_recording_as_album(
 		"metadata_profile": "album",
 		"spotify_album_id": album.get("spotify_album_id"),
 		"artwork_source_url": album.get("cover_url"),
-		"retirement_candidate": False,
 	})
 	return managed
 

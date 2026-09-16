@@ -64,9 +64,8 @@ function problemKind(kind: string): string {
     youtube_missing: "YouTube match needs review",
     youtube_ambiguity: "YouTube match needs review",
     music_ambiguity: "Choose a Music-library copy",
-    album_duplicate_conflict: "Choose the proper album copy",
-    album_conflict: "Blocked by a user-owned album conflict",
-    album_release_conflict: "Blocked by another canonical album",
+    album_identity_mismatch: "Choose the proper album copy",
+    album_identity_conflict: "Album metadata needs review",
     retryable_failure: "Download can be retried",
   };
   return labels[kind] || kind.replaceAll("_", " ");
@@ -75,7 +74,7 @@ function problemKind(kind: string): string {
 function problemIcon(problem: ResolverProblem): Icon {
   if (problem.state === "blocked") return Icon.Lock;
   if (problem.state === "retryable") return Icon.RotateClockwise;
-  return problem.kind.startsWith("music") || problem.kind.includes("album_duplicate") ? Icon.Music : Icon.Video;
+  return problem.kind.startsWith("music") || problem.kind.startsWith("album_identity") ? Icon.Music : Icon.Video;
 }
 
 function problemDetail(problem: ResolverProblem): string {
@@ -124,7 +123,6 @@ ${reasons}`;
 **Album:** ${markdownText(candidate.album || "Unknown")}  
 **Duration:** ${seconds(candidate.durationSeconds)} (${delta >= 0 ? "+" : ""}${delta}s vs Spotify)  
 **Score:** ${score(candidate)}  
-**Ownership:** ${candidate.importerOwned ? "Importer-owned" : "User-owned"}  
 **Location:** ${markdownText(candidate.location || "No local file location")}
 
 ### Match notes
@@ -383,11 +381,9 @@ function MusicCandidates({ problem, onResolved }: { problem: ResolverProblem; on
   async function choose(candidate: ResolverCandidate) {
     if (!candidate.selectable) return;
     const confirmed = await confirmAlert({
-      title: candidate.promotionEligible ? "Promote this track to the album?" : "Use this Music track?",
-      message: candidate.promotionEligible
-        ? `${candidate.artist || ""} — ${candidate.title}\nThe importer-owned Playlist Imports track will be updated in place with ${problem.album} metadata. Its Music ID and current playlist memberships will be preserved.`
-        : `${candidate.artist || ""} — ${candidate.title}\nAlbum: ${candidate.album || "Unknown"}. The existing file will not be retagged or moved.`,
-      primaryAction: { title: candidate.promotionEligible ? "Approve Album Promotion" : "Use This Music Track" },
+      title: "Use this Music track?",
+      message: `${candidate.artist || ""} — ${candidate.title}\nAlbum: ${candidate.album || "Unknown"}. The existing file will not be retagged, moved, or deleted.`,
+      primaryAction: { title: "Use This Music Track" },
       dismissAction: { title: "Cancel", style: Alert.ActionStyle.Cancel },
     });
     if (!confirmed) return;
@@ -416,11 +412,7 @@ function MusicCandidates({ problem, onResolved }: { problem: ResolverProblem; on
           actions={
             <ActionPanel>
               {candidate.selectable ? (
-                <Action
-                  title={candidate.promotionEligible ? "Approve Album Promotion" : "Use This Music Track"}
-                  icon={Icon.CheckCircle}
-                  onAction={() => choose(candidate)}
-                />
+                <Action title="Use This Music Track" icon={Icon.CheckCircle} onAction={() => choose(candidate)} />
               ) : null}
               {candidate.location ? <Action.ShowInFinder path={candidate.location} /> : null}
             </ActionPanel>
@@ -433,10 +425,7 @@ function MusicCandidates({ problem, onResolved }: { problem: ResolverProblem; on
 
 function ProblemActions({ problem, refresh }: { problem: ResolverProblem; refresh: () => Promise<void> }) {
   const youtubeProblem = problem.kind === "youtube_missing" || problem.kind === "youtube_ambiguity";
-  const musicProblem =
-    problem.kind === "music_ambiguity" ||
-    problem.kind === "album_conflict" ||
-    problem.kind === "album_duplicate_conflict";
+  const musicProblem = problem.kind === "music_ambiguity" || problem.kind === "album_identity_mismatch";
   const sourceTypeCounts = problem.sources.reduce<Record<SourceReference["type"], number>>(
     (counts, source) => ({ ...counts, [source.type]: counts[source.type] + 1 }),
     { album: 0, playlist: 0 },

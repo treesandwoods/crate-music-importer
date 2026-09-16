@@ -1,21 +1,18 @@
+import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from crate_music_importer.ipod_import.manifest import ManagedPaths, new_manifest, upsert_recording
+from crate_music_importer.ipod_import.manifest import ManagedPaths
 from crate_music_importer.ipod_import.music_cache import (
 	MusicCacheError,
-	MusicCacheUnavailableError,
 	build_full_cache,
 	load_music_cache,
-	mark_music_cache_entry_stale,
 	music_cache_tracks,
-	new_partial_cache,
 	refresh_music_cache,
-	save_music_cache,
 	upsert_music_cache_track,
 	validate_exact_track,
-	cache_track_for_recording,
 )
 
 
@@ -26,142 +23,76 @@ def track(persistent_id: str = "PID", *, title: str = "Song") -> dict:
 		"title": title,
 		"artist": "Artist",
 		"album": "Album",
-		"album_artist": "Artist",
 		"duration_s": 180.0,
 		"location": f"/Music/{title}.m4a",
 		"comment": "",
-		"track_no": 1,
-		"track_total": 1,
-		"disc_no": 1,
-		"disc_total": 1,
-		"compilation": False,
 	}
 
 
 class MusicCacheTests(unittest.TestCase):
-	def test_missing_cache_directs_user_to_library_health(self):
+	def test_cache_contains_only_snapshot_metadata(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")
-			with self.assertRaisesRegex(MusicCacheUnavailableError, "Library Health"):
-				load_music_cache(paths)
-			self.assertFalse(paths.root.exists())
+			cache = refresh_music_cache(paths, [track()])
+			self.assertEqual(set(cache), {"schema_version", "managed_root", "scanned_at", "tracks"})
+			self.assertEqual([value["persistent_id"] for value in music_cache_tracks(cache)], ["PID"])
 
-	def test_refresh_is_atomic_and_uses_only_supplied_tracks(self):
+	def test_missing_cache_rebuilds_from_music(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")
-			manifest = new_manifest(paths)
-			result = refresh_music_cache(paths, manifest, [track()])
-			self.assertEqual(result["total_cached_tracks"], 1)
-			self.assertTrue(load_music_cache(paths)["initial_scan_completed"])
-			self.assertFalse(list(paths.state_dir.glob("*.tmp")))
+			cache = load_music_cache(paths, rebuild=lambda: [track("LIVE")])
+			self.assertEqual(set(cache["tracks"]), {"LIVE"})
+			self.assertTrue(paths.music_cache.is_file())
 
-	def test_duplicate_persistent_id_aborts_without_replacing_cache(self):
+	def test_corrupt_cache_rebuilds_from_music(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")
-			manifest = new_manifest(paths)
-			refresh_music_cache(paths, manifest, [track(title="Original")])
-			before = paths.music_cache.read_bytes()
-			with self.assertRaisesRegex(MusicCacheError, "duplicate persistent ID"):
-				refresh_music_cache(paths, manifest, [track(title="One"), track(title="Two")])
-			self.assertEqual(paths.music_cache.read_bytes(), before)
+			paths.state_dir.mkdir(parents=True)
+			paths.music_cache.write_text("not json", encoding="utf-8")
+			cache = load_music_cache(paths, rebuild=lambda: [track("LIVE")])
+			self.assertEqual(set(cache["tracks"]), {"LIVE"})
 
-	def test_incremental_updates_replace_same_persistent_id_without_duplicates(self):
+	def test_expired_cache_rebuilds_without_durable_stale_state(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")
-			manifest = new_manifest(paths)
-			refresh_music_cache(paths, manifest, [track()])
-			upsert_music_cache_track(paths, track(title="Retagged"))
-			upsert_music_cache_track(paths, track(title="Retagged Again"))
-			cache = load_music_cache(paths)
-			self.assertEqual(cache["total_cached_tracks"], 1)
-			self.assertEqual(cache["tracks"]["PID"]["title"], "Retagged Again")
+			cache = build_full_cache(paths, [track("OLD")])
+			cache["scanned_at"] = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+			paths.state_dir.mkdir(parents=True)
+			paths.music_cache.write_text(json.dumps(cache), encoding="utf-8")
+			loaded = load_music_cache(paths, rebuild=lambda: [track("NEW")])
+			self.assertEqual(set(loaded["tracks"]), {"NEW"})
 
-	def test_refresh_replaces_changed_tracks_and_removes_deleted_tracks(self):
+	def test_refresh_replaces_removed_and_changed_tracks(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")
-			manifest = new_manifest(paths)
-			refresh_music_cache(paths, manifest, [track("ONE"), track("TWO")])
-			refresh_music_cache(paths, manifest, [track("ONE", title="Changed")])
+			refresh_music_cache(paths, [track("ONE"), track("TWO")])
+			refresh_music_cache(paths, [track("ONE", title="Changed")])
 			cache = load_music_cache(paths)
 			self.assertEqual(set(cache["tracks"]), {"ONE"})
 			self.assertEqual(cache["tracks"]["ONE"]["title"], "Changed")
 
-	def test_full_scan_retains_missing_manifest_metadata_only_as_stale_migration_data(self):
+	def test_incremental_update_replaces_same_id(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")
-			manifest = new_manifest(paths)
-			_, recording = upsert_recording(manifest, {"title": "Saved Song", "artists": "Artist", "duration_ms": 180000})
-			recording["music"] = {"persistent_id": "OLD-PID", "database_id": "9", "location": "/Old/Song.m4a"}
-			cache = build_full_cache(paths, manifest, [track("CURRENT")])
-			self.assertEqual(set(cache["tracks"]), {"CURRENT"})
-			migrated = cache["migration"]["entries_requiring_validation"]["OLD-PID"]
-			self.assertEqual(migrated["title"], "Saved Song")
-			self.assertTrue(migrated["validation_required"])
-			self.assertTrue(migrated["stale"])
+			refresh_music_cache(paths, [track()])
+			upsert_music_cache_track(paths, track(title="Retagged"))
+			self.assertEqual(load_music_cache(paths)["tracks"]["PID"]["title"], "Retagged")
 
-	def test_manifest_migration_is_partial_and_requires_validation(self):
+	def test_duplicate_ids_preserve_previous_cache(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")
-			manifest = new_manifest(paths)
-			_, recording = upsert_recording(manifest, {"title": "Known", "artists": "Artist", "duration_ms": 180000})
-			recording["music"] = {"persistent_id": "SAVED", "database_id": "9"}
-			cache = new_partial_cache(paths, manifest)
-			save_music_cache(paths, cache)
-			self.assertTrue(cache["tracks"]["SAVED"]["validation_required"])
-			with self.assertRaisesRegex(MusicCacheUnavailableError, "incomplete"):
-				load_music_cache(paths)
-			self.assertFalse(load_music_cache(paths, require_complete=False)["initial_scan_completed"])
+			refresh_music_cache(paths, [track(title="Original")])
+			before = paths.music_cache.read_bytes()
+			with self.assertRaisesRegex(MusicCacheError, "duplicate persistent ID"):
+				refresh_music_cache(paths, [track(title="One"), track(title="Two")])
+			self.assertEqual(paths.music_cache.read_bytes(), before)
 
-	def test_stale_entries_are_retained_but_not_silently_reused(self):
-		with tempfile.TemporaryDirectory() as directory:
-			paths = ManagedPaths(Path(directory) / "managed")
-			cache = build_full_cache(paths, new_manifest(paths), [track()])
-			save_music_cache(paths, cache)
-			mark_music_cache_entry_stale(paths, "PID", "title changed")
-			loaded = load_music_cache(paths)
-			self.assertTrue(loaded["tracks"]["PID"]["stale"])
-			self.assertTrue(music_cache_tracks(loaded)[0]["stale"])
-
-	def test_exact_validation_accepts_remaster_label_but_rejects_identity_change(self):
-		cached = track(title="Song (2005 Remaster)")
+	def test_exact_validation_ignores_comment_and_provenance(self):
+		expected = track(title="Song (2005 Remaster)")
 		actual = track(title="Song")
-		self.assertEqual(validate_exact_track(cached, actual), (True, ""))
-		changed = track(title="Different Song")
-		self.assertEqual(validate_exact_track(cached, changed)[0], False)
-
-	def test_exact_validation_accepts_tool_owned_location_when_music_drops_comment(self):
-		cached = track()
-		actual = track()
-		actual["location"] = "/Managed/tracks/song.mp3"
-		self.assertEqual(
-			validate_exact_track(
-				cached,
-				actual,
-				require_importer_owned=True,
-				recording_id="rec_song",
-				importer_owned_location="/Managed/tracks/song.mp3",
-			),
-			(True, ""),
-		)
-		self.assertEqual(
-			validate_exact_track(
-				cached,
-				actual,
-				require_importer_owned=True,
-				recording_id="rec_song",
-				importer_owned_location="/Managed/tracks/different.mp3",
-			)[0],
-			False,
-		)
-
-	def test_importer_cache_uses_the_managed_file_duration(self):
-		recording = {
-			"recording_id": "rec_song",
-			"source_metadata": {"title": "Song", "artists": "Artist", "duration_ms": 209106},
-			"managed_file": {"duration_ms": 214645},
-		}
-		cached = cache_track_for_recording(recording, {"persistent_id": "PID"}, album_profile=False)
-		self.assertEqual(cached["duration_s"], 214.645)
+		actual["comment"] = ""
+		self.assertEqual(validate_exact_track(expected, actual), (True, ""))
+		self.assertFalse(validate_exact_track(expected, track(title="Different Song"))[0])
 
 
 if __name__ == "__main__":

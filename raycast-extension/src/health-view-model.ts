@@ -54,7 +54,8 @@ export function healthSummary(result: HealthResult) {
   const labels: Record<string, string> = {
     musicTracks: "Music tracks scanned",
     localFiles: "Local files checked",
-    managedTracks: "Importer-managed tracks",
+    managedFiles: "Crate-managed files",
+    bindingRepairs: "Music bindings repaired",
     missingFiles: "Missing or unreadable files",
     corruptFiles: "Corrupt or truncated audio",
     exactDuplicateGroups: "Exact duplicate groups",
@@ -82,7 +83,7 @@ export function groupIssues(issues: HealthIssue[]) {
 export function issueMarkdown(issue: HealthIssue) {
   return [
     `# ${issue.title}`,
-    `**Severity:** ${issue.severity} · **Ownership:** ${issue.ownership}`,
+    `**Severity:** ${issue.severity}`,
     issue.detail,
     ...issue.tracks.map(
       (track) =>

@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import tempfile
 import unicodedata
 from dataclasses import dataclass
@@ -102,13 +103,65 @@ def new_manifest(paths: ManagedPaths) -> dict[str, Any]:
 	}
 
 
+def _migrate_recording(recording: dict[str, Any]) -> None:
+	"""Collapse the legacy Music/cache state into one current binding."""
+	music = recording.pop("music", None) or {}
+	active = recording.pop("active_reference", None) or {}
+	pending = recording.pop("cache_sync_pending", None) or {}
+	persistent_id = str(
+		(recording.get("music_binding") or {}).get("persistent_id")
+		or music.get("persistent_id")
+		or active.get("persistent_id")
+		or pending.get("persistent_id")
+		or ""
+	)
+	recording["music_binding"] = {"persistent_id": persistent_id} if persistent_id else None
+	recording.pop("promotion", None)
+	managed = recording.get("managed_file")
+	if isinstance(managed, dict):
+		managed["managed_by_crate"] = bool(managed.get("managed_by_crate", managed.get("tool_owned", False)))
+		managed.pop("tool_owned", None)
+		managed.pop("retirement_candidate", None)
+
+
+def _migrate_manifest(data: dict[str, Any], paths: ManagedPaths) -> tuple[dict[str, Any], bool]:
+	version = data.get("version")
+	if version not in (1, MANIFEST_VERSION):
+		raise ValueError(f"Unsupported manifest version: {version!r}")
+	changed = version != MANIFEST_VERSION
+	for recording in (data.get("recordings") or {}).values():
+		if not isinstance(recording, dict):
+			continue
+		managed = recording.get("managed_file")
+		needs_cleanup = version == 1 or any(field in recording for field in ("music", "active_reference", "cache_sync_pending", "promotion")) or (isinstance(managed, dict) and "tool_owned" in managed)
+		if needs_cleanup:
+			_migrate_recording(recording)
+			changed = True
+	if version == 1:
+		data["version"] = MANIFEST_VERSION
+	for playlist in (data.get("playlists") or {}).values():
+		if isinstance(playlist, dict) and "m3u8_tool_owned" in playlist:
+			playlist["m3u8_managed_by_crate"] = bool(playlist.pop("m3u8_tool_owned"))
+			changed = True
+	return data, changed
+
+
+def _backup_state(paths: ManagedPaths) -> Path:
+	stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+	target = paths.state_dir / "backups" / f"state-model-v1-{stamp}"
+	target.mkdir(parents=True, exist_ok=False)
+	for source in (paths.manifest, paths.music_cache):
+		if source.is_file():
+			shutil.copy2(source, target / source.name)
+	return target
+
+
 def _load_manifest_unlocked(paths: ManagedPaths) -> dict[str, Any]:
 	if not paths.manifest.exists():
 		return new_manifest(paths)
 	with paths.manifest.open("r", encoding="utf-8") as handle:
 		data = json.load(handle)
-	if data.get("version") != MANIFEST_VERSION:
-		raise ValueError(f"Unsupported manifest version: {data.get('version')!r}")
+	data, _ = _migrate_manifest(data, paths)
 	if Path(str(data.get("managed_root"))) != paths.root:
 		raise ValueError("Manifest managed_root does not match the required output directory.")
 	if not isinstance(data.get("recordings"), dict) or not isinstance(data.get("playlists"), dict):
@@ -125,7 +178,16 @@ def _load_manifest_unlocked(paths: ManagedPaths) -> dict[str, Any]:
 
 
 def load_manifest(paths: ManagedPaths) -> dict[str, Any]:
-	return _load_manifest_unlocked(paths)
+	if not paths.manifest.exists():
+		return new_manifest(paths)
+	with _manifest_lock(paths):
+		with paths.manifest.open("r", encoding="utf-8") as handle:
+			raw = json.load(handle)
+		migrated, changed = _migrate_manifest(raw, paths)
+		if changed:
+			_backup_state(paths)
+			_save_manifest_unlocked(paths, migrated)
+		return _load_manifest_unlocked(paths)
 
 
 @contextlib.contextmanager
@@ -261,16 +323,9 @@ def upsert_recording(
 			"album_metadata": None,
 			"youtube": None,
 			"managed_file": None,
-			"music": None,
-			"active_reference": None,
+			"music_binding": None,
 			"playlist_memberships": {},
 			"album_memberships": {},
-			"promotion": {
-				"eligible": True,
-				"superseded_by_music_persistent_id": None,
-				"tool_owned_loose_file_retirement_candidate": False,
-				"retired_at": None,
-			},
 			"created_at": _now(),
 			"updated_at": _now(),
 		}
@@ -346,7 +401,7 @@ def set_playlist(
 		"warning": playlist.get("warning"),
 		"items": items,
 		"m3u8_relative_path": m3u8_relative_path,
-		"m3u8_tool_owned": bool(prior.get("m3u8_tool_owned", False) and prior.get("m3u8_relative_path") == m3u8_relative_path),
+		"m3u8_managed_by_crate": bool(prior.get("m3u8_managed_by_crate", False) and prior.get("m3u8_relative_path") == m3u8_relative_path),
 		"music_playlist_persistent_id": prior.get("music_playlist_persistent_id"),
 		"created_at": prior.get("created_at") or _now(),
 		"updated_at": _now(),
@@ -447,23 +502,16 @@ def playlist_m3u8(manifest: dict[str, Any], playlist_id: str, paths: ManagedPath
 	lines = ["#EXTM3U", f"#CRATE-MUSIC-IMPORTER:{playlist_id}", f"#PLAYLIST:{playlist['name']}"]
 	for item in sorted(playlist["items"], key=lambda value: int(value["position"])):
 		recording = manifest["recordings"][item["recording_id"]]
-		active = recording.get("active_reference") or {}
-		if active.get("kind") == "unavailable_historical_reference":
-			lines.append(f"#UNAVAILABLE-HISTORICAL-RECORDING:{item['recording_id']}")
-			continue
 		meta = recording["source_metadata"]
 		duration = int(round(int(meta.get("duration_ms") or 0) / 1000.0))
 		lines.append(f"#EXTINF:{duration},{meta.get('artists', '')} - {meta.get('title', '')}")
-		music = recording.get("music") or {}
+		binding = recording.get("music_binding") or {}
 		managed = recording.get("managed_file") or {}
-		if active.get("kind") == "existing_music":
-			location = music.get("location")
-		else:
-			location = str(paths.root / managed["relative_path"]) if managed.get("relative_path") else None
+		location = None if binding.get("persistent_id") else str(paths.root / managed["relative_path"]) if managed.get("relative_path") and managed.get("managed_by_crate") else None
 		if location:
 			lines.append(str(location))
 		else:
-			persistent_id = music.get("persistent_id") or "UNRESOLVED"
+			persistent_id = binding.get("persistent_id") or "UNRESOLVED"
 			lines.append(f"#MUSIC-PERSISTENT-ID:{persistent_id}")
 	return "\n".join(lines) + "\n"
 
@@ -472,7 +520,7 @@ def write_playlist_m3u8(manifest: dict[str, Any], playlist_id: str, paths: Manag
 	playlist = manifest["playlists"][playlist_id]
 	target = paths.root / playlist["m3u8_relative_path"]
 	target.parent.mkdir(parents=True, exist_ok=True)
-	if target.exists() and not playlist.get("m3u8_tool_owned"):
+	if target.exists() and not playlist.get("m3u8_managed_by_crate"):
 		try:
 			header = target.read_text(encoding="utf-8", errors="replace").splitlines()[:3]
 			recognized = any(
@@ -488,5 +536,5 @@ def write_playlist_m3u8(manifest: dict[str, Any], playlist_id: str, paths: Manag
 		handle.write(content)
 		temporary = Path(handle.name)
 	os.replace(temporary, target)
-	playlist["m3u8_tool_owned"] = True
+	playlist["m3u8_managed_by_crate"] = True
 	return target

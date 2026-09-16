@@ -40,7 +40,7 @@ function snapshot(): ResolverSnapshot {
         artists: "Artist",
         album: "Album",
         durationSeconds: 180,
-        kind: "album_conflict",
+        kind: "album_identity_conflict",
         state: "blocked",
         message: "Blocked",
         candidates: [],

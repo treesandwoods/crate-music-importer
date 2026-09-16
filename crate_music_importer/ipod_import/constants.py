@@ -6,7 +6,7 @@ from pathlib import Path
 from crate_music_importer.ipod_import.config import configured_path
 
 MANAGED_ROOT = configured_path("managedMusicDirectory", "CRATE_MANAGED_ROOT", Path.home() / "Music/mp3 Music")
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
 IMPORT_ALBUM = "Playlist Imports"
 IMPORT_ALBUM_ARTIST = "Various Artists"
 IMPORT_GENRE = "Music"

@@ -24,8 +24,7 @@ class PlaylistUpdateTests(unittest.TestCase):
 		for position, spotify_id in enumerate(ids, start=1):
 			key, recording = upsert_recording(manifest, track(spotify_id))
 			persistent_id = f"PID-{spotify_id.upper()}"
-			recording["music"] = {"source": "existing_library", "persistent_id": persistent_id, "database_id": str(position), "location": f"/Music/{spotify_id}.m4a"}
-			recording["active_reference"] = {"kind": "existing_music", "persistent_id": persistent_id}
+			recording["music_binding"] = {"persistent_id": persistent_id}
 			items.append({"position": position, "recording_id": key, "spotify_id": spotify_id, "status": "reused_music"})
 			music.append({"title": spotify_id, "artist": "Artist", "album": "Album", "duration_s": 180, "persistent_id": persistent_id, "database_id": str(position), "location": f"/Music/{spotify_id}.m4a", "comment": ""})
 		playlist = set_playlist(manifest, {"id": "saved", "name": "Saved", "url": URL, "cover_url": "https://example.test/saved.jpg", "complete": True, "total_count": len(items)}, items)
@@ -40,7 +39,7 @@ class PlaylistUpdateTests(unittest.TestCase):
 
 	def preview(self, manifest, music, current_ids, **values):
 		music_membership = values.pop("music_membership", [
-			str((manifest["recordings"][item["recording_id"]].get("music") or {}).get("persistent_id") or "")
+			str((manifest["recordings"][item["recording_id"]].get("music_binding") or {}).get("persistent_id") or "")
 			for item in sorted(manifest["playlists"]["saved"].get("items") or [], key=lambda item: int(item.get("position") or 0))
 		])
 		current = {"id": "saved", "name": "Saved", "url": URL, "tracks": [track(value) for value in current_ids], "total_count": len(current_ids), "complete": True}
@@ -50,7 +49,7 @@ class PlaylistUpdateTests(unittest.TestCase):
 			music,
 			manifest,
 			ManagedPaths(Path(self.directory.name)),
-			status_checker=lambda _name, pid: ("OWNED", pid),
+			status_checker=lambda _name, pid: ("FOUND", pid),
 			membership_reader=lambda _name, _pid: music_membership,
 		)
 
@@ -121,8 +120,7 @@ class PlaylistUpdateTests(unittest.TestCase):
 			membership_reader=lambda _name, _pid: ["PID-A", "PID-B", "PID-A"],
 			membership_editor=editor,
 			music_deleter=lambda *_args: False,
-			status_checker=lambda _name, pid: ("OWNED", pid),
-			owned_lookup=lambda _recording_id: None,
+			status_checker=lambda _name, pid: ("FOUND", pid),
 		)
 		self.assertEqual(calls, [(["PID-A", "PID-B", "PID-A"], [1, 2], ["PID-A", "PID-B"])])
 		self.assertEqual(result["reorders"], 2)
@@ -176,7 +174,7 @@ class PlaylistUpdateTests(unittest.TestCase):
 	def test_missing_music_playlist_and_collision_are_blocked(self):
 		paths, manifest, music = self.fixture(("a",))
 		manifest["playlists"]["saved"]["music_playlist_persistent_id"] = None
-		missing = build_playlist_update_preview({"id": "saved", "name": "Saved", "url": URL, "tracks": [track("a")], "total_count": 1, "complete": True}, music, manifest, paths, status_checker=lambda _name, pid: ("OWNED", pid))
+		missing = build_playlist_update_preview({"id": "saved", "name": "Saved", "url": URL, "tracks": [track("a")], "total_count": 1, "complete": True}, music, manifest, paths, status_checker=lambda _name, pid: ("FOUND", pid))
 		self.assertEqual(missing.state, "missing_music_playlist")
 		manifest["playlists"]["saved"]["music_playlist_persistent_id"] = "PID"
 		collision = build_playlist_update_preview({"id": "saved", "name": "Saved", "url": URL, "tracks": [track("a")], "total_count": 1, "complete": True}, music, manifest, paths, status_checker=lambda _name, _pid: ("COLLISION", "OTHER"))
@@ -190,9 +188,7 @@ class PlaylistUpdateTests(unittest.TestCase):
 		manifest["playlists"]["other"] = {"name": "Other", "items": [{"position": 1, "recording_id": by_spotify["a"], "spotify_id": "a"}]}
 		set_album(manifest, {"id": "album", "name": "Album", "url": "url", "complete": True, "total_count": 1}, [{"position": 1, "recording_id": by_spotify["b"], "spotify_id": "b"}])
 		c = manifest["recordings"][by_spotify["c"]]
-		c["managed_file"] = {"relative_path": "tracks/c.mp3", "tool_owned": True, "metadata_profile": "playlist", "audio_sha256": "audio-c"}
-		c["active_reference"] = {"kind": "managed_file", "relative_path": "tracks/c.mp3"}
-		c["music"]["source"] = "managed_import"
+		c["managed_file"] = {"relative_path": "tracks/c.mp3", "managed_by_crate": True, "metadata_profile": "playlist", "audio_sha256": "audio-c"}
 		preview = self.preview(manifest, music, ())
 		self.assertEqual({row["spotify_id"]: row["action"] for row in preview.removals}, {"a": "unlink", "b": "unlink", "c": "delete"})
 
@@ -203,9 +199,8 @@ class PlaylistUpdateTests(unittest.TestCase):
 		managed_path = paths.root / "tracks/b.mp3"
 		managed_path.parent.mkdir(parents=True)
 		managed_path.write_bytes(b"mp3")
-		b["managed_file"] = {"relative_path": "tracks/b.mp3", "tool_owned": True, "metadata_profile": "playlist", "audio_sha256": "audio-b"}
-		b["active_reference"] = {"kind": "managed_file", "relative_path": "tracks/b.mp3"}
-		b["music"]["source"] = "managed_import"
+		b["managed_file"] = {"relative_path": "tracks/b.mp3", "managed_by_crate": True, "metadata_profile": "playlist", "audio_sha256": "audio-b"}
+		next(row for row in music if row["persistent_id"] == "PID-B")["location"] = str(managed_path)
 		music.append({"title": "c", "artist": "Artist", "album": "Album", "duration_s": 180, "persistent_id": "PID-C", "database_id": "3", "location": "/Music/c.m4a", "comment": ""})
 		preview = self.preview(manifest, music, ("a", "c"), music_membership=["MANUAL-1", "PID-A", "PID-B", "MANUAL-2"])
 		self.assertEqual([row["kind"] for row in preview.music_changes], ["reorder", "reorder", "remove", "remove"])
@@ -227,9 +222,8 @@ class PlaylistUpdateTests(unittest.TestCase):
 			membership_reader=lambda _name, _pid: ["MANUAL-1", "PID-A", "PID-B", "MANUAL-2"],
 			membership_editor=editor,
 			music_deleter=lambda pid, recording_id: deleted.append((pid, recording_id)) or True,
-			status_checker=lambda _name, pid: ("OWNED", pid),
+			status_checker=lambda _name, pid: ("FOUND", pid),
 			audio_hasher=lambda _path: "audio-b",
-			owned_lookup=lambda recording_id: {"persistent_id": "PID-B"} if recording_id == b_item["recording_id"] else None,
 		)
 		self.assertEqual(membership_calls[0], (["MANUAL-1", "PID-A", "PID-B", "MANUAL-2"], [0, 1, 2, 3], ["PID-A", "PID-C"]))
 		self.assertEqual(result["additions"], 1)
@@ -259,8 +253,7 @@ class PlaylistUpdateTests(unittest.TestCase):
 			membership_reader=lambda _name, _pid: ["MANUAL-1", "PID-A", "MANUAL-2", "PID-B", "MANUAL-3"],
 			membership_editor=editor,
 			music_deleter=lambda *_args: False,
-			status_checker=lambda _name, pid: ("OWNED", pid),
-			owned_lookup=lambda _recording_id: None,
+			status_checker=lambda _name, pid: ("FOUND", pid),
 		)
 		self.assertEqual(membership_calls, [(
 			["MANUAL-1", "PID-A", "MANUAL-2", "PID-B", "MANUAL-3"],
@@ -296,8 +289,7 @@ class PlaylistUpdateTests(unittest.TestCase):
 			membership_reader=lambda _name, _pid: ["PID-A", "PID-B", "PID-D"],
 			membership_editor=editor,
 			music_deleter=lambda *_args: False,
-			status_checker=lambda _name, pid: ("OWNED", pid),
-			owned_lookup=lambda _recording_id: None,
+			status_checker=lambda _name, pid: ("FOUND", pid),
 		)
 		self.assertEqual(calls, [(["PID-A", "PID-B", "PID-D"], [0, 1, 2], ["PID-D", "PID-C", "PID-A"])])
 		self.assertEqual(result["additions"], 1)
@@ -310,8 +302,7 @@ class PlaylistUpdateTests(unittest.TestCase):
 	def test_retry_accepts_already_applied_suffix_and_refuses_drift(self):
 		paths, manifest, music = self.fixture(("a",))
 		c_key, c = upsert_recording(manifest, track("c"))
-		c["music"] = {"source": "existing_library", "persistent_id": "PID-C", "database_id": "3", "location": "/Music/c.m4a"}
-		c["active_reference"] = {"kind": "existing_music", "persistent_id": "PID-C"}
+		c["music_binding"] = {"persistent_id": "PID-C"}
 		music.append({"title": "c", "artist": "Artist", "album": "Album", "duration_s": 180, "persistent_id": "PID-C", "database_id": "3", "location": "/Music/c.m4a", "comment": ""})
 		manifest["playlists"]["saved"]["pending_update"] = {
 			"spotify_snapshot": [{"spotify_id": "a", "recording_id": manifest["playlists"]["saved"]["items"][0]["recording_id"], "saved_position": 1, "spotify_position": 1}, {"spotify_id": "c", "recording_id": c_key, "saved_position": 2, "spotify_position": 2}],
@@ -319,7 +310,7 @@ class PlaylistUpdateTests(unittest.TestCase):
 			"music_checkpoint": {"baseline": ["PID-A"], "survivors": ["PID-A"], "append_ids": ["PID-C"], "remove_indexes": []},
 		}
 		edits = []
-		result = apply_playlist_update(manifest, "saved", paths, music, exact_lookup=lambda pid: next((row for row in music if row["persistent_id"] == pid), None), cache_updater=lambda _track: None, cache_remover=lambda _ids: 0, membership_reader=lambda _name, _pid: ["PID-A", "PID-C"], membership_editor=lambda *args: edits.append(args) or [], music_deleter=lambda *_args: False, status_checker=lambda _name, pid: ("OWNED", pid), owned_lookup=lambda _recording_id: None)
+		result = apply_playlist_update(manifest, "saved", paths, music, exact_lookup=lambda pid: next((row for row in music if row["persistent_id"] == pid), None), cache_updater=lambda _track: None, cache_remover=lambda _ids: 0, membership_reader=lambda _name, _pid: ["PID-A", "PID-C"], membership_editor=lambda *args: edits.append(args) or [], music_deleter=lambda *_args: False, status_checker=lambda _name, pid: ("FOUND", pid))
 		self.assertEqual(result["additions"], 1)
 		self.assertEqual(edits, [])
 
@@ -329,7 +320,7 @@ class PlaylistUpdateTests(unittest.TestCase):
 			"music_checkpoint": {"baseline": ["PID-A"], "survivors": ["PID-A"], "append_ids": ["PID-C"], "remove_indexes": []},
 		}
 		with self.assertRaisesRegex(MusicAutomationError, "changed unexpectedly"):
-			apply_playlist_update(manifest, "saved", paths, music, exact_lookup=lambda _pid: None, cache_updater=lambda _track: None, cache_remover=lambda _ids: 0, membership_reader=lambda _name, _pid: ["DRIFT"], membership_editor=lambda *_args: [], music_deleter=lambda *_args: False, status_checker=lambda _name, pid: ("OWNED", pid), owned_lookup=lambda _recording_id: None)
+			apply_playlist_update(manifest, "saved", paths, music, exact_lookup=lambda _pid: None, cache_updater=lambda _track: None, cache_remover=lambda _ids: 0, membership_reader=lambda _name, _pid: ["DRIFT"], membership_editor=lambda *_args: [], music_deleter=lambda *_args: False, status_checker=lambda _name, pid: ("FOUND", pid))
 
 	def test_apply_refuses_music_changes_made_after_preview(self):
 		paths, manifest, music = self.fixture(("a", "b"))
@@ -347,8 +338,7 @@ class PlaylistUpdateTests(unittest.TestCase):
 				membership_reader=lambda _name, _pid: ["PID-A", "MANUAL", "PID-B"],
 				membership_editor=lambda *_args: [],
 				music_deleter=lambda *_args: False,
-				status_checker=lambda _name, pid: ("OWNED", pid),
-				owned_lookup=lambda _recording_id: None,
+				status_checker=lambda _name, pid: ("FOUND", pid),
 			)
 
 

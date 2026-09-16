@@ -1,3 +1,5 @@
+import contextlib
+import hashlib
 import json
 import os
 import tempfile
@@ -31,20 +33,21 @@ ALBUM_URL = "https://open.spotify.com/album/48a7rOjTzpD1zzJAteeveE"
 
 
 class DurableJobTests(unittest.TestCase):
-	def test_enqueue_snapshots_the_preexisting_music_cache(self):
+	def setUp(self):
+		lock = patch("crate_music_importer.ipod_import.dependency_lock.dependency_lock", return_value=contextlib.nullcontext())
+		lock.start()
+		self.addCleanup(lock.stop)
+
+	def test_enqueue_snapshots_preexisting_manifest_bindings_without_using_cache_as_truth(self):
 		with tempfile.TemporaryDirectory() as directory:
 			root = Path(directory)
 			paths = ManagedPaths(root)
 			manifest = new_manifest(paths)
-			save_music_cache(paths, build_full_cache(paths, manifest, [{
-				"persistent_id": "PID-BEFORE",
-				"database_id": "1",
-				"title": "Existing",
-				"artist": "Artist",
-				"duration_s": 180,
-			}]))
+			_key, recording = upsert_recording(manifest, {"title": "Existing", "artists": "Artist", "duration_ms": 180000})
+			recording["music_binding"] = {"persistent_id": "PID-BEFORE"}
+			save_manifest(paths, manifest)
 			job = enqueue("album_combined", ALBUM_URL, root=root, popen=lambda *_args, **_kwargs: SimpleNamespace(pid=os.getpid()))
-			self.assertEqual(job["cacheBaseline"], {"captured": True, "persistentIds": ["PID-BEFORE"]})
+			self.assertEqual(job["stateBaseline"], {"captured": True, "persistentIds": ["PID-BEFORE"]})
 
 	def test_enqueue_seeds_not_started_track_names_for_immediate_status(self):
 		with tempfile.TemporaryDirectory() as directory:
@@ -204,7 +207,7 @@ class DurableJobTests(unittest.TestCase):
 			with self.assertRaisesRegex(ValueError, "completed import"):
 				cancel_incomplete(completed["jobId"], root=root)
 
-	def test_cancelling_unfinished_import_deletes_unique_tool_owned_progress(self):
+	def test_cancelling_unfinished_import_deletes_unique_crate_managed_progress(self):
 		with tempfile.TemporaryDirectory() as directory:
 			root = Path(directory)
 			paths = ManagedPaths(root)
@@ -222,8 +225,7 @@ class DurableJobTests(unittest.TestCase):
 			managed.parent.mkdir(parents=True)
 			managed.write_bytes(b"partial")
 			(paths.staging / key).mkdir(parents=True)
-			recording["managed_file"] = {"relative_path": relative, "tool_owned": True}
-			recording["active_reference"] = {"kind": "managed_file", "relative_path": relative}
+			recording["managed_file"] = {"relative_path": relative, "managed_by_crate": True, "sha256": hashlib.sha256(b"partial").hexdigest()}
 			set_album(manifest, {
 				"id": "48a7rOjTzpD1zzJAteeveE",
 				"name": "Partial Album",
@@ -249,12 +251,12 @@ class DurableJobTests(unittest.TestCase):
 			self.assertNotIn("48a7rOjTzpD1zzJAteeveE", saved["albums"])
 			self.assertNotIn(key, saved["recordings"])
 
-	def test_cancelling_purges_only_new_importer_owned_music_and_cache_entries(self):
+	def test_cancelling_purges_only_new_music_backed_by_a_verified_managed_file(self):
 		with tempfile.TemporaryDirectory() as directory:
 			root = Path(directory)
 			paths = ManagedPaths(root)
 			manifest = new_manifest(paths)
-			save_music_cache(paths, build_full_cache(paths, manifest, [{
+			save_music_cache(paths, build_full_cache(paths, [{
 				"persistent_id": "PID-BEFORE",
 				"database_id": "1",
 				"title": "Existing",
@@ -274,9 +276,8 @@ class DurableJobTests(unittest.TestCase):
 			managed = root / relative
 			managed.parent.mkdir(parents=True)
 			managed.write_bytes(b"new")
-			recording["managed_file"] = {"relative_path": relative, "tool_owned": True}
-			recording["active_reference"] = {"kind": "managed_file", "relative_path": relative}
-			recording["music"] = {"source": "managed_album_import", "persistent_id": "PID-NEW", "database_id": "2", "location": str(managed)}
+			recording["managed_file"] = {"relative_path": relative, "managed_by_crate": True, "sha256": hashlib.sha256(b"new").hexdigest()}
+			recording["music_binding"] = {"persistent_id": "PID-NEW"}
 			set_album(manifest, {
 				"id": "48a7rOjTzpD1zzJAteeveE",
 				"name": "New Album",
@@ -303,30 +304,29 @@ class DurableJobTests(unittest.TestCase):
 			result = cancel_incomplete(
 				job["jobId"],
 				root=root,
-				delete_music=lambda persistent_id, recording_id: deleted.append((persistent_id, recording_id)) or True,
-				lookup_imported=lambda _recording_id: None,
+				delete_music=lambda persistent_id, managed_path: deleted.append((persistent_id, str(managed_path))) or True,
+				exact_lookup=lambda _persistent_id: {"persistent_id": "PID-NEW", "location": str(managed)},
 			)
 
-			self.assertEqual(deleted, [("PID-NEW", key)])
+			self.assertEqual(deleted, [("PID-NEW", str(managed.resolve()))])
 			self.assertEqual(result["removedMusicTracks"], 1)
 			self.assertEqual(result["removedCacheEntries"], 1)
 			self.assertFalse(managed.exists())
 			self.assertNotIn(key, load_manifest(paths)["recordings"])
 			self.assertEqual(set(load_music_cache(paths)["tracks"]), {"PID-BEFORE"})
 
-	def test_cancelling_keeps_tracks_that_were_in_the_cache_before_the_attempt(self):
+	def test_cancelling_keeps_bindings_that_existed_before_the_attempt(self):
 		with tempfile.TemporaryDirectory() as directory:
 			root = Path(directory)
 			paths = ManagedPaths(root)
 			manifest = new_manifest(paths)
-			save_music_cache(paths, build_full_cache(paths, manifest, [{
+			save_music_cache(paths, build_full_cache(paths, [{
 				"persistent_id": "PID-BEFORE",
 				"database_id": "1",
 				"title": "Existing",
 				"artist": "Artist",
 				"duration_s": 180,
 			}]))
-			job = enqueue("album_combined", ALBUM_URL, root=root, popen=lambda *_args, **_kwargs: SimpleNamespace(pid=os.getpid()))
 			key, recording = upsert_recording(manifest, {
 				"title": "Existing",
 				"artists": "Artist",
@@ -335,8 +335,7 @@ class DurableJobTests(unittest.TestCase):
 				"duration_ms": 180000,
 				"sp_id": "existing-track",
 			}, source_type="album")
-			recording["music"] = {"source": "existing_library", "persistent_id": "PID-BEFORE", "database_id": "1"}
-			recording["active_reference"] = {"kind": "existing_music", "persistent_id": "PID-BEFORE"}
+			recording["music_binding"] = {"persistent_id": "PID-BEFORE"}
 			set_album(manifest, {
 				"id": "48a7rOjTzpD1zzJAteeveE",
 				"name": "Album",
@@ -346,6 +345,7 @@ class DurableJobTests(unittest.TestCase):
 				"total_count": 1,
 			}, [{"position": 1, "recording_id": key, "status": "reused_music"}])
 			save_manifest(paths, manifest)
+			job = enqueue("album_combined", ALBUM_URL, root=root, popen=lambda *_args, **_kwargs: SimpleNamespace(pid=os.getpid()))
 			job["status"] = "failed"
 			job["phase"] = "failed"
 			JobStore(root).save(job)
@@ -354,7 +354,7 @@ class DurableJobTests(unittest.TestCase):
 				job["jobId"],
 				root=root,
 				delete_music=lambda *_args: self.fail("preexisting Music must not be deleted"),
-				lookup_imported=lambda _recording_id: None,
+				exact_lookup=lambda _persistent_id: None,
 			)
 
 			self.assertEqual(result["removedMusicTracks"], 0)
@@ -362,12 +362,12 @@ class DurableJobTests(unittest.TestCase):
 			self.assertIn(key, load_manifest(paths)["recordings"])
 			self.assertIn("PID-BEFORE", load_music_cache(paths)["tracks"])
 
-	def test_cancelling_finds_and_removes_an_import_that_stopped_before_its_id_was_saved(self):
+	def test_cancelling_does_not_guess_music_id_when_binding_was_never_saved(self):
 		with tempfile.TemporaryDirectory() as directory:
 			root = Path(directory)
 			paths = ManagedPaths(root)
 			manifest = new_manifest(paths)
-			save_music_cache(paths, build_full_cache(paths, manifest, []))
+			save_music_cache(paths, build_full_cache(paths, []))
 			job = enqueue("album_combined", ALBUM_URL, root=root, popen=lambda *_args, **_kwargs: SimpleNamespace(pid=os.getpid()))
 			key, recording = upsert_recording(manifest, {
 				"title": "Pending",
@@ -381,8 +381,7 @@ class DurableJobTests(unittest.TestCase):
 			managed = root / relative
 			managed.parent.mkdir(parents=True)
 			managed.write_bytes(b"pending")
-			recording["managed_file"] = {"relative_path": relative, "tool_owned": True}
-			recording["active_reference"] = {"kind": "managed_file", "relative_path": relative}
+			recording["managed_file"] = {"relative_path": relative, "managed_by_crate": True, "sha256": hashlib.sha256(b"pending").hexdigest()}
 			recording["music_import_pending"] = {"relative_path": relative, "started_at": "fixture"}
 			set_album(manifest, {
 				"id": "48a7rOjTzpD1zzJAteeveE",
@@ -401,38 +400,24 @@ class DurableJobTests(unittest.TestCase):
 			result = cancel_incomplete(
 				job["jobId"],
 				root=root,
-				delete_music=lambda persistent_id, recording_id: deleted.append((persistent_id, recording_id)) or True,
-				lookup_imported=lambda recording_id: {
-					"persistent_id": "PID-PENDING",
-					"comment": f"Managed by Crate Music Importer; recording_id={recording_id}",
-				},
+				delete_music=lambda persistent_id, managed_path: deleted.append((persistent_id, managed_path)) or True,
+				exact_lookup=lambda _persistent_id: None,
 			)
 
-			self.assertEqual(deleted, [("PID-PENDING", key)])
-			self.assertEqual(result["removedMusicTracks"], 1)
+			self.assertEqual(deleted, [])
+			self.assertEqual(result["removedMusicTracks"], 0)
 			self.assertFalse(managed.exists())
 			self.assertNotIn(key, load_manifest(paths)["recordings"])
 
-	def test_retry_inherits_the_original_cache_baseline(self):
+	def test_retry_inherits_the_original_state_baseline(self):
 		with tempfile.TemporaryDirectory() as directory:
 			root = Path(directory)
 			paths = ManagedPaths(root)
 			manifest = new_manifest(paths)
-			save_music_cache(paths, build_full_cache(paths, manifest, [{
-				"persistent_id": "PID-BEFORE",
-				"database_id": "1",
-				"title": "Existing",
-				"artist": "Artist",
-				"duration_s": 180,
-			}]))
+			_key, recording = upsert_recording(manifest, {"title": "Existing", "artists": "Artist", "duration_ms": 180000})
+			recording["music_binding"] = {"persistent_id": "PID-BEFORE"}
+			save_manifest(paths, manifest)
 			job = enqueue("album_combined", ALBUM_URL, root=root, popen=lambda *_args, **_kwargs: SimpleNamespace(pid=os.getpid()))
-			upsert_music_cache_track(paths, {
-				"persistent_id": "PID-PARTIAL",
-				"database_id": "2",
-				"title": "Partial",
-				"artist": "Artist",
-				"duration_s": 180,
-			})
 			job["status"] = "failed"
 			job["phase"] = "failed"
 			job["retryable"] = True
@@ -440,7 +425,7 @@ class DurableJobTests(unittest.TestCase):
 
 			retried = retry_job(job["jobId"], root=root, popen=lambda *_args, **_kwargs: SimpleNamespace(pid=os.getpid()))
 
-			self.assertEqual(retried["cacheBaseline"], {"captured": True, "persistentIds": ["PID-BEFORE"]})
+			self.assertEqual(retried["stateBaseline"], {"captured": True, "persistentIds": ["PID-BEFORE"]})
 
 	def test_ready_source_can_be_cancelled_when_legacy_job_says_complete(self):
 		with tempfile.TemporaryDirectory() as directory:
@@ -530,7 +515,7 @@ class DurableJobTests(unittest.TestCase):
 				elif title == "Approval":
 					recording["review"] = {"kind": "youtube_missing", "message": "Choose", "candidates": [{"url": "candidate"}]}
 				elif title == "Downloaded":
-					recording["active_reference"] = {"kind": "managed_file", "relative_path": "tracks/file.mp3"}
+					recording["managed_file"] = {"managed_by_crate": True, "relative_path": "tracks/file.mp3"}
 			set_album(manifest, {
 				"id": "48a7rOjTzpD1zzJAteeveE",
 				"name": "Album",
@@ -656,7 +641,7 @@ class DurableJobTests(unittest.TestCase):
 					"createdAt": f"{index:03d}",
 					"status": "complete",
 					"phase": "complete",
-					"cacheBaseline": {"captured": True, "persistentIds": [f"PID-{value}" for value in range(100)]},
+					"stateBaseline": {"captured": True, "persistentIds": [f"PID-{value}" for value in range(100)]},
 					"notification": {"pending": False},
 				})
 			store.save({
@@ -664,7 +649,7 @@ class DurableJobTests(unittest.TestCase):
 				"createdAt": "999",
 				"status": "superseded",
 				"phase": "superseded",
-				"cacheBaseline": {"captured": True, "persistentIds": ["SECRET-INTERNAL-ID"]},
+				"stateBaseline": {"captured": True, "persistentIds": ["SECRET-INTERNAL-ID"]},
 				"notification": {"pending": False},
 			})
 
@@ -672,7 +657,7 @@ class DurableJobTests(unittest.TestCase):
 
 			self.assertEqual(len(snapshot["jobs"]), 55)
 			self.assertNotIn("superseded", {job["status"] for job in snapshot["jobs"]})
-			self.assertTrue(all("cacheBaseline" not in job for job in snapshot["jobs"]))
+			self.assertTrue(all("stateBaseline" not in job for job in snapshot["jobs"]))
 			self.assertNotIn("SECRET-INTERNAL-ID", json.dumps(snapshot))
 
 
