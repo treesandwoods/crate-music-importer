@@ -20,9 +20,9 @@ from uuid import uuid4
 
 from crate_music_importer.ipod_import import cli
 from crate_music_importer.ipod_import.constants import MANAGED_ROOT
-from crate_music_importer.ipod_import.manifest import ManagedPaths, load_manifest, save_manifest
-from crate_music_importer.ipod_import.music import delete_importer_owned_music_track, lookup_importer_owned_music_track
-from crate_music_importer.ipod_import.music_cache import MusicCacheUnavailableError, load_music_cache, remove_music_cache_tracks
+from crate_music_importer.ipod_import.manifest import ManagedPaths, file_sha256, load_manifest, save_manifest
+from crate_music_importer.ipod_import.music import delete_managed_music_track, lookup_music_track, music_binding_id
+from crate_music_importer.ipod_import.music_cache import remove_music_cache_tracks
 from crate_music_importer.ipod_import.spotify import parse_source_url
 
 
@@ -63,6 +63,13 @@ def _pid_running(pid: int) -> bool:
 	return True
 
 
+def _migrate_job(value: dict[str, Any]) -> dict[str, Any]:
+	legacy = value.pop("cacheBaseline", None)
+	if "stateBaseline" not in value and isinstance(legacy, dict):
+		value["stateBaseline"] = legacy
+	return value
+
+
 class JobStore:
 	def __init__(self, root: Path = MANAGED_ROOT):
 		self.root = Path(root)
@@ -89,7 +96,7 @@ class JobStore:
 			value = json.load(handle)
 		if not isinstance(value, dict):
 			raise ValueError(f"Invalid import job: {job_id}")
-		return value
+		return _migrate_job(value)
 
 	def list(self) -> list[dict[str, Any]]:
 		jobs: list[dict[str, Any]] = []
@@ -102,7 +109,7 @@ class JobStore:
 			except (OSError, ValueError):
 				continue
 			if isinstance(value, dict) and value.get("jobId"):
-				jobs.append(value)
+				jobs.append(_migrate_job(value))
 		return sorted(jobs, key=lambda job: str(job.get("createdAt") or ""), reverse=True)
 
 	def runner(self) -> dict[str, Any] | None:
@@ -155,7 +162,7 @@ def _new_job(
 	url: str,
 	seed: dict[str, Any] | None = None,
 	*,
-	cache_baseline: dict[str, Any] | None = None,
+	state_baseline: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
 	source_type, source_id, canonical = parse_source_url(url)
 	expected_action = f"{source_type}_combined"
@@ -225,17 +232,20 @@ def _new_job(
 		"retryable": False,
 		"logPath": None,
 		"notification": {"pending": False, "notifiedAt": None},
-		"cacheBaseline": cache_baseline or {"captured": False, "persistentIds": []},
+		"stateBaseline": state_baseline or {"captured": False, "persistentIds": []},
 		"confirmationToken": str(seed.get("confirmationToken") or "") or None,
 	}
 
 
-def _capture_cache_baseline(root: Path) -> dict[str, Any]:
+def _capture_state_baseline(root: Path) -> dict[str, Any]:
 	try:
-		cache = load_music_cache(ManagedPaths(root))
-	except MusicCacheUnavailableError:
+		manifest = load_manifest(ManagedPaths(root))
+	except (OSError, ValueError):
 		return {"captured": False, "persistentIds": []}
-	return {"captured": True, "persistentIds": sorted(cache["tracks"])}
+	return {
+		"captured": True,
+		"persistentIds": sorted({music_binding_id(recording) for recording in manifest.get("recordings", {}).values() if music_binding_id(recording)}),
+	}
 
 
 def _runner_command() -> list[str]:
@@ -296,10 +306,10 @@ def enqueue(
 	popen: Callable[..., subprocess.Popen] = subprocess.Popen,
 	retry_of: str | None = None,
 	seed: dict[str, Any] | None = None,
-	cache_baseline: dict[str, Any] | None = None,
+	state_baseline: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
 	store = JobStore(root)
-	job = _new_job(action, url, seed, cache_baseline=cache_baseline or _capture_cache_baseline(root))
+	job = _new_job(action, url, seed, state_baseline=state_baseline or _capture_state_baseline(root))
 	if retry_of:
 		job["retryOf"] = retry_of
 	with store.enqueue_lock():
@@ -360,8 +370,8 @@ def _delete_source_progress(
 	job: dict[str, Any],
 	store: JobStore,
 	*,
-	delete_music: Callable[[str, str], bool] = delete_importer_owned_music_track,
-	lookup_imported: Callable[[str], dict[str, Any] | None] = lookup_importer_owned_music_track,
+	delete_music: Callable[[str, Path], bool] = delete_managed_music_track,
+	exact_lookup: Callable[[str], dict[str, Any] | None] = lookup_music_track,
 ) -> dict[str, int]:
 	paths = ManagedPaths(store.root)
 	manifest = load_manifest(paths)
@@ -373,12 +383,12 @@ def _delete_source_progress(
 	source_value = collection.pop(source_id, None)
 	if not isinstance(source_value, dict):
 		return {"recordings": 0, "files": 0, "music_tracks": 0, "cache_entries": 0}
-	baseline = job.get("cacheBaseline") or {}
+	baseline = job.get("stateBaseline") or {}
 	baseline_captured = baseline.get("captured") is True
 	protected_ids = {str(value) for value in baseline.get("persistentIds") or [] if str(value)}
 
 	deleted_files = 0
-	if source_type == "playlist" and source_value.get("m3u8_tool_owned"):
+	if source_type == "playlist" and source_value.get("m3u8_managed_by_crate"):
 		deleted_files += int(_delete_managed_file(store.root, str(source_value.get("m3u8_relative_path") or "")))
 	affected_ids = {str(item.get("recording_id") or "") for item in source_value.get("items") or []}
 	deleted_recordings = 0
@@ -392,29 +402,27 @@ def _delete_source_progress(
 		memberships.pop(source_id, None)
 		if recording.get("album_memberships") or recording.get("playlist_memberships"):
 			continue
-		music = recording.get("music") or {}
-		active = recording.get("active_reference") or {}
-		persistent_id = str(music.get("persistent_id") or active.get("persistent_id") or "")
+		persistent_id = music_binding_id(recording)
 		if persistent_id in protected_ids:
 			continue
-		music_source = str(music.get("source") or "")
-		importer_owned = music_source in {"managed_import", "managed_album_import", "managed_album_upgrade"}
-		if persistent_id:
-			if not baseline_captured or not importer_owned:
-				continue
-			deleted_music_tracks += int(delete_music(persistent_id, recording_id))
-			cache_ids_to_remove.add(persistent_id)
-		elif baseline_captured and recording.get("music_import_pending"):
-			candidate = lookup_imported(recording_id)
-			candidate_id = str((candidate or {}).get("persistent_id") or "")
-			if candidate_id in protected_ids:
-				continue
-			if candidate_id:
-				deleted_music_tracks += int(delete_music(candidate_id, recording_id))
-				cache_ids_to_remove.add(candidate_id)
 		managed = recording.get("managed_file") or {}
-		if managed.get("tool_owned"):
+		managed_path = (store.root / str(managed.get("relative_path") or "")).resolve()
+		managed_proven = bool(
+			managed.get("managed_by_crate")
+			and managed.get("sha256")
+			and managed_path.is_file()
+			and file_sha256(managed_path) == str(managed.get("sha256") or "")
+		)
+		if persistent_id and baseline_captured and managed_proven:
+			track = exact_lookup(persistent_id)
+			track_path = Path(str((track or {}).get("location") or "")).resolve() if (track or {}).get("location") else None
+			if track_path == managed_path:
+				deleted_music_tracks += int(delete_music(persistent_id, managed_path))
+				cache_ids_to_remove.add(persistent_id)
+		if managed_proven:
 			deleted_files += int(_delete_managed_file(store.root, str(managed.get("relative_path") or "")))
+		elif managed.get("relative_path"):
+			continue
 		staging = paths.staging / recording_id
 		if staging.is_dir():
 			shutil.rmtree(staging)
@@ -441,8 +449,8 @@ def cancel_incomplete(
 	root: Path = MANAGED_ROOT,
 	terminate: Callable[[int], None] = _terminate_runner,
 	popen: Callable[..., subprocess.Popen] = subprocess.Popen,
-	delete_music: Callable[[str, str], bool] = delete_importer_owned_music_track,
-	lookup_imported: Callable[[str], dict[str, Any] | None] = lookup_importer_owned_music_track,
+	delete_music: Callable[[str, Path], bool] = delete_managed_music_track,
+	exact_lookup: Callable[[str], dict[str, Any] | None] = lookup_music_track,
 ) -> dict[str, Any]:
 	store = JobStore(root)
 	job = store.load(job_id)
@@ -478,7 +486,7 @@ def cancel_incomplete(
 		removed = (
 			{"recordings": 0, "files": 0, "music_tracks": 0, "cache_entries": 0}
 			if job.get("action") == "playlist_update_combined"
-			else _delete_source_progress(job, store, delete_music=delete_music, lookup_imported=lookup_imported)
+			else _delete_source_progress(job, store, delete_music=delete_music, exact_lookup=exact_lookup)
 		)
 		removed_job_ids: list[str] = []
 		for existing in store.list():
@@ -514,8 +522,8 @@ def cancel_source_progress(
 	source_id: str,
 	*,
 	root: Path = MANAGED_ROOT,
-	delete_music: Callable[[str, str], bool] = delete_importer_owned_music_track,
-	lookup_imported: Callable[[str], dict[str, Any] | None] = lookup_importer_owned_music_track,
+	delete_music: Callable[[str, Path], bool] = delete_managed_music_track,
+	exact_lookup: Callable[[str], dict[str, Any] | None] = lookup_music_track,
 ) -> dict[str, Any]:
 	"""Remove an incomplete saved source even when its legacy job was marked complete."""
 	if source_type not in {"album", "playlist"}:
@@ -542,14 +550,11 @@ def cancel_source_progress(
 			recording = manifest.get("recordings", {}).get(item.get("recording_id"))
 			if not isinstance(recording, dict):
 				return False
-			active = recording.get("active_reference") or {}
-			return active.get("kind") == "existing_music" or bool(
-				active.get("kind") == "managed_file" and (recording.get("music") or {}).get("persistent_id")
-			)
+			return bool(music_binding_id(recording))
 		fully_imported = bool(items) and all(item_fully_imported(item) for item in items)
 		if fully_imported:
 			raise ValueError("A completed import cannot be cancelled or have its progress removed.")
-		baseline_values = [job.get("cacheBaseline") or {} for job in matching_jobs]
+		baseline_values = [job.get("stateBaseline") or {} for job in matching_jobs]
 		job_like = {
 			"source": {
 				"type": source_type,
@@ -557,7 +562,7 @@ def cancel_source_progress(
 				"name": str(source_value.get("name") or "Spotify source"),
 				"url": str(source_value.get("spotify_url") or ""),
 			},
-			"cacheBaseline": {
+			"stateBaseline": {
 				"captured": any(value.get("captured") is True for value in baseline_values),
 				"persistentIds": sorted({
 					str(persistent_id)
@@ -567,7 +572,7 @@ def cancel_source_progress(
 				}),
 			},
 		}
-		removed = _delete_source_progress(job_like, store, delete_music=delete_music, lookup_imported=lookup_imported)
+		removed = _delete_source_progress(job_like, store, delete_music=delete_music, exact_lookup=exact_lookup)
 		removed_job_ids: list[str] = []
 		for job in matching_jobs:
 			if job.get("status") == "complete":
@@ -611,7 +616,7 @@ def retry_job(
 			"tracks": original.get("tracks") or [],
 			"confirmationToken": original.get("confirmationToken"),
 		},
-		cache_baseline=original.get("cacheBaseline") or {"captured": False, "persistentIds": []},
+		state_baseline=original.get("stateBaseline") or {"captured": False, "persistentIds": []},
 	)
 	original["status"] = "superseded"
 	original["phase"] = "superseded"
@@ -656,11 +661,10 @@ def _track_state(recording: dict[str, Any], *, current_id: str | None, current_s
 		return "needs_approval"
 	if recording.get("last_error"):
 		return "failed"
-	active = recording.get("active_reference") or {}
-	if active.get("kind") == "existing_music":
+	if music_binding_id(recording):
 		return "reused"
-	if active.get("kind") == "managed_file":
-		return "complete" if (recording.get("music") or {}).get("persistent_id") else "downloaded"
+	if (recording.get("managed_file") or {}).get("relative_path"):
+		return "downloaded"
 	if (recording.get("youtube") or {}).get("url"):
 		return "youtube_match_found"
 	return "not_started"
@@ -849,7 +853,7 @@ class JobLogWriter:
 			_set_current_track(self.job, self.store, line.split(":", 1)[1], "searching_youtube")
 		elif line.startswith(("Downloading album track:", "Downloading:")):
 			_set_current_track(self.job, self.store, line.split(":", 1)[1], "downloading")
-		elif line.startswith("Upgrading importer-owned MP3") or "ffmpeg" in line.casefold():
+		elif line.startswith("Upgrading Crate-managed MP3") or "ffmpeg" in line.casefold():
 			self.job["phase"] = "tagging"
 			sync_from_manifest(self.job, self.store)
 		elif line.startswith(("Needs review:", "Resumable failure:")):
@@ -1067,6 +1071,7 @@ def _same_source(left: dict[str, Any], right: dict[str, Any]) -> bool:
 def public_job(job: dict[str, Any]) -> dict[str, Any]:
 	"""Remove internal recovery data that the Raycast UI never reads."""
 	value = dict(job)
+	value.pop("stateBaseline", None)
 	value.pop("cacheBaseline", None)
 	value.pop("runnerPid", None)
 	value.pop("queueSequence", None)

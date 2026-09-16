@@ -267,7 +267,7 @@ class MediaFixtureTests(unittest.TestCase):
 			recording["managed_file"] = {
 				"relative_path": "tracks/changed-audio.mp3",
 				"sha256": "0" * 64,
-				"tool_owned": True,
+				"managed_by_crate": True,
 				"metadata_profile": "playlist",
 			}
 			with self.assertRaisesRegex(MediaError, "Managed file hash changed"):

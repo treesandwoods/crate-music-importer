@@ -144,7 +144,7 @@ def run_worker(paths: ManagedPaths, run_id: str) -> None:
 			state.update(phase="Refreshing preview index", updatedAt=_now())
 			with _lock(paths):
 				_save(paths, state)
-			refresh_music_cache(paths, manifest, music_tracks)
+			refresh_music_cache(paths, music_tracks)
 			report = build_health_report(paths, manifest, music_tracks, on_progress=progress, deep_all=state["mode"] == "deep")
 	except Exception as exc:
 		report = failed_health_report(str(exc))

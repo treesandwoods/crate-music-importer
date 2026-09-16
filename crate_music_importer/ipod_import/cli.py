@@ -12,10 +12,9 @@ from typing import Any, Callable
 from crate_music_importer.ipod_import.constants import MANAGED_ROOT
 from crate_music_importer.ipod_import.manifest import ManagedPaths, backfill_playlist_urls, load_manifest, save_manifest, update_manifest
 from crate_music_importer.ipod_import.media import check_tools
-from crate_music_importer.ipod_import.music import load_music_fixture, lookup_importer_owned_music_track, lookup_music_track, scan_music_library_for_health, verify_music_tracks
+from crate_music_importer.ipod_import.music import load_music_fixture, lookup_music_track, music_binding_id, scan_music_library_for_health, verify_music_tracks
 from crate_music_importer.ipod_import.music_cache import (
 	load_music_cache,
-	mark_music_cache_entry_stale,
 	music_cache_tracks,
 	remove_music_cache_tracks,
 	refresh_music_cache,
@@ -131,7 +130,7 @@ def _parser() -> argparse.ArgumentParser:
 	audit.add_argument("--status-only", action="store_true")
 	health = subparsers.add_parser("health", help="Read-only Music library health and local audio diagnostics.")
 	health.add_argument("--confirm-read-only-scan", action="store_true", required=True)
-	health.add_argument("--deep-all", action="store_true", help="Also fully decode user-owned local audio.")
+	health.add_argument("--deep-all", action="store_true", help="Also fully decode every local Music file.")
 	health.add_argument("--json", action="store_true")
 
 	deps = subparsers.add_parser("dependencies", help="Check or deliberately update Homebrew downloader tools.")
@@ -381,7 +380,7 @@ def _run(
 		try:
 			manifest = load_manifest(paths)
 			music_tracks = scan_music_library_for_health()
-			refresh_music_cache(paths, manifest, music_tracks)
+			refresh_music_cache(paths, music_tracks)
 			result = build_health_report(paths, manifest, music_tracks, on_progress=on_progress, deep_all=args.deep_all)
 		except Exception as exc:
 			result = failed_health_report(str(exc))
@@ -455,11 +454,11 @@ def _run(
 		print("Finder/iPod sync settings were not touched.")
 		return 0
 	if args.command == "status":
-		managed = sum(1 for recording in manifest["recordings"].values() if (recording.get("active_reference") or {}).get("kind") == "managed_file")
-		reused = sum(1 for recording in manifest["recordings"].values() if (recording.get("active_reference") or {}).get("kind") == "existing_music")
+		managed = sum(1 for recording in manifest["recordings"].values() if (recording.get("managed_file") or {}).get("managed_by_crate"))
+		resolved = sum(1 for recording in manifest["recordings"].values() if music_binding_id(recording))
 		unresolved = len(_review_rows(manifest, None))
 		print(f"Managed root: {paths.root}")
-		print(f"Albums: {len(manifest.get('albums', {}))}; playlists: {len(manifest['playlists'])}; recordings: {len(manifest['recordings'])}; managed: {managed}; reused Music: {reused}; unresolved: {unresolved}")
+		print(f"Albums: {len(manifest.get('albums', {}))}; playlists: {len(manifest['playlists'])}; recordings: {len(manifest['recordings'])}; managed files: {managed}; resolved in Music: {resolved}; unresolved: {unresolved}")
 		return 0
 	if args.command in ("preview", "dry-run"):
 		_progress(on_progress, "loading_metadata", source_type="playlist")
@@ -506,14 +505,12 @@ def _run(
 			on_progress=on_progress,
 			exact_lookup=lookup_music_track,
 			cache_updater=lambda track: upsert_music_cache_track(paths, track),
-			mark_stale=lambda persistent_id, reason: mark_music_cache_entry_stale(paths, persistent_id, reason),
 			cache_remover=lambda persistent_ids: remove_music_cache_tracks(paths, persistent_ids),
-			owned_lookup=lookup_importer_owned_music_track,
 			verify_music=verify_music_tracks,
 		)
 		print(
 			f"Music album updated: {result['track_count']} tracks; {result['new_imports']} new imports; "
-			f"{result['updated_tracks']} importer-owned playlist items upgraded in place; {result['reused_tracks']} existing album tracks reused; "
+			f"{result['updated_tracks']} Crate-managed files updated in place; {result['reused_tracks']} existing album tracks reused; "
 			f"{result.get('stability_recoveries', 0)} Music additions recovered by Crate Music Importer."
 		)
 		print("No album playlist was created. Existing Spotify playlists keep using the same Music track IDs. Finder/iPod sync settings were not touched.")
@@ -548,7 +545,6 @@ def _run(
 			on_progress=on_progress,
 			exact_lookup=lookup_music_track,
 			cache_updater=lambda track: upsert_music_cache_track(paths, track),
-			mark_stale=lambda persistent_id, reason: mark_music_cache_entry_stale(paths, persistent_id, reason),
 		)
 		print(f"Music playlist updated: {result['track_count']} ordered entries; {result['new_imports']} new managed MP3 imports.")
 		print("Finder/iPod sync settings were not touched. Use the normal whole-library sync later; the iPod need not be connected now.")
@@ -589,7 +585,7 @@ def _run(
 				if review:
 					print(f"PROBLEM: {review.get('message') or review.get('kind')}")
 					for number, candidate in enumerate(review.get("candidates") or [], start=1):
-						if review.get("kind") in ("music_ambiguity", "album_conflict", "album_release_conflict", "album_duplicate_conflict"):
+						if review.get("kind") in ("music_ambiguity", "album_identity_mismatch", "album_identity_conflict"):
 							print(
 								f"  {number}. Music PID {candidate.get('persistent_id') or '?'} | score {candidate.get('score') or '?'} | "
 								f"{candidate.get('artist') or ''} - {candidate.get('title') or candidate.get('name') or ''} | "
@@ -603,8 +599,8 @@ def _run(
 							)
 				if row.get("last_error"):
 					print(f"LAST FAILURE: {row['last_error']}")
-					if review.get("kind") in ("album_conflict", "album_release_conflict", "album_duplicate_conflict"):
-						print("TO RESOLVE: choose which album release should be canonical; the tool will not edit a user-owned track or create a silent duplicate.")
+					if review.get("kind") in ("album_identity_mismatch", "album_identity_conflict"):
+						print("TO RESOLVE: choose the Music track carrying the requested album identity; Crate will not modify an unregistered physical file.")
 					else:
 						print("TO RESOLVE IN RAYCAST: open Import Activity & Problems and choose a verified recording.")
 			if not rows:
@@ -630,7 +626,7 @@ def _run(
 	if args.command == "promote":
 		recording = promote_recording(manifest, args.recording_id, args.music_persistent_id, music_cache_tracks(load_music_cache(paths)), paths)
 		print(f"Promoted {recording['recording_id']} to Music persistent ID {args.music_persistent_id}.")
-		print("The tool-owned loose MP3 was marked as a retirement candidate but was not deleted.")
+		print("The recording binding changed. No Music track or physical file was deleted.")
 		return 0
 	return 1
 

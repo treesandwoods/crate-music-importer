@@ -9,11 +9,9 @@ from typing import Any, Callable
 from crate_music_importer.ipod_import.constants import MUSIC_CONFIDENCE_MIN
 from crate_music_importer.ipod_import.identity import clean_release_labels, normalize_text, score_music_candidate
 from crate_music_importer.ipod_import.manifest import ManagedPaths, load_manifest, save_manifest, update_manifest
-from crate_music_importer.ipod_import.media import recover_moved_managed_file
-from crate_music_importer.ipod_import.music import MusicIndex, lookup_music_track
+from crate_music_importer.ipod_import.music import MusicIndex, bind_recording_to_music, lookup_music_track, music_binding_id
 from crate_music_importer.ipod_import.music_cache import (
 	load_music_cache,
-	mark_music_cache_entry_stale,
 	music_cache_tracks,
 	upsert_music_cache_track,
 	validate_exact_track,
@@ -21,8 +19,8 @@ from crate_music_importer.ipod_import.music_cache import (
 from crate_music_importer.ipod_import.youtube import inspect_manual_url, score_candidate, search_candidates, rank_candidates
 
 
-BLOCKED_REVIEW_KINDS = {"album_conflict", "album_release_conflict"}
-CHOICE_REVIEW_KINDS = {"youtube_missing", "youtube_ambiguity", "music_ambiguity", "album_conflict", "album_duplicate_conflict"}
+BLOCKED_REVIEW_KINDS = {"album_identity_conflict"}
+CHOICE_REVIEW_KINDS = {"youtube_missing", "youtube_ambiguity", "music_ambiguity", "album_identity_mismatch"}
 STALE_AUTOMATCH_ERROR = "No YouTube result scored strictly above 0.87."
 
 
@@ -93,17 +91,6 @@ def _recording_sources(manifest: dict[str, Any], recording: dict[str, Any]) -> l
 	return sources
 
 
-def _is_importer_owned(recording: dict[str, Any], candidate: dict[str, Any]) -> bool:
-	comment = str(candidate.get("comment") or "")
-	if f"recording_id={recording['recording_id']}" in comment:
-		return True
-	music = recording.get("music") or {}
-	return (
-		str(candidate.get("persistent_id") or "") == str(music.get("persistent_id") or "")
-		and str(music.get("source") or "") in ("managed_import", "managed_album_import", "managed_album_upgrade")
-	)
-
-
 def _candidate_matches_album(candidate: dict[str, Any], album_names: set[str]) -> bool:
 	album = normalize_text(clean_release_labels(candidate.get("album")))
 	return bool(album and album in album_names)
@@ -131,7 +118,6 @@ def _music_candidate(
 	*,
 	review_kind: str,
 	album_names: set[str],
-	paths: ManagedPaths,
 ) -> dict[str, Any]:
 	scored = dict(candidate)
 	if scored.get("score") is None:
@@ -139,19 +125,10 @@ def _music_candidate(
 		scored["score"] = round(candidate_score, 4)
 		scored["reasons"] = list(scored.get("reasons") or []) + score_reasons
 	candidate = scored
-	owned = _is_importer_owned(recording, candidate)
 	album_match = not album_names or _candidate_matches_album(candidate, album_names)
 	selectable = bool(candidate.get("persistent_id")) and float(candidate.get("score") or 0) >= MUSIC_CONFIDENCE_MIN
-	promotion_eligible = bool(
-		review_kind == "album_conflict"
-		and owned
-		and normalize_text(candidate.get("album")) == "playlist imports"
-		and recover_moved_managed_file(recording, candidate, paths)
-	)
 	if album_names:
-		selectable = selectable and (album_match or promotion_eligible)
-	if review_kind == "album_duplicate_conflict":
-		selectable = selectable and not owned and album_match
+		selectable = selectable and album_match
 	return {
 		"kind": "music",
 		"id": str(candidate.get("persistent_id") or ""),
@@ -162,9 +139,7 @@ def _music_candidate(
 		"score": candidate.get("score"),
 		"location": candidate.get("location"),
 		"reasons": list(candidate.get("reasons") or []),
-		"importerOwned": owned,
 		"albumMatch": album_match,
-		"promotionEligible": promotion_eligible,
 		"selectable": selectable,
 	}
 
@@ -196,7 +171,7 @@ def _problem_row(manifest: dict[str, Any], key: str, recording: dict[str, Any], 
 		]
 		if scoped_sources:
 			sources = scoped_sources
-	if kind in ("album_conflict", "album_release_conflict", "album_duplicate_conflict"):
+	if kind in ("album_identity_mismatch", "album_identity_conflict"):
 		sources = [source for source in sources if source["type"] == "album"]
 	album_names = {
 		normalize_text(clean_release_labels(source["name"]))
@@ -212,13 +187,13 @@ def _problem_row(manifest: dict[str, Any], key: str, recording: dict[str, Any], 
 			candidates.append(_youtube_candidate(candidate))
 		else:
 			candidates.append(
-				_music_candidate(recording, candidate, review_kind=kind, album_names=album_names, paths=paths)
+				_music_candidate(recording, candidate, review_kind=kind, album_names=album_names)
 			)
 	if kind in ("youtube_missing", "youtube_ambiguity"):
 		# The candidate screen can run a fresh search or accept a direct URL even
 		# when the automatic search saved no candidates.
 		state = "needs_choice"
-	elif kind in BLOCKED_REVIEW_KINDS and not any(candidate.get("promotionEligible") for candidate in candidates):
+	elif kind in BLOCKED_REVIEW_KINDS:
 		state = "blocked"
 	elif kind in CHOICE_REVIEW_KINDS:
 		state = "needs_choice" if any(candidate.get("selectable") for candidate in candidates) else "blocked"
@@ -246,15 +221,7 @@ def _problem_row(manifest: dict[str, Any], key: str, recording: dict[str, Any], 
 
 
 def _recording_complete(recording: dict[str, Any], source_type: str, source_id: str) -> bool:
-	active = recording.get("active_reference") or {}
-	if active.get("kind") == "existing_music":
-		return True
-	if active.get("kind") != "managed_file" or not (recording.get("music") or {}).get("persistent_id"):
-		return False
-	if source_type == "album":
-		managed = recording.get("managed_file") or {}
-		return bool(managed.get("metadata_profile") == "album" and str(managed.get("spotify_album_id") or "") == source_id)
-	return True
+	return bool(music_binding_id(recording))
 
 
 def _active_job(paths: ManagedPaths, source_type: str, source_id: str) -> dict[str, Any] | None:
@@ -387,8 +354,8 @@ def resolve_youtube(
 	previous_kind = str((recording.get("review") or {}).get("kind") or "")
 	if not _youtube_choice_can_resolve(recording):
 		raise ValueError("Choosing another YouTube recording cannot resolve this managed-file failure.")
-	if previous_kind in BLOCKED_REVIEW_KINDS or previous_kind == "album_duplicate_conflict":
-		raise ValueError("This album conflict cannot be resolved with a YouTube recording under the no-duplicate policy.")
+	if previous_kind in BLOCKED_REVIEW_KINDS or previous_kind == "album_identity_mismatch":
+		raise ValueError("This album identity problem must be resolved with a matching Music track.")
 	if previous_kind == "music_ambiguity" and not allow_music_override:
 		raise ValueError("Choose one of the displayed Music tracks; a new duplicate download is not allowed.")
 	candidate = inspect(youtube_url)
@@ -404,8 +371,8 @@ def resolve_youtube(
 		latest_kind = str((latest_recording.get("review") or {}).get("kind") or "")
 		if not _youtube_choice_can_resolve(latest_recording):
 			raise ValueError("Choosing another YouTube recording cannot resolve this managed-file failure.")
-		if latest_kind in BLOCKED_REVIEW_KINDS or latest_kind == "album_duplicate_conflict":
-			raise ValueError("This album conflict cannot be resolved with a YouTube recording under the no-duplicate policy.")
+		if latest_kind in BLOCKED_REVIEW_KINDS or latest_kind == "album_identity_mismatch":
+			raise ValueError("This album identity problem must be resolved with a matching Music track.")
 		if latest_kind == "music_ambiguity" and not allow_music_override:
 			raise ValueError("Choose one of the displayed Music tracks; a new duplicate download is not allowed.")
 		latest_recording["youtube"] = copy.deepcopy(candidate)
@@ -431,7 +398,7 @@ def resolve_music(
 	recording = manifest["recordings"][key]
 	review = recording.get("review") or {}
 	review_kind = str(review.get("kind") or "")
-	if review_kind not in ("music_ambiguity", "album_conflict", "album_duplicate_conflict"):
+	if review_kind not in ("music_ambiguity", "album_identity_mismatch"):
 		raise ValueError("This recording does not currently have a selectable Music-library problem.")
 	displayed_ids = {str(candidate.get("persistent_id") or "") for candidate in review.get("candidates") or []}
 	if persistent_id not in displayed_ids:
@@ -439,13 +406,11 @@ def resolve_music(
 	index = MusicIndex(scan() if scan else music_cache_tracks(load_music_cache(paths)))
 	cached = index.by_persistent_id.get(persistent_id)
 	if not cached:
-		raise ValueError("The selected Music track is no longer present in the Music library cache. Refresh Library Health.")
+		raise ValueError("The selected Music track is no longer present in Music.app.")
 	candidate = cached if scan else lookup_music_track(persistent_id)
 	valid, reason = validate_exact_track(cached, candidate)
 	if not valid:
-		if not scan:
-			mark_music_cache_entry_stale(paths, persistent_id, reason)
-		raise ValueError(f"The selected Music track changed: {reason}. Refresh Library Health.")
+		raise ValueError(f"The selected Music track changed: {reason}.")
 	assert candidate is not None
 	score, reasons = score_music_candidate(recording["source_metadata"], candidate)
 	if score < MUSIC_CONFIDENCE_MIN:
@@ -455,41 +420,9 @@ def resolve_music(
 		for album_id in recording.get("album_memberships", {})
 		if album_id in manifest.get("albums", {})
 	}
-	promotion_candidate = dict(candidate)
-	if not promotion_candidate.get("location") and cached.get("location"):
-		# Exact Music lookups can omit a cloud-managed file location even when the
-		# full cache scan captured it. The cache path is accepted only after the
-		# exact persistent ID/metadata check above and the managed SHA check below.
-		promotion_candidate["location"] = cached["location"]
-	promotion_path = recover_moved_managed_file(recording, promotion_candidate, paths) if review_kind == "album_conflict" else None
-	if review_kind == "album_conflict" and not (
-		promotion_path
-		and _is_importer_owned(recording, candidate)
-		and normalize_text(candidate.get("album")) == "playlist imports"
-	):
-		raise ValueError("Only the exact importer-owned Playlist Imports track can be promoted to this album.")
-	if album_names and not _candidate_matches_album(candidate, album_names) and not promotion_path:
+	if album_names and not _candidate_matches_album(candidate, album_names):
 		raise ValueError("The selected Music track does not carry the requested album identity; choosing it would not safely resolve this album.")
-	if review_kind == "album_duplicate_conflict" and _is_importer_owned(recording, candidate):
-		raise ValueError("Choose the proper existing album copy, not the importer-owned duplicate.")
-	recording["music"] = {
-		"source": "existing_album_library" if album_names else "existing_library",
-		"persistent_id": candidate.get("persistent_id"),
-		"database_id": candidate.get("database_id"),
-		"location": candidate.get("location") or cached.get("location"),
-		"matched_score": round(score, 4),
-	}
-	if promotion_path:
-		recording["music"]["source"] = "managed_import"
-		recording["active_reference"] = {"kind": "managed_file", "relative_path": promotion_path}
-	else:
-		recording["active_reference"] = {"kind": "existing_music", "persistent_id": persistent_id}
-	managed = recording.get("managed_file") or {}
-	if review_kind == "album_duplicate_conflict" and managed.get("tool_owned"):
-		managed["retirement_candidate"] = True
-		promotion = recording.setdefault("promotion", {})
-		promotion["superseded_by_music_persistent_id"] = persistent_id
-		promotion["tool_owned_loose_file_retirement_candidate"] = True
+	bind_recording_to_music(recording, candidate)
 	recording.pop("review", None)
 	recording.pop("last_error", None)
 	if not scan:
@@ -498,5 +431,5 @@ def resolve_music(
 	resolved = dict(candidate, score=round(score, 4), reasons=reasons)
 	return {
 		"recordingId": key,
-		"candidate": _music_candidate(recording, resolved, review_kind=review_kind, album_names=album_names, paths=paths),
+		"candidate": _music_candidate(recording, resolved, review_kind=review_kind, album_names=album_names),
 	}

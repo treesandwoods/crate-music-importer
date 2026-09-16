@@ -176,7 +176,6 @@ export interface HealthIssue {
   id: string;
   severity: "critical" | "warning" | "informational";
   category: string;
-  ownership: "importer_owned" | "importer_referenced" | "user_owned" | "untracked" | "ambiguous";
   title: string;
   detail: string;
   persistentIds: string[];

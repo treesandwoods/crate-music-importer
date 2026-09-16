@@ -41,7 +41,7 @@ function previewStage(row: PreviewRow): { label: string; icon: Icon; color: Colo
   }
   if (row.status === "reused_music") {
     return {
-      label: row.match_kind === "importer_owned" ? "Existing importer-owned match" : "Existing Music match",
+      label: "Existing Music match",
       icon: Icon.Music,
       color: Color.Green,
     };

@@ -18,15 +18,17 @@ from crate_music_importer.ipod_import.media import audio_sha256, extract_embedde
 from crate_music_importer.ipod_import.music import (
 	MusicAutomationError,
 	MusicIndex,
-	delete_importer_owned_music_track,
+	bind_recording_to_music,
+	delete_managed_music_track,
 	edit_music_playlist_membership,
 	import_managed_file,
-	lookup_importer_owned_music_track,
+	music_binding_id,
 	playlist_membership,
 	playlist_status,
+	reconcile_recording_music,
 	update_managed_music_artwork,
 )
-from crate_music_importer.ipod_import.music_cache import cache_track_for_recording, validate_exact_track
+from crate_music_importer.ipod_import.music_cache import validate_exact_track
 
 
 ProgressCallback = Callable[[dict[str, Any]], None]
@@ -138,23 +140,21 @@ def _delete_kind(manifest: dict[str, Any], playlist_id: str, recording_id: str, 
 	recording = manifest.get("recordings", {}).get(recording_id) or {}
 	other_playlists = set((recording.get("playlist_memberships") or {}).keys()) - {playlist_id}
 	managed = recording.get("managed_file") or {}
-	active = recording.get("active_reference") or {}
 	sole_playlist_import = (
 		recording_id not in surviving_ids
 		and not other_playlists
 		and not (recording.get("album_memberships") or {})
 		and not recording.get("album_metadata")
-		and bool(managed.get("tool_owned"))
+		and bool(managed.get("managed_by_crate"))
 		and bool(managed.get("audio_sha256"))
-		and active.get("kind") == "managed_file"
+		and bool(music_binding_id(recording))
 	)
 	return "delete" if sole_playlist_import else "unlink"
 
 
 def _recording_persistent_id(manifest: dict[str, Any], recording_id: str) -> str:
 	recording = manifest.get("recordings", {}).get(recording_id) or {}
-	active = recording.get("active_reference") or {}
-	return str((recording.get("music") or {}).get("persistent_id") or active.get("persistent_id") or "")
+	return music_binding_id(recording)
 
 
 def _spotify_reorders(manifest: dict[str, Any], snapshot: list[dict[str, Any]], addition_positions: set[int]) -> list[dict[str, Any]]:
@@ -496,7 +496,7 @@ def _validate_permanent_deletions(
 	paths: ManagedPaths,
 	*,
 	audio_hasher: Callable[[Path], str],
-	owned_lookup: Callable[[str], dict[str, Any] | None],
+	exact_lookup: ExactMusicLookup,
 ) -> None:
 	for removal in removals:
 		if removal.get("action") != "delete":
@@ -504,15 +504,16 @@ def _validate_permanent_deletions(
 		recording_id = str(removal.get("recording_id") or "")
 		recording = manifest.get("recordings", {}).get(recording_id) or {}
 		managed = recording.get("managed_file") or {}
-		if not managed.get("tool_owned") or not managed.get("audio_sha256"):
-			raise MusicAutomationError("Permanent deletion is missing importer ownership or encoded-audio proof. Stopped before changing Music.")
+		if not managed.get("managed_by_crate") or not managed.get("audio_sha256"):
+			raise MusicAutomationError("Permanent deletion is missing Crate-managed file provenance or encoded-audio proof. Stopped before changing Music.")
 		path = (paths.root / str(managed.get("relative_path") or "")).resolve()
 		if not path.is_file() or audio_hasher(path) != str(managed.get("audio_sha256") or ""):
 			raise MusicAutomationError("A permanently deleted candidate's encoded audio no longer matches its saved proof. Stopped before changing Music.")
-		persistent_id = str((recording.get("music") or {}).get("persistent_id") or "")
-		owned = owned_lookup(recording_id)
-		if not persistent_id or not owned or str(owned.get("persistent_id") or "") != persistent_id:
-			raise MusicAutomationError("A permanently deleted candidate no longer has the exact importer-owned Music item. Stopped before changing Music.")
+		persistent_id = music_binding_id(recording)
+		music_track = exact_lookup(persistent_id) if persistent_id else None
+		location = Path(str((music_track or {}).get("location") or "")).resolve() if (music_track or {}).get("location") else None
+		if not persistent_id or location != path:
+			raise MusicAutomationError("A permanently deleted candidate is not the exact Music item backed by its Crate-managed file. Stopped before changing Music.")
 
 
 def _ensure_addition_ids(
@@ -537,9 +538,7 @@ def _ensure_addition_ids(
 		if key in resolved:
 			ids.append(resolved[key])
 			continue
-		active = recording.get("active_reference") or {}
-		music = recording.get("music") or {}
-		persistent_id = str(music.get("persistent_id") or active.get("persistent_id") or "")
+		persistent_id = music_binding_id(recording)
 		if persistent_id:
 			actual = exact_lookup(persistent_id)
 			expected = index.by_persistent_id.get(persistent_id) or {
@@ -549,29 +548,39 @@ def _ensure_addition_ids(
 				"duration_s": int(recording.get("source_metadata", {}).get("duration_ms") or 0) / 1000.0,
 				"comment": (actual or {}).get("comment", ""),
 			}
-			valid, reason = validate_exact_track(expected, actual, require_importer_owned=False, recording_id=key)
+			valid, reason = validate_exact_track(expected, actual)
 			if not valid:
-				raise MusicAutomationError(f"Saved Music ID {persistent_id} is no longer safe to reuse: {reason}")
-		else:
-			if active.get("kind") != "managed_file" or not _managed_exists(recording, paths):
+				reconciled = reconcile_recording_music(recording, MusicIndex([track for track in music_tracks if str(track.get("persistent_id") or "") != persistent_id]))
+				if reconciled["status"] == "ambiguous":
+					raise MusicAutomationError("A new playlist occurrence has multiple plausible Music matches and needs review.")
+				if reconciled["status"] != "resolved":
+					persistent_id = ""
+				else:
+					persistent_id = music_binding_id(recording)
+					actual = exact_lookup(persistent_id)
+					valid, reason = validate_exact_track(reconciled["candidate"], actual)
+					if not valid:
+						raise MusicAutomationError(f"Reconciled Music ID {persistent_id} is no longer safe to reuse: {reason}")
+					cache_updater(actual)
+		if not persistent_id:
+			if not _managed_exists(recording, paths):
 				raise MusicAutomationError(f"New playlist occurrence is unresolved: {recording.get('source_metadata', {}).get('title') or key}")
 			managed = recording.get("managed_file") or {}
 			path = paths.root / str(managed.get("relative_path") or "")
 			recording["music_import_pending"] = {"relative_path": managed.get("relative_path"), "started_at": _now()}
 			save_manifest(paths, manifest)
-			imported = import_managed_file(path, key)
+			imported = import_managed_file(path)
 			persistent_id = str(imported.get("persistent_id") or "")
 			if not persistent_id:
 				raise MusicAutomationError("Music did not return a persistent ID for an imported managed MP3.")
-			recording["music"] = {"source": "managed_import", **imported}
+			bind_recording_to_music(recording, imported)
 			recording.pop("music_import_pending", None)
-			cached = cache_track_for_recording(recording, imported, album_profile=False)
-			cache_updater(cached)
+			cache_updater(imported)
 			new_imports += 1
 		if recording.get("artwork_sync_pending"):
 			managed = recording.get("managed_file") or {}
 			artwork = extract_embedded_artwork(paths.root / str(managed.get("relative_path") or ""), paths.staging / key / "music-playlist-artwork.jpg")
-			update_managed_music_artwork(persistent_id, key, artwork)
+			update_managed_music_artwork(persistent_id, paths.root / str(managed.get("relative_path") or ""), artwork)
 			recording.pop("artwork_sync_pending", None)
 		recording.pop("last_error", None)
 		resolved[key] = persistent_id
@@ -594,10 +603,9 @@ def apply_playlist_update(
 	on_progress: ProgressCallback | None = None,
 	membership_reader: Callable[[str, str], list[str]] = playlist_membership,
 	membership_editor: Callable[[str, str, list[str], list[int], list[str]], list[str]] = edit_music_playlist_membership,
-	music_deleter: Callable[[str, str], bool] = delete_importer_owned_music_track,
+	music_deleter: Callable[[str, Path], bool] = delete_managed_music_track,
 	status_checker: Callable[[str, str | None], tuple[str, str | None]] = playlist_status,
 	audio_hasher: Callable[[Path], str] = audio_sha256,
-	owned_lookup: Callable[[str], dict[str, Any] | None] = lookup_importer_owned_music_track,
 ) -> dict[str, Any]:
 	playlist = manifest.get("playlists", {}).get(playlist_id)
 	if not isinstance(playlist, dict):
@@ -615,7 +623,7 @@ def apply_playlist_update(
 		raise MusicAutomationError(f"A different Music playlist now uses this name ({found_id or 'unknown ID'}). Update refused.")
 	checkpoint = pending.get("music_checkpoint")
 	if not isinstance(checkpoint, dict) or not checkpoint.get("applied_at"):
-		_validate_permanent_deletions(manifest, list(pending.get("removals") or []), paths, audio_hasher=audio_hasher, owned_lookup=owned_lookup)
+		_validate_permanent_deletions(manifest, list(pending.get("removals") or []), paths, audio_hasher=audio_hasher, exact_lookup=exact_lookup)
 	addition_items = [dict(item) for item in pending.get("addition_items") or []]
 	current = membership_reader(str(playlist.get("name") or "Spotify Playlist"), known_pid)
 	if not isinstance(checkpoint, dict):
@@ -691,11 +699,12 @@ def apply_playlist_update(
 		if recording.get("album_memberships") or recording.get("playlist_memberships"):
 			raise MusicAutomationError("A track gained another imported reference after preview. Permanent deletion stopped for attention.")
 		managed = recording.get("managed_file") or {}
-		if not managed.get("tool_owned"):
-			raise MusicAutomationError("Permanent deletion lost its importer-ownership proof. Stopped for attention.")
-		persistent_id = str((recording.get("music") or {}).get("persistent_id") or "")
+		if not managed.get("managed_by_crate"):
+			raise MusicAutomationError("Permanent deletion lost its Crate-managed file provenance. Stopped for attention.")
+		_validate_permanent_deletions(manifest, [removal], paths, audio_hasher=audio_hasher, exact_lookup=exact_lookup)
+		persistent_id = music_binding_id(recording)
 		if persistent_id:
-			music_deleter(persistent_id, recording_id)
+			music_deleter(persistent_id, (paths.root / str(managed.get("relative_path") or "")).resolve())
 			cache_remover({persistent_id})
 		_safe_delete_file(paths, str(managed.get("relative_path") or ""))
 		shutil.rmtree(paths.staging / recording_id, ignore_errors=True)

@@ -49,9 +49,7 @@ export interface ResolverCandidate {
   location?: string | null;
   reasons: string[];
   selectable: boolean;
-  importerOwned?: boolean;
   albumMatch?: boolean;
-  promotionEligible?: boolean;
 }
 
 export interface SourceReference {
@@ -132,7 +130,6 @@ export interface PreviewRow {
     | "ready_to_download"
     | "search_required";
   detail: string;
-  match_kind?: "library" | "importer_owned" | null;
   track_no?: number;
   disc_no?: number;
 }
@@ -277,7 +274,6 @@ export interface ImportJob {
   retryable: boolean;
   logPath?: string | null;
   notification?: { pending: boolean; notifiedAt?: string | null };
-  cacheBaseline?: { captured: boolean; persistentIds: string[] };
 }
 
 export interface JobsSnapshot {
