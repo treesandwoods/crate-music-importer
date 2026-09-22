@@ -9,10 +9,11 @@ from pathlib import Path
 import subprocess
 import sys
 import uuid
+from itertools import combinations
 from typing import Any
 from datetime import datetime, timezone
 
-from crate_music_importer.ipod_import.health import build_health_report, failed_health_report, save_health_report
+from crate_music_importer.ipod_import.health import DUPLICATE_DISMISSALS, apply_duplicate_dismissals, build_health_report, duplicate_pair, failed_health_report, load_duplicate_dismissals, save_health_report
 from crate_music_importer.ipod_import.manifest import ManagedPaths, load_manifest
 from crate_music_importer.ipod_import.music import scan_music_library_for_health
 from crate_music_importer.ipod_import.music_cache import refresh_music_cache
@@ -30,7 +31,7 @@ def _read(path: Path) -> dict[str, Any]:
 		return {}
 
 
-def _save(paths: ManagedPaths, state: dict[str, Any]) -> None:
+def _save(paths: ManagedPaths, state: dict[str, Any], filename: str = "health-audit.json") -> None:
 	# Reuse the report writer's fsync/replace guarantees for controller snapshots.
 	from tempfile import NamedTemporaryFile
 	temporary = None
@@ -40,7 +41,7 @@ def _save(paths: ManagedPaths, state: dict[str, Any]) -> None:
 			json.dump(state, handle)
 			handle.flush()
 			os.fsync(handle.fileno())
-		os.replace(temporary, paths.state_dir / "health-audit.json")
+		os.replace(temporary, paths.state_dir / filename)
 	finally:
 		if temporary:
 			Path(temporary).unlink(missing_ok=True)
@@ -73,6 +74,8 @@ def _load(paths: ManagedPaths, include_report: bool = True) -> dict[str, Any]:
 	}
 	interrupted = state["status"] == "running" and not _alive(state.get("pid"))
 	report = _read(paths.state_dir / "health-last-result.json") if include_report or interrupted else {}
+	if report:
+		report = apply_duplicate_dismissals(report, load_duplicate_dismissals(paths))
 	if interrupted:
 		# Recover a crash between publishing the terminal report and terminal state.
 		if state.get("reportCheckedAt") and report.get("checkedAt") == state["reportCheckedAt"]:
@@ -87,6 +90,25 @@ def _load(paths: ManagedPaths, include_report: bool = True) -> dict[str, Any]:
 def load_health_audit(paths: ManagedPaths, include_report: bool = True) -> dict[str, Any]:
 	with _lock(paths):
 		return _load(paths, include_report)
+
+
+def dismiss_duplicate_alert(paths: ManagedPaths, issue_id: str) -> dict[str, Any]:
+	with _lock(paths):
+		current = _load(paths)
+		report = current.get("lastReport") or {}
+		issue = next((item for item in report.get("issues", []) if item.get("id") == issue_id and item.get("category") == "possible_recording_duplicate"), None)
+		if issue is None:
+			raise ValueError("Possible recording duplicate finding is no longer in the saved report.")
+		ids = sorted(set(issue.get("persistentIds") or []))
+		if len(ids) < 2 or not all(ids):
+			raise ValueError("Duplicate finding has no valid persistent ID pair.")
+		pairs = load_duplicate_dismissals(paths)
+		pairs.update(duplicate_pair(left, right) for left, right in combinations(ids, 2))
+		_save(paths, {"schemaVersion": 1, "pairs": [list(pair) for pair in sorted(pairs)]}, DUPLICATE_DISMISSALS)
+		stored = _read(paths.state_dir / "health-last-result.json")
+		if stored:
+			save_health_report(paths, apply_duplicate_dismissals(stored, pairs))
+		return _load(paths)
 
 
 def start_health_audit(paths: ManagedPaths, deep_all: bool = False) -> dict[str, Any]:
@@ -153,6 +175,7 @@ def run_worker(paths: ManagedPaths, run_id: str) -> None:
 	with _lock(paths):
 		_save(paths, state)
 		try:
+			report = apply_duplicate_dismissals(report, load_duplicate_dismissals(paths))
 			save_health_report(paths, report)
 		except Exception as exc:
 			report = failed_health_report(f"Could not save audit report: {exc}")

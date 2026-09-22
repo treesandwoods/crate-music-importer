@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 from collections import defaultdict
 from datetime import datetime, timezone
+from itertools import combinations
 from pathlib import Path
 from typing import Any, Callable
 
@@ -21,6 +22,78 @@ from crate_music_importer.ipod_import.music import MusicIndex, music_binding_id,
 
 
 CHECKS = ("musicScan", "fileIntegrity", "duplicates", "manifestConsistency", "metadata", "artwork")
+DUPLICATE_DISMISSALS = "health-duplicate-dismissals.json"
+
+
+def duplicate_pair(first: str, second: str) -> tuple[str, str]:
+	return tuple(sorted((first, second)))
+
+
+def load_duplicate_dismissals(paths: ManagedPaths) -> set[tuple[str, str]]:
+	try:
+		data = json.loads((paths.state_dir / DUPLICATE_DISMISSALS).read_text(encoding="utf-8"))
+	except FileNotFoundError:
+		return set()
+	if data.get("schemaVersion") != 1 or not isinstance(data.get("pairs"), list):
+		raise ValueError("Invalid duplicate dismissal state.")
+	return {tuple(pair) for pair in data["pairs"] if isinstance(pair, list) and len(pair) == 2 and all(isinstance(pid, str) and pid for pid in pair) and pair[0] < pair[1]}
+
+
+def _eligible_duplicate_pairs(tracks: list[dict[str, Any]]) -> list[tuple[int, int]]:
+	pairs = []
+	for left, right in combinations(range(len(tracks)), 2):
+		first, second = tracks[left], tracks[right]
+		first_id, second_id = str(first.get("persistent_id") or ""), str(second.get("persistent_id") or "")
+		first_duration, second_duration = first.get("duration"), second.get("duration")
+		if not first_id or not second_id or first_id == second_id or first.get("sha256") == second.get("sha256"):
+			continue
+		if not isinstance(first_duration, (int, float)) or not isinstance(second_duration, (int, float)) or first_duration <= 0 or second_duration <= 0:
+			continue
+		if abs(first_duration - second_duration) <= max(2000, 0.02 * max(first_duration, second_duration)):
+			pairs.append((left, right))
+	return pairs
+
+
+def apply_duplicate_dismissals(report: dict[str, Any], dismissed: set[tuple[str, str]]) -> dict[str, Any]:
+	"""Filter possible recording pairs, including groups in older saved reports."""
+	if not any(issue.get("category") == "possible_recording_duplicate" for issue in report.get("issues", [])):
+		return report
+	issues = []
+	for issue in report.get("issues", []):
+		if issue.get("category") != "possible_recording_duplicate":
+			issues.append(issue)
+			continue
+		tracks = issue.get("tracks") or []
+		pairs = [(left, right) for left, right in _eligible_duplicate_pairs(tracks)
+			if duplicate_pair(str(tracks[left]["persistent_id"]), str(tracks[right]["persistent_id"])) not in dismissed]
+		adjacent: dict[int, set[int]] = defaultdict(set)
+		for left, right in pairs:
+			adjacent[left].add(right)
+			adjacent[right].add(left)
+		while adjacent:
+			start = next(iter(adjacent))
+			members, pending = set(), [start]
+			while pending:
+				current = pending.pop()
+				if current in members:
+					continue
+				members.add(current)
+				pending.extend(adjacent[current] - members)
+			for member in members:
+				adjacent.pop(member, None)
+			group = [tracks[index] for index in sorted(members)]
+			updated = {**issue, "tracks": group,
+				"persistentIds": sorted({str(track["persistent_id"]) for track in group}),
+				"paths": sorted({str(track.get("location") or "") for track in group if track.get("location")})}
+			updated.pop("id", None)
+			updated["id"] = hashlib.sha256(json.dumps(updated, sort_keys=True).encode()).hexdigest()[:20]
+			issues.append(updated)
+	report["issues"] = issues
+	if report.get("status") != "failed" and report.get("summary") is not None:
+		report["summary"]["possibleRecordingDuplicates"] = sum(issue["category"] == "possible_recording_duplicate" for issue in issues)
+		report["checks"]["duplicates"] = "attention" if any(issue["category"] in ("possible_recording_duplicate", "exact_file_duplicate", "duplicate_persistent_id") and issue["severity"] != "informational" for issue in issues) else "passed"
+		report["status"] = "attention" if any(issue["severity"] != "informational" for issue in issues) else "healthy"
+	return report
 
 
 def failed_health_report(error: str) -> dict[str, Any]:
@@ -249,7 +322,7 @@ def _build_health_report(
 		"deepDecodedFiles": deep_count,
 	}
 	report["status"] = "attention" if any(issue["severity"] != "informational" for issue in issues) else "healthy"
-	return report
+	return apply_duplicate_dismissals(report, load_duplicate_dismissals(paths))
 
 
 def _metadata_checks(path: Path, track: dict[str, Any], recording: dict[str, Any], manifest: dict[str, Any], duration: int, add: Callable[..., None]) -> None:

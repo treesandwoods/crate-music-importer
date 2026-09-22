@@ -125,7 +125,8 @@ def _parser() -> argparse.ArgumentParser:
 	album_apply.add_argument("--confirm-music-write", action="store_true", required=True)
 
 	audit = subparsers.add_parser("health-audit", help="Read or explicitly start a durable health audit.")
-	audit.add_argument("operation", choices=("status", "start"))
+	audit.add_argument("operation", choices=("status", "start", "dismiss-duplicate"))
+	audit.add_argument("issue_id", nargs="?")
 	audit.add_argument("--deep-all", action="store_true")
 	audit.add_argument("--status-only", action="store_true")
 	health = subparsers.add_parser("health", help="Read-only Music library health and local audio diagnostics.")
@@ -339,10 +340,15 @@ def _progress(callback: Callable[[dict[str, Any]], None] | None, phase: str, **v
 def run(argv: list[str] | None = None, *, on_progress: Callable[[dict[str, Any]], None] | None = None) -> int:
 	arguments = list(sys.argv[1:] if argv is None else argv)
 	if arguments[:1] == ["health-audit"]:
-		from crate_music_importer.ipod_import.health_audit import load_health_audit, start_health_audit
+		from crate_music_importer.ipod_import.health_audit import dismiss_duplicate_alert, load_health_audit, start_health_audit
 		args = _parser().parse_args(arguments)
 		paths = ManagedPaths()
-		result = start_health_audit(paths, args.deep_all) if args.operation == "start" else load_health_audit(paths, include_report=not args.status_only)
+		if args.operation == "dismiss-duplicate":
+			if not args.issue_id:
+				raise ValueError("A possible recording duplicate finding ID is required.")
+			result = dismiss_duplicate_alert(paths, args.issue_id)
+		else:
+			result = start_health_audit(paths, args.deep_all) if args.operation == "start" else load_health_audit(paths, include_report=not args.status_only)
 		print(json.dumps(result))
 		return 0
 	if arguments[:1] == ["dependencies"]:

@@ -31,7 +31,7 @@ const source = readFileSync(resolve("src/update-dependencies.tsx"), "utf8")
   )
   .replace(
     /import\s*{[^}]*}\s*from "\.\/backend";/s,
-    "const dependencyStatus = harness.status, dependencyUpdate = harness.update, loadHealthAudit = harness.health, startHealthAudit = harness.start;",
+    "const dependencyStatus = harness.status, dependencyUpdate = harness.update, loadHealthAudit = harness.health, startHealthAudit = harness.start, dismissDuplicateAlert = harness.dismiss;",
   );
 const bundled = buildSync({
   stdin: { contents: source, loader: "tsx", resolveDir: resolve("src") },
@@ -116,6 +116,7 @@ async function render(overrides: Record<string, unknown> = {}) {
     status: 0,
     health: 0,
     updates: [] as string[],
+    dismissals: [] as string[],
     confirmations: [] as Array<{ title: string; message: string }>,
   };
   const harness = {
@@ -134,6 +135,10 @@ async function render(overrides: Record<string, unknown> = {}) {
     update: async (plan: string) => {
       calls.updates.push(plan);
       return { ...dependencies(), operation: "update" };
+    },
+    dismiss: async (issueId: string) => {
+      calls.dismissals.push(issueId);
+      return auditState();
     },
     confirm: async (options: { title: string; message: string }) => {
       calls.confirmations.push(options);
@@ -390,5 +395,43 @@ test("empty saved state offers normal and deep explicit audits without waiting f
   assert.equal(deep, true);
   await act(async () => pending.resolve(dependencies()));
   assert.equal(ui.updateAction(), undefined);
+  await act(async () => ui.view.unmount());
+});
+
+test("only possible recording duplicates offer Command-D dismissal and refresh the report", async () => {
+  const possible = {
+    ...healthResult.issues[0],
+    id: "possible-pair",
+    title: "Possible recording duplicate",
+    category: "possible_recording_duplicate",
+    severity: "warning" as const,
+    persistentIds: ["ONE", "TWO"],
+  };
+  const exact = { ...possible, id: "exact", title: "Exact file duplicate", category: "exact_file_duplicate" };
+  const before = {
+    ...healthResult,
+    summary: { possibleRecordingDuplicates: 1, exactDuplicateGroups: 1 },
+    issues: [possible, exact],
+  };
+  const after = {
+    ...before,
+    summary: { possibleRecordingDuplicates: 0, exactDuplicateGroups: 1 },
+    issues: [exact],
+  };
+  const ui = await render({
+    health: async () => ({ ...auditState(), lastReport: before }),
+    dismiss: async (id: string) => {
+      ui.calls.dismissals.push(id);
+      return { ...auditState(), lastReport: after };
+    },
+  });
+  const action = ui.actions().find((item) => item.props.title === "Dismiss Duplicate Alert")!;
+  assert.deepEqual(action.props.shortcut, { modifiers: ["cmd"], key: "d" });
+  assert.equal(ui.actions().filter((item) => item.props.title === "Dismiss Duplicate Alert").length, 1);
+  await act(async () => action.props.onAction());
+  assert.deepEqual(ui.calls.dismissals, ["possible-pair"]);
+  assert.doesNotMatch(ui.text(), /# Possible recording duplicate\n/);
+  assert.match(ui.text(), /Exact file duplicate/);
+  assert.match(ui.text(), /Possible recording duplicates: 0/);
   await act(async () => ui.view.unmount());
 });

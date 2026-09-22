@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   dependencyStatus,
   dependencyUpdate,
+  dismissDuplicateAlert,
   loadHealthAudit,
   startHealthAudit,
   type HealthAuditState,
@@ -29,11 +30,13 @@ export default function Command() {
   const [health, setHealth] = useState<HealthResult>();
   const [result, setResult] = useState<DependencyResult>();
   const [healthError, setHealthError] = useState("");
+  const [dismissError, setDismissError] = useState("");
   const [dependencyError, setDependencyError] = useState("");
   const [updateResult, setUpdateResult] = useState<DependencyResult>();
   const started = useRef(false);
   const operation = useRef(false);
   const healthRunning = useRef(false);
+  const dismissing = useRef(false);
   const dependenciesRunning = useRef(false);
 
   function acceptAudit(value: HealthAuditState) {
@@ -55,6 +58,18 @@ export default function Command() {
       setHealthBusy(false);
     } finally {
       healthRunning.current = false;
+    }
+  }
+  async function dismissDuplicate(issueId: string) {
+    if (dismissing.current) return;
+    dismissing.current = true;
+    setDismissError("");
+    try {
+      acceptAudit(await dismissDuplicateAlert(issueId));
+    } catch (error) {
+      setDismissError(String(error));
+    } finally {
+      dismissing.current = false;
     }
   }
   async function checkDependencies() {
@@ -185,6 +200,7 @@ export default function Command() {
     : "";
   const healthMarkdown = [
     progress ? `**Audit running: ${progress}**` : "",
+    dismissError ? `**Dismissal failed:** ${dismissError}` : "",
     healthError
       ? `**Audit failed:** ${healthError}\n\nRun Library Health Audit or Refresh Library Health to retry.`
       : "",
@@ -224,6 +240,13 @@ export default function Command() {
                 detail={<List.Item.Detail markdown={issueMarkdown(issue)} />}
                 actions={
                   <ActionPanel>
+                    {issue.category === "possible_recording_duplicate" && (
+                      <Action
+                        title="Dismiss Duplicate Alert"
+                        shortcut={{ modifiers: ["cmd"], key: "d" }}
+                        onAction={() => dismissDuplicate(issue.id)}
+                      />
+                    )}
                     <Action.CopyToClipboard title="Copy Diagnostic Details" content={JSON.stringify(issue, null, 2)} />
                     {issue.paths.map((path) => (
                       <Action.ShowInFinder key={path} title={`Reveal ${path.split("/").pop()} in Finder`} path={path} />

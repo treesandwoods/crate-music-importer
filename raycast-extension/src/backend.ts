@@ -219,3 +219,7 @@ export function loadHealthAudit(includeReport = true): Promise<HealthAuditState>
 export function startHealthAudit(deepAll = false): Promise<HealthAuditState> {
   return runJson(["health-audit", "start", ...(deepAll ? ["--deep-all"] : [])], 15_000);
 }
+
+export function dismissDuplicateAlert(issueId: string): Promise<HealthAuditState> {
+  return runJson(["health-audit", "dismiss-duplicate", issueId], 15_000);
+}
