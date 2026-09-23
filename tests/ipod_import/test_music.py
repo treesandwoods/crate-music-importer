@@ -91,6 +91,22 @@ class MusicAutomationTests(unittest.TestCase):
 		self.assertEqual(reconcile_recording_music(recording, MusicIndex([candidate]))["status"], "missing")
 		self.assertEqual(reconcile_recording_music(recording, MusicIndex([candidate | {"title": "Different"}]))["status"], "missing")
 
+	def test_saved_album_position_accepts_metadata_mismatch_from_album_preview(self):
+		recording = source_recording("GETZ")
+		recording["source_metadata"].update(title="Doralice", artists="Stan Getz, João Gilberto", original_album="Getz/Gilberto", duration_ms=166266)
+		recording["album_metadata"] = {"album": "Getz/Gilberto", "track_no": 2, "disc_no": 1}
+		candidate = music_track("GETZ", "Stan Getz") | {"title": "Doralice", "artist": "Getz/Gilberto", "album_artist": "Getz/Gilberto", "track_no": 2, "disc_no": 0, "duration_s": 166.296}
+		self.assertEqual(reconcile_recording_music(recording, MusicIndex([candidate]), preferred_album="Getz/Gilberto")["status"], "resolved")
+		self.assertEqual(reconcile_recording_music(recording, MusicIndex([candidate | {"track_no": 3}]))["status"], "missing")
+		self.assertEqual(reconcile_recording_music(recording, MusicIndex([candidate | {"duration_s": 120}]))["status"], "missing")
+
+	def test_saved_album_position_accepts_different_edition_duration(self):
+		recording = source_recording("PID")
+		recording["album_metadata"] = {"album": "Album", "track_no": 1, "disc_no": 1}
+		candidate = music_track("PID") | {"track_no": 1, "duration_s": 150}
+		self.assertEqual(reconcile_recording_music(recording, MusicIndex([candidate]))["status"], "resolved")
+		self.assertEqual(reconcile_recording_music(recording, MusicIndex([candidate | {"artist": "Other"}]))["status"], "missing")
+
 	def test_requested_album_copy_wins_over_other_copy(self):
 		recording = source_recording("LOOSE")
 		result = reconcile_recording_music(recording, MusicIndex([music_track("LOOSE", "Playlist Imports"), music_track("ALBUM")]), preferred_album="Album")
