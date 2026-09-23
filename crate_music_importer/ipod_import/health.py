@@ -215,7 +215,12 @@ def _build_health_report(
 			add("ambiguous_music_match", "Multiple Music tracks plausibly represent this recording.", recording_ids=[recording_id], persistent_ids=[str(item.get("persistent_id") or "") for item in result["candidates"]], tracks=result["candidates"], next_step="Choose the correct Music track in Import Activity & Problems.")
 		elif result["status"] == "missing":
 			metadata = recording.get("source_metadata") or {}
-			add("recording_missing_from_music", "This recording cannot be found safely in Music.app.", recording_ids=[recording_id], tracks=[{"artist": metadata.get("artists", ""), "title": metadata.get("title", ""), "album": metadata.get("original_album", ""), "persistent_id": ""}], next_step="Retry the source to download or add the recording once.")
+			bound_id = music_binding_id(recording)
+			bound_track = index.by_persistent_id.get(bound_id)
+			if bound_track:
+				add("bound_music_identity_mismatch", "The saved Music track exists, but its metadata does not safely identify this recording.", recording_ids=[recording_id], persistent_ids=[bound_id], tracks=[bound_track], evidence={"source": {"title": metadata.get("title"), "artists": metadata.get("artists"), "album": metadata.get("original_album"), "durationMs": metadata.get("duration_ms")}}, next_step="Review the saved Music track and recording identity before changing the binding.")
+			else:
+				add("recording_missing_from_music", "This recording cannot be found safely in Music.app.", recording_ids=[recording_id], tracks=[{"artist": metadata.get("artists", ""), "title": metadata.get("title", ""), "album": metadata.get("original_album", ""), "persistent_id": ""}], next_step="Retry the source to download or add the recording once.")
 	if binding_repairs:
 		save_manifest(paths, manifest)
 
@@ -317,7 +322,7 @@ def _build_health_report(
 		"corruptFiles": sum(issue["category"] in ("probe_failed", "decode_failed", "audio_content_changed") for issue in issues),
 		"exactDuplicateGroups": sum(issue["category"] == "exact_file_duplicate" for issue in issues),
 		"possibleRecordingDuplicates": sum(issue["category"] == "possible_recording_duplicate" for issue in issues),
-		"manifestInconsistencies": sum(issue["category"] in ("ambiguous_music_match", "recording_missing_from_music", "incompatible_shared_binding", "managed_path_outside_root") for issue in issues),
+		"manifestInconsistencies": sum(issue["category"] in ("ambiguous_music_match", "bound_music_identity_mismatch", "recording_missing_from_music", "incompatible_shared_binding", "managed_path_outside_root") for issue in issues),
 		"metadataDiscrepancies": sum(issue["category"] in ("duration_mismatch", "tag_mismatch", "artwork_discrepancy") for issue in issues),
 		"deepDecodedFiles": deep_count,
 	}

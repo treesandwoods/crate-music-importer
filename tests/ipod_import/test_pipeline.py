@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from crate_music_importer.ipod_import.health import _build_health_report
 from crate_music_importer.ipod_import.manifest import ManagedPaths, new_manifest, set_album, set_playlist, upsert_recording
 from crate_music_importer.ipod_import.pipeline import (
 	apply_album_to_music,
@@ -45,6 +46,9 @@ class PipelineTests(unittest.TestCase):
 			source_album = album(tracks) | {"name": "Getz/Gilberto"}
 			library = build_album_library_preview(source_album, candidates, new_manifest(paths))
 			self.assertEqual(library.counts, {"in_library": 4, "not_in_library": 0})
+			health = _build_health_report(paths, library.manifest, [candidate | {"location": None} for candidate in candidates], on_progress=None, deep_all=False)
+			self.assertEqual(health["summary"]["manifestInconsistencies"], 0)
+			self.assertEqual(health["status"], "healthy")
 			preview = build_album_preview(source_album, candidates, new_manifest(paths), paths)
 			self.assertEqual(preview.counts, {"reused_music": 4})
 			self.assertFalse(paths.root.exists())

@@ -149,7 +149,10 @@ class HealthTests(unittest.TestCase):
 			second["music_binding"] = {"persistent_id": "PID"}
 			track = music("PID", "Song One")
 			result = self.report(paths, manifest, [track])
-			self.assertIn("recording_missing_from_music", {issue["category"] for issue in result["issues"]})
+			categories = {issue["category"] for issue in result["issues"]}
+			self.assertIn("bound_music_identity_mismatch", categories)
+			self.assertNotIn("recording_missing_from_music", categories)
+			self.assertIn("incompatible_shared_binding", categories)
 
 	def test_missing_managed_file_is_real_damage(self):
 		with tempfile.TemporaryDirectory() as directory:

@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import subprocess
 import time
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
 from crate_music_importer.ipod_import.constants import MUSIC_CONFIDENCE_MIN
-from crate_music_importer.ipod_import.identity import clean_release_labels, match_music_track, normalize_recording_title, normalize_text, score_music_candidate
+from crate_music_importer.ipod_import.identity import clean_release_labels, duration_score, match_music_track, normalize_recording_title, normalize_text, normalized_artists, score_music_candidate, version_markers
 
 
 class MusicAutomationError(RuntimeError):
@@ -753,6 +754,39 @@ def _album_matches(name: str | None, candidate: dict[str, Any]) -> bool:
 	return bool(name and normalize_text(clean_release_labels(name)) == normalize_text(clean_release_labels(candidate.get("album"))))
 
 
+def album_track_position_match(source: dict[str, Any], candidate: dict[str, Any], *, misplaced_album: bool = False) -> tuple[bool, bool]:
+	"""Check the same album-position evidence used by previews and saved bindings."""
+	requested = normalize_text(clean_release_labels(source.get("album") or source.get("original_album")))
+	track_no = int(source.get("track_no") or 0)
+	if (
+		not requested or track_no <= 0
+		or track_no != int(candidate.get("track_no") or 0)
+		or int(source.get("disc_no") or 1) != int(candidate.get("disc_no") or 1)
+		or version_markers(source.get("title")) != version_markers(candidate.get("title"))
+	):
+		return False, False
+	wanted_title = normalize_recording_title(source.get("title"))
+	found_title = normalize_recording_title(candidate.get("title"))
+	if not wanted_title or not found_title:
+		return False, False
+	title_score = SequenceMatcher(None, wanted_title, found_title).ratio()
+	if misplaced_album:
+		matches = (
+			not _album_matches(requested, candidate)
+			and normalize_text(clean_release_labels(candidate.get("album_artist"))) == requested
+			and normalize_text(clean_release_labels(candidate.get("artist"))) == requested
+			and (title_score >= 0.8 or found_title.startswith(wanted_title + " "))
+			and duration_score(int(source.get("duration_ms") or 0), float(candidate.get("duration_s") or 0)) >= 0.94
+		)
+	else:
+		matches = (
+			_album_matches(requested, candidate)
+			and wanted_title == found_title
+			and normalized_artists(source.get("artists")) == normalized_artists(candidate.get("artist"))
+		)
+	return bool(matches), title_score >= 0.95
+
+
 def reconcile_recording_music(
 	recording: dict[str, Any],
 	index: MusicIndex,
@@ -768,6 +802,10 @@ def reconcile_recording_music(
 	saved = index.by_persistent_id.get(saved_id)
 	if saved:
 		score, reasons = score_music_candidate(metadata, saved)
+		album_metadata = recording.get("album_metadata") or {}
+		album_source = {**metadata, "album": album_metadata.get("album"), "track_no": album_metadata.get("track_no"), "disc_no": album_metadata.get("disc_no")}
+		position_match, _ = album_track_position_match(album_source, saved) if album_metadata else (False, False)
+		misplaced_match, _ = album_track_position_match(album_source, saved, misplaced_album=True) if album_metadata else (False, False)
 		accepted = (recording.get("local_preferences") or {}).get("accepted_duration") or {}
 		managed = recording.get("managed_file") or {}
 		# A user-accepted local recording may have a different duration from Spotify.
@@ -782,8 +820,8 @@ def reconcile_recording_music(
 			accepted_score, accepted_reasons = score_music_candidate(accepted_metadata, saved)
 			if accepted_score >= MUSIC_CONFIDENCE_MIN:
 				score, reasons = accepted_score, accepted_reasons
-		if score >= MUSIC_CONFIDENCE_MIN:
-			if preferred_album and not _album_matches(preferred_album, saved):
+		if score >= MUSIC_CONFIDENCE_MIN or position_match or misplaced_match:
+			if preferred_album and not _album_matches(preferred_album, saved) and not misplaced_match:
 				album_match = match_music_track(metadata, [item for item in index.candidates(metadata) if _album_matches(preferred_album, item)])
 				if album_match["status"] == "reused":
 					candidate = album_match["candidate"]

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Callable
 
@@ -18,7 +17,7 @@ from crate_music_importer.ipod_import.manifest import (
 	upsert_recording,
 	write_playlist_m3u8,
 )
-from crate_music_importer.ipod_import.identity import clean_release_labels, duration_score, match_music_track, normalize_recording_title, normalize_text, normalized_artists, version_markers
+from crate_music_importer.ipod_import.identity import clean_release_labels, match_music_track, normalize_text
 from crate_music_importer.ipod_import.media import (
 	MediaError,
 	download_recording,
@@ -29,6 +28,7 @@ from crate_music_importer.ipod_import.media import (
 	retag_managed_recording_as_album,
 )
 from crate_music_importer.ipod_import.music import (
+	album_track_position_match,
 	bind_recording_to_music,
 	MusicAutomationError,
 	MusicIndex,
@@ -116,16 +116,14 @@ def _mislabelled_album_matches(album: dict[str, Any], music_tracks: list[dict[st
 			if len(at_position) != 1:
 				break
 			candidate = at_position[0]
-			wanted_title = normalize_recording_title(track.get("title"))
-			found_title = normalize_recording_title(candidate.get("title"))
-			title_score = SequenceMatcher(None, wanted_title, found_title).ratio()
-			if not wanted_title or not found_title or (title_score < 0.8 and not found_title.startswith(wanted_title + " ")):
+			matched, strong_title = album_track_position_match(
+				{**track, "album": track.get("album") or album.get("name"), "track_no": position[1]},
+				candidate,
+				misplaced_album=True,
+			)
+			if not matched:
 				break
-			if version_markers(track.get("title")) != version_markers(candidate.get("title")):
-				break
-			if duration_score(int(track.get("duration_ms") or 0), float(candidate.get("duration_s") or 0)) < 0.94:
-				break
-			strong_titles += title_score >= 0.95
+			strong_titles += strong_title
 			matches[ordinal] = candidate
 		if len(matches) == len(source_tracks) and strong_titles >= max(3, len(source_tracks) * 4 // 5):
 			qualified.append(matches)
@@ -388,10 +386,7 @@ def build_album_library_preview(
 			# disc, and position still identify a Music album entry for search status.
 			exact = [
 				candidate for candidate in candidates
-				if normalize_recording_title(track.get("title")) == normalize_recording_title(candidate.get("title"))
-				and normalized_artists(track.get("artists")) == normalized_artists(candidate.get("artist"))
-				and int(track.get("track_no") or position) == int(candidate.get("track_no") or 0)
-				and int(track.get("disc_no") or 1) == int(candidate.get("disc_no") or 1)
+				if album_track_position_match({**track, "album": track.get("album") or album.get("name"), "track_no": track.get("track_no") or position}, candidate)[0]
 			]
 			if len(exact) == 1:
 				match = {"status": "reused", "candidate": exact[0]}
