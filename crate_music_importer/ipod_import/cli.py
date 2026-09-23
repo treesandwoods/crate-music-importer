@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import sys
 from datetime import datetime, timezone
@@ -12,7 +13,7 @@ from typing import Any, Callable
 from crate_music_importer.ipod_import.constants import MANAGED_ROOT
 from crate_music_importer.ipod_import.manifest import ManagedPaths, backfill_playlist_urls, load_manifest, save_manifest, update_manifest
 from crate_music_importer.ipod_import.media import check_tools
-from crate_music_importer.ipod_import.music import load_music_fixture, lookup_music_track, music_binding_id, scan_music_library_for_health, verify_music_tracks
+from crate_music_importer.ipod_import.music import load_music_fixture, lookup_music_track, music_binding_id, scan_music_library, scan_music_library_for_health, verify_music_tracks
 from crate_music_importer.ipod_import.music_cache import (
 	load_music_cache,
 	music_cache_tracks,
@@ -23,6 +24,7 @@ from crate_music_importer.ipod_import.music_cache import (
 from crate_music_importer.ipod_import.pipeline import (
 	apply_album_to_music,
 	apply_to_music,
+	build_album_library_preview,
 	build_album_preview,
 	build_preview,
 	execute_album_import,
@@ -287,25 +289,31 @@ def _print_album_preview(preview: Any, *, as_json: bool) -> None:
 		print(f"WARNING: {album['warning']}")
 	category_counts: dict[str, int] = {}
 	for row in preview.rows:
-		category = {
-			"not_started": "NOT STARTED",
-			"youtube_match_found": "YOUTUBE MATCH FOUND",
-			"matches_need_approval": "MATCHES NEED APPROVAL",
-			"no_youtube_matches": "NO YOUTUBE MATCHES",
-			"downloaded": "DOWNLOADED",
-			"complete": "COMPLETE",
-			"needs_approval": "NEEDS APPROVAL",
-			"failed": "FAILED",
-			"reused_music": "SAVED MUSIC MATCH",
-			"managed_existing": "DOWNLOADED",
-			"upgrade_managed": "READY TO UPDATE TAGS",
-			"review_music": "NEEDS APPROVAL",
-		}.get(row["status"], "READY TO DOWNLOAD")
+		category = "IN LIBRARY" if row["status"] == "in_library" else "NOT IN LIBRARY"
 		category_counts[category] = category_counts.get(category, 0) + 1
 		print(f"{row['disc_no']}.{row['track_no']:02d} [{category}] {row['artists']} - {row['title']}")
-		print(f"     {row['detail']}")
 	print("Totals: " + ", ".join(f"{key.lower()}={value}" for key, value in category_counts.items()))
-	print("No files were downloaded and Music.app was not changed.")
+	print("Music.app tracks and files were not changed.")
+
+
+def _save_album_library_bindings(paths: ManagedPaths, original: dict[str, Any], preview: Any) -> None:
+	bindings = {
+		row["recording_id"]: preview.manifest["recordings"][row["recording_id"]]
+		for row in preview.rows if row["status"] == "in_library"
+	}
+	if not any(
+		music_binding_id(original.get("recordings", {}).get(key) or {}) != music_binding_id(recording)
+		for key, recording in bindings.items()
+	):
+		return
+	def repair(latest: dict[str, Any]) -> None:
+		for key, recording in bindings.items():
+			current = latest["recordings"].get(key)
+			if current is None:
+				latest["recordings"][key] = copy.deepcopy(recording)
+			else:
+				current["music_binding"] = copy.deepcopy(recording["music_binding"])
+	update_manifest(paths, repair)
 
 
 def _review_rows(
@@ -477,7 +485,11 @@ def _run(
 		_progress(on_progress, "loading_metadata", source_type="album")
 		album = _album(args)
 		_progress(on_progress, "loading_music_cache", source_type="album", source_id=album.get("id"), name=album.get("name"), total=len(album.get("tracks") or []))
-		preview = build_album_preview(album, _music_tracks(args, paths), manifest, paths)
+		music_tracks = load_music_fixture(args.music_fixture) if args.music_fixture else scan_music_library()
+		if not args.music_fixture:
+			refresh_music_cache(paths, music_tracks)
+		preview = build_album_library_preview(album, music_tracks, manifest)
+		_save_album_library_bindings(paths, manifest, preview)
 		_print_album_preview(preview, as_json=args.json)
 		return 0
 	if args.command == "album-import":

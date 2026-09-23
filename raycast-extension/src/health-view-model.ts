@@ -54,7 +54,6 @@ export function healthSummary(result: HealthResult) {
   const labels: Record<string, string> = {
     musicTracks: "Music tracks scanned",
     localFiles: "Local files checked",
-    managedFiles: "Crate-managed files",
     bindingRepairs: "Music bindings repaired",
     missingFiles: "Missing or unreadable files",
     corruptFiles: "Corrupt or truncated audio",

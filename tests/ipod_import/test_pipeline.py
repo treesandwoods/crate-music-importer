@@ -8,6 +8,7 @@ from crate_music_importer.ipod_import.pipeline import (
 	apply_album_to_music,
 	apply_to_music,
 	build_album_metadata_preview,
+	build_album_library_preview,
 	build_album_preview,
 	build_preview,
 	execute_album_import,
@@ -34,6 +35,52 @@ def music_track(persistent_id="PID", *, album_name="Album", location="/Music/Son
 
 
 class PipelineTests(unittest.TestCase):
+	def test_named_album_examples_resolve_from_music_without_file_provenance(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory) / "managed")
+			for title, artist, album_name in (
+				("Cupid - Live at the Harlem Square Club, Miami, FL - January 1963", "Sam Cooke", "One Night Stand - Sam Cooke Live At The Harlem Square Club, 1963"),
+				("The Shape I'm In - Concert Version", "The Band", "The Last Waltz"),
+			):
+				track = source_track(title=title, artists=artist, album=album_name, album_artist=artist)
+				candidate = music_track("CURRENT", album_name=album_name, location="/Users/example/Music/User.m4a")
+				candidate.update(title=title, artist=artist, track_no=1, disc_no=1, duration_s=150)
+				preview = build_album_library_preview(album([track]) | {"name": album_name}, [candidate], new_manifest(paths))
+				self.assertEqual(preview.counts, {"in_library": 1, "not_in_library": 0})
+				self.assertEqual(preview.rows[0]["status"], "in_library")
+				self.assertEqual(preview.manifest["recordings"][preview.rows[0]["recording_id"]]["music_binding"], {"persistent_id": "CURRENT"})
+				wrong_position = build_album_library_preview(
+					album([track]) | {"name": album_name}, [candidate | {"track_no": 2}], new_manifest(paths),
+				)
+				self.assertEqual(wrong_position.rows[0]["status"], "not_in_library")
+				ambiguous = build_album_library_preview(
+					album([track]) | {"name": album_name},
+					[candidate, candidate | {"persistent_id": "DUPLICATE"}], new_manifest(paths),
+				)
+				self.assertEqual(ambiguous.rows[0]["status"], "not_in_library")
+
+	def test_album_library_status_requires_unique_current_requested_album_match(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory) / "managed")
+			manifest = new_manifest(paths)
+			key, recording = upsert_recording(manifest, source_track(), source_type="album")
+			recording["music_binding"] = {"persistent_id": "STALE"}
+			recording["managed_file"] = {"managed_by_crate": True, "relative_path": "Music/Song.mp3", "sha256": "hash"}
+			for candidates, expected in (
+				([], "not_in_library"),
+				([music_track("OTHER", album_name="Other Album")], "not_in_library"),
+				([music_track("CURRENT")], "in_library"),
+				([music_track("ONE"), music_track("TWO")], "not_in_library"),
+			):
+				preview = build_album_library_preview(album(), candidates, manifest)
+				self.assertEqual(preview.rows[0]["status"], expected)
+				self.assertEqual(preview.manifest["recordings"][key]["managed_file"], recording["managed_file"])
+				self.assertFalse(paths.root.exists())
+				if expected == "in_library":
+					self.assertEqual(preview.manifest["recordings"][key]["music_binding"], {"persistent_id": "CURRENT"})
+				else:
+					self.assertEqual(preview.manifest["recordings"][key]["music_binding"], {"persistent_id": "STALE"})
+
 	def test_metadata_preview_does_not_touch_music_or_media(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")

@@ -44,16 +44,23 @@ class AlbumCliEfficiencyTests(unittest.TestCase):
 			self.assertEqual(json.loads(output.getvalue())["playlists"][0]["cover_url"], "https://example.test/playlist.jpg")
 			self.assertEqual(load_manifest(paths)["playlists"]["37i9dQZF1DXTESTFIXTURE1"]["cover_url"], "https://example.test/playlist.jpg")
 
-	def test_album_preview_never_scans_music(self):
+	def test_album_preview_refreshes_music_and_saves_unique_binding(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")
 			manifest = new_manifest(paths)
+			album = load_fixture(FIXTURES / "spotify_album.json").to_dict()
+			key, recording = upsert_recording(manifest, album["tracks"][0], source_type="album")
+			recording["music_binding"] = {"persistent_id": "STALE"}
+			save_manifest(paths, manifest)
 			save_music_cache(paths, build_full_cache(paths, []))
-			before = paths.music_cache.read_bytes()
+			live = {
+				"persistent_id": "CURRENT", "title": album["tracks"][0]["title"],
+				"artist": "Grimes", "album": "Visions", "duration_s": 116,
+			}
+			output = io.StringIO()
 			with patch("crate_music_importer.ipod_import.cli.ManagedPaths", return_value=paths), \
-				patch("crate_music_importer.ipod_import.cli.load_manifest", return_value=manifest), \
-				patch("crate_music_importer.ipod_import.cli.scan_music_library_for_health") as full_scan, \
-				contextlib.redirect_stdout(io.StringIO()):
+				patch("crate_music_importer.ipod_import.cli.scan_music_library", return_value=[live]) as full_scan, \
+				contextlib.redirect_stdout(output):
 				code = cli.run([
 					"album-preview",
 					"--spotify-fixture",
@@ -61,8 +68,28 @@ class AlbumCliEfficiencyTests(unittest.TestCase):
 					"--json",
 				])
 			self.assertEqual(code, 0)
-			full_scan.assert_not_called()
-			self.assertEqual(paths.music_cache.read_bytes(), before)
+			full_scan.assert_called_once_with()
+			self.assertIn("CURRENT", json.dumps(json.loads(paths.music_cache.read_text())))
+			self.assertEqual(load_manifest(paths)["recordings"][key]["music_binding"], {"persistent_id": "CURRENT"})
+			self.assertEqual(json.loads(output.getvalue())["counts"], {"in_library": 1, "not_in_library": 1})
+
+	def test_album_preview_saves_new_binding_without_importing_or_changing_music(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory) / "managed")
+			album = load_fixture(FIXTURES / "spotify_album.json").to_dict()
+			live = {
+				"persistent_id": "CURRENT", "title": album["tracks"][0]["title"],
+				"artist": "Grimes", "album": "Visions", "duration_s": 116,
+			}
+			with patch("crate_music_importer.ipod_import.cli.ManagedPaths", return_value=paths), \
+				patch("crate_music_importer.ipod_import.cli.scan_music_library", return_value=[live]), \
+				patch("crate_music_importer.ipod_import.cli.build_album_preview") as import_planner, \
+				contextlib.redirect_stdout(io.StringIO()):
+				cli.run(["album-preview", "--spotify-fixture", str(FIXTURES / "spotify_album.json"), "--json"])
+			import_planner.assert_not_called()
+			recordings = load_manifest(paths)["recordings"]
+			self.assertEqual(len(recordings), 1)
+			self.assertEqual(next(iter(recordings.values()))["music_binding"], {"persistent_id": "CURRENT"})
 
 	def test_album_download_planning_does_not_scan_music(self):
 		with tempfile.TemporaryDirectory() as directory:
