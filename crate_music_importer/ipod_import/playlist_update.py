@@ -78,23 +78,23 @@ def saved_playlists(manifest: dict[str, Any]) -> list[dict[str, Any]]:
 	return sorted(values, key=lambda value: (value["name"].casefold(), value["id"]))
 
 
-def backfill_playlist_covers(
+def refresh_playlist_covers(
 	manifest: dict[str, Any],
 	cover_fetcher: Callable[[str], str | None],
 	*,
 	max_workers: int = 8,
-) -> int:
-	"""Best-effort cache of shared playlist thumbnails for legacy saved imports."""
-	missing = [
+) -> dict[str, tuple[str, str]]:
+	"""Check saved Spotify thumbnails and return changed covers with their source links."""
+	linked = [
 		(str(playlist_id), str(playlist.get("spotify_url") or ""))
 		for playlist_id, playlist in manifest.get("playlists", {}).items()
-		if isinstance(playlist, dict) and not playlist.get("cover_url") and playlist.get("spotify_url")
+		if isinstance(playlist, dict) and playlist.get("spotify_url")
 	]
-	if not missing:
-		return 0
-	updated = 0
-	with ThreadPoolExecutor(max_workers=min(max_workers, len(missing))) as executor:
-		futures = {executor.submit(cover_fetcher, url): playlist_id for playlist_id, url in missing}
+	if not linked:
+		return {}
+	updated: dict[str, tuple[str, str]] = {}
+	with ThreadPoolExecutor(max_workers=min(max_workers, len(linked))) as executor:
+		futures = {executor.submit(cover_fetcher, url): (playlist_id, url) for playlist_id, url in linked}
 		for future in as_completed(futures):
 			try:
 				cover_url = str(future.result() or "")
@@ -102,8 +102,11 @@ def backfill_playlist_covers(
 				continue
 			if not cover_url.startswith(("https://", "http://")):
 				continue
-			manifest["playlists"][futures[future]]["cover_url"] = cover_url
-			updated += 1
+			playlist_id, url = futures[future]
+			if manifest["playlists"][playlist_id].get("cover_url") == cover_url:
+				continue
+			manifest["playlists"][playlist_id]["cover_url"] = cover_url
+			updated[playlist_id] = (url, cover_url)
 	return updated
 
 

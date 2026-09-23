@@ -33,7 +33,7 @@ from crate_music_importer.ipod_import.pipeline import (
 )
 from crate_music_importer.ipod_import.playlist_update import (
 	apply_playlist_update,
-	backfill_playlist_covers,
+	refresh_playlist_covers,
 	build_playlist_update_preview,
 	save_pending_update,
 	saved_playlists,
@@ -85,6 +85,9 @@ def _parser() -> argparse.ArgumentParser:
 	link.add_argument("playlist")
 	link.add_argument("url")
 	link.add_argument("--confirm", action="store_true", required=True)
+	artwork_refresh = subparsers.add_parser("playlist-artwork-refresh", help="Refresh only a saved Spotify playlist cover URL.")
+	artwork_refresh.add_argument("playlist")
+	artwork_refresh.add_argument("--json", action="store_true")
 
 	review = subparsers.add_parser("review", help="List unresolved/ambiguous recordings and candidates.")
 	review.add_argument("playlist", nargs="?")
@@ -196,6 +199,19 @@ def _current_saved_playlist(args: argparse.Namespace, manifest: dict[str, Any], 
 	current["fetched_spotify_playlist_id"] = current.get("id")
 	current["id"] = playlist_id
 	return current
+
+
+def _save_playlist_cover(paths: ManagedPaths, playlist_id: str, source_url: str, cover_url: str | None) -> None:
+	"""Persist a current cover without overwriting a concurrently changed Spotify link."""
+	if not cover_url or not cover_url.startswith(("https://", "http://")):
+		return
+
+	def save(latest: dict[str, Any]) -> None:
+		playlist = latest.get("playlists", {}).get(playlist_id)
+		if isinstance(playlist, dict) and playlist.get("spotify_url") == source_url and playlist.get("cover_url") != cover_url:
+			playlist["cover_url"] = cover_url
+
+	update_manifest(paths, save)
 
 
 def _find_playlist_id(manifest: dict[str, Any], value: str) -> str:
@@ -405,17 +421,13 @@ def _run(
 	if args.command == "saved-playlists":
 		update_manifest(paths, backfill_playlist_urls)
 		manifest = load_manifest(paths)
-		if backfill_playlist_covers(manifest, fetch_playlist_cover):
-			resolved_covers = {
-				playlist_id: playlist.get("cover_url")
-				for playlist_id, playlist in manifest.get("playlists", {}).items()
-				if isinstance(playlist, dict) and playlist.get("cover_url")
-			}
+		resolved_covers = refresh_playlist_covers(manifest, fetch_playlist_cover)
+		if resolved_covers:
 
 			def cache_resolved_covers(latest: dict[str, Any]) -> None:
-				for playlist_id, cover_url in resolved_covers.items():
+				for playlist_id, (source_url, cover_url) in resolved_covers.items():
 					playlist = latest.get("playlists", {}).get(playlist_id)
-					if isinstance(playlist, dict) and not playlist.get("cover_url"):
+					if isinstance(playlist, dict) and playlist.get("spotify_url") == source_url:
 						playlist["cover_url"] = cover_url
 
 			update_manifest(paths, cache_resolved_covers)
@@ -431,15 +443,28 @@ def _run(
 		save_manifest(paths, manifest)
 		print(json.dumps({"playlist_id": playlist_id, "spotify_url": canonical}, ensure_ascii=False))
 		return 0
+	if args.command == "playlist-artwork-refresh":
+		playlist_id = _find_playlist_id(manifest, args.playlist)
+		url = str(manifest["playlists"][playlist_id].get("spotify_url") or "")
+		if not url:
+			raise ValueError("This saved playlist has no Spotify link. Use Change Stored Spotify Link first.")
+		cover_url = fetch_playlist_cover(url)
+		if not cover_url:
+			raise ValueError("Spotify did not return a playlist image. Try again later.")
+		_save_playlist_cover(paths, playlist_id, url, cover_url)
+		print(json.dumps({"playlist_id": playlist_id, "cover_url": cover_url}, ensure_ascii=False) if args.json else cover_url)
+		return 0
 	if args.command == "playlist-update-preview":
 		playlist_id = _find_playlist_id(manifest, args.playlist)
 		current = _current_saved_playlist(args, manifest, playlist_id)
+		_save_playlist_cover(paths, playlist_id, str(manifest["playlists"][playlist_id].get("spotify_url") or ""), current.get("cover_url"))
 		preview = build_playlist_update_preview(current, _music_tracks(args, paths), manifest, paths)
 		print(json.dumps(preview.to_dict(), ensure_ascii=False, indent=2) if args.json else f"{len(preview.additions)} additions; {len(preview.removals)} removals; {preview.state}")
 		return 0
 	if args.command == "playlist-update-prepare":
 		playlist_id = _find_playlist_id(manifest, args.playlist)
 		current = _current_saved_playlist(args, manifest, playlist_id)
+		_save_playlist_cover(paths, playlist_id, str(manifest["playlists"][playlist_id].get("spotify_url") or ""), current.get("cover_url"))
 		preview = build_playlist_update_preview(current, music_cache_tracks(load_music_cache(paths)), manifest, paths)
 		if preview.state != "ready":
 			raise ValueError(preview.warning or "Playlist is up to date; no update was queued.")

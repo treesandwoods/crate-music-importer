@@ -4,7 +4,48 @@ import test from "node:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cropSquareArtwork } from "./playlist-artwork";
+import { cropSquareArtwork, squarePlaylistArtwork } from "./playlist-artwork";
+
+test(
+  "forced refresh downloads same URL again and selects a new persistent image path",
+  { skip: process.platform !== "darwin" },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "crate-artwork-refresh-test-"));
+  const originalFetch = globalThis.fetch;
+  const bmp = Buffer.alloc(54 + 120 * 120 * 3, 128);
+  bmp.fill(0, 0, 54);
+    bmp.write("BM");
+    bmp.writeUInt32LE(bmp.length, 2);
+    bmp.writeUInt32LE(54, 10);
+    bmp.writeUInt32LE(40, 14);
+    bmp.writeUInt32LE(120, 18);
+    bmp.writeUInt32LE(120, 22);
+    bmp.writeUInt16LE(1, 26);
+    bmp.writeUInt16LE(24, 28);
+    const bmpPath = join(directory, "source.bmp");
+    const pngPath = join(directory, "source.png");
+    await writeFile(bmpPath, bmp);
+    execFileSync("/usr/bin/sips", ["-s", "format", "png", bmpPath, "--out", pngPath]);
+    const png = await readFile(pngPath);
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      return new Response(png, { status: 200 });
+    };
+    try {
+      const url = "https://example.test/playlist.bmp";
+      const first = await squarePlaylistArtwork(url, directory);
+      assert.equal(await squarePlaylistArtwork(url, directory), first);
+      const refreshed = await squarePlaylistArtwork(url, directory, true);
+      assert.notEqual(refreshed, first);
+      assert.equal(await squarePlaylistArtwork(url, directory), refreshed);
+      assert.equal(calls, 2);
+    } finally {
+      globalThis.fetch = originalFetch;
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
 
 for (const [width, height] of [
   [240, 120],

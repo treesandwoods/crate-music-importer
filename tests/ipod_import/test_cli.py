@@ -44,6 +44,49 @@ class AlbumCliEfficiencyTests(unittest.TestCase):
 			self.assertEqual(json.loads(output.getvalue())["playlists"][0]["cover_url"], "https://example.test/playlist.jpg")
 			self.assertEqual(load_manifest(paths)["playlists"]["37i9dQZF1DXTESTFIXTURE1"]["cover_url"], "https://example.test/playlist.jpg")
 
+	def test_saved_playlists_updates_changed_cover_and_manual_refresh_keeps_same_url(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory) / "managed")
+			manifest = new_manifest(paths)
+			playlist_id = "37i9dQZF1DXTESTFIXTURE1"
+			set_playlist(manifest, {
+				"id": playlist_id, "name": "Fixture Playlist",
+				"url": f"https://open.spotify.com/playlist/{playlist_id}",
+				"cover_url": "https://example.test/old.jpg", "complete": True, "total_count": 0,
+			}, [])
+			save_manifest(paths, manifest)
+			with patch("crate_music_importer.ipod_import.cli.ManagedPaths", return_value=paths), \
+				patch("crate_music_importer.ipod_import.cli.fetch_playlist_cover", return_value="https://example.test/new.jpg") as fetch_cover, \
+				contextlib.redirect_stdout(io.StringIO()):
+				self.assertEqual(cli.run(["saved-playlists", "--json"]), 0)
+				self.assertEqual(cli.run(["playlist-artwork-refresh", playlist_id, "--json"]), 0)
+			self.assertEqual(fetch_cover.call_count, 2)
+			self.assertEqual(load_manifest(paths)["playlists"][playlist_id]["cover_url"], "https://example.test/new.jpg")
+
+	def test_playlist_update_preview_saves_current_cover_without_music_changes(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory) / "managed")
+			manifest = new_manifest(paths)
+			playlist_id = "37i9dQZF1DXTESTFIXTURE1"
+			set_playlist(manifest, {
+				"id": playlist_id, "name": "Fixture Playlist",
+				"url": f"https://open.spotify.com/playlist/{playlist_id}",
+				"cover_url": "https://example.test/old.jpg", "complete": True, "total_count": 0,
+			}, [])
+			save_manifest(paths, manifest)
+			current = SimpleNamespace(to_dict=lambda: {
+				"id": playlist_id, "url": f"https://open.spotify.com/playlist/{playlist_id}",
+				"cover_url": "https://example.test/current.jpg", "tracks": [], "total_count": 0, "complete": True,
+			})
+			preview = SimpleNamespace(to_dict=lambda: {"source": {"cover_url": "https://example.test/current.jpg"}})
+			with patch("crate_music_importer.ipod_import.cli.ManagedPaths", return_value=paths), \
+				patch("crate_music_importer.ipod_import.cli.fetch_playlist", return_value=current), \
+				patch("crate_music_importer.ipod_import.cli.build_playlist_update_preview", return_value=preview), \
+				patch("crate_music_importer.ipod_import.cli._music_tracks", return_value=[]), \
+				contextlib.redirect_stdout(io.StringIO()):
+				self.assertEqual(cli.run(["playlist-update-preview", playlist_id, "--json"]), 0)
+			self.assertEqual(load_manifest(paths)["playlists"][playlist_id]["cover_url"], "https://example.test/current.jpg")
+
 	def test_album_preview_refreshes_music_and_saves_unique_binding(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")
