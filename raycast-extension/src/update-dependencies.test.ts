@@ -13,8 +13,15 @@ import {
   dependencySummary,
   eligibleUpdates,
   groupIssues,
+  healthSummary,
   updateTitle,
 } from "./health-view-model";
+
+test("Health summary omits managed-file provenance while retaining other counts", () => {
+  const summary = healthSummary({ ...healthResult, summary: { musicTracks: 2, managedFiles: 1 } });
+  assert.match(summary, /Music tracks scanned: 2/);
+  assert.doesNotMatch(summary, /Crate-managed files/);
+});
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const source = readFileSync(resolve("src/update-dependencies.tsx"), "utf8")

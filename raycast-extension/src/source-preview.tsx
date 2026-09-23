@@ -79,6 +79,16 @@ function previewSummary(preview: SourcePreview): string {
   return entries.map(([label, count]) => `${label} ${count}`).join(" · ");
 }
 
+function albumLibraryStage(row: PreviewRow): { label: "In Library" | "Not in Library"; icon: Icon; color: Color } {
+  return row.status === "in_library"
+    ? { label: "In Library", icon: Icon.Music, color: Color.Green }
+    : { label: "Not in Library", icon: Icon.Circle, color: Color.SecondaryText };
+}
+
+function albumLibrarySummary(preview: SourcePreview): string {
+  return `In Library ${preview.counts.in_library || 0} · Not in Library ${preview.counts.not_in_library || 0}`;
+}
+
 export function SourcePreviewView({ type, url }: { type: "album" | "playlist"; url: string }) {
   const [preview, setPreview] = useState<SourcePreview>();
   const [loading, setLoading] = useState(true);
@@ -167,9 +177,12 @@ export function SourcePreviewView({ type, url }: { type: "album" | "playlist"; u
         </List.Section>
       ) : null}
       {preview ? (
-        <List.Section title="Tracks" subtitle={previewSummary(preview)}>
+        <List.Section
+          title="Tracks"
+          subtitle={type === "album" ? albumLibrarySummary(preview) : previewSummary(preview)}
+        >
           {preview.rows.map((row) => {
-            const stage = previewStage(row);
+            const stage = type === "album" ? albumLibraryStage(row) : previewStage(row);
             return (
               <List.Item
                 key={`${row.position}-${row.recording_id}`}
@@ -179,7 +192,7 @@ export function SourcePreviewView({ type, url }: { type: "album" | "playlist"; u
                 accessories={[{ tag: { value: stage.label, color: stage.color } }]}
                 detail={
                   <List.Item.Detail
-                    markdown={`# ${row.artists} — ${row.title}\n\n**${stage.label}**\n\n${row.detail}`}
+                    markdown={`# ${row.artists} — ${row.title}\n\n**${stage.label}**${type === "album" ? "" : `\n\n${row.detail}`}`}
                     metadata={
                       <List.Item.Detail.Metadata>
                         <List.Item.Detail.Metadata.Label

@@ -17,7 +17,7 @@ from crate_music_importer.ipod_import.manifest import (
 	upsert_recording,
 	write_playlist_m3u8,
 )
-from crate_music_importer.ipod_import.identity import clean_release_labels, normalize_text
+from crate_music_importer.ipod_import.identity import clean_release_labels, match_music_track, normalize_recording_title, normalize_text, normalized_artists
 from crate_music_importer.ipod_import.media import (
 	MediaError,
 	download_recording,
@@ -292,6 +292,68 @@ def build_album_preview(
 			"disc_no": int(track.get("disc_no") or 1),
 			"status": status,
 			"detail": detail,
+		})
+		items.append({
+			"position": position,
+			"recording_id": key,
+			"spotify_id": track.get("sp_id"),
+			"track_no": int(track.get("track_no") or position),
+			"disc_no": int(track.get("disc_no") or 1),
+			"status": status,
+		})
+	set_album(planned, album, items)
+	return AlbumPreview(planned, str(album["id"]), counts, rows)
+
+
+def build_album_library_preview(
+	album: dict[str, Any],
+	music_tracks: list[dict[str, Any]],
+	manifest: dict[str, Any],
+) -> AlbumPreview:
+	"""Show current Music album membership and repair only unique recording bindings."""
+	planned = clone_manifest(manifest)
+	album_tracks: dict[str, list[dict[str, Any]]] = {}
+	for candidate in music_tracks:
+		album_name = normalize_text(clean_release_labels(candidate.get("album")))
+		if album_name and candidate.get("persistent_id"):
+			album_tracks.setdefault(album_name, []).append(candidate)
+	rows: list[dict[str, Any]] = []
+	items: list[dict[str, Any]] = []
+	counts = {"in_library": 0, "not_in_library": 0}
+	for source_position, track in enumerate(album["tracks"], start=1):
+		position = int(track.get("position") or source_position)
+		key, recording = upsert_recording(planned, track, source_type="album")
+		requested_album = normalize_text(clean_release_labels(track.get("album") or album.get("name")))
+		candidates = album_tracks.get(requested_album, [])
+		match = match_music_track(track, candidates)
+		if match["status"] == "missing":
+			# Album editions can use different track boundaries. Exact title, artist,
+			# disc, and position still identify a Music album entry for search status.
+			exact = [
+				candidate for candidate in candidates
+				if normalize_recording_title(track.get("title")) == normalize_recording_title(candidate.get("title"))
+				and normalized_artists(track.get("artists")) == normalized_artists(candidate.get("artist"))
+				and int(track.get("track_no") or position) == int(candidate.get("track_no") or 0)
+				and int(track.get("disc_no") or 1) == int(candidate.get("disc_no") or 1)
+			]
+			if len(exact) == 1:
+				match = {"status": "reused", "candidate": exact[0]}
+		if match["status"] == "reused":
+			bind_recording_to_music(recording, match["candidate"])
+			status = "in_library"
+		else:
+			status = "not_in_library"
+		counts[status] += 1
+		rows.append({
+			"position": position,
+			"recording_id": key,
+			"spotify_id": track.get("sp_id"),
+			"title": recording["source_metadata"].get("title") or "",
+			"artists": track.get("artists") or "",
+			"track_no": int(track.get("track_no") or position),
+			"disc_no": int(track.get("disc_no") or 1),
+			"status": status,
+			"detail": "In Library" if status == "in_library" else "Not in Library",
 		})
 		items.append({
 			"position": position,

@@ -114,6 +114,8 @@ export interface PreviewRow {
   title: string;
   artists: string;
   status:
+    | "in_library"
+    | "not_in_library"
     | "not_started"
     | "youtube_match_found"
     | "matches_need_approval"
