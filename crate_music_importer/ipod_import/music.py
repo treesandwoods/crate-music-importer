@@ -768,6 +768,20 @@ def reconcile_recording_music(
 	saved = index.by_persistent_id.get(saved_id)
 	if saved:
 		score, reasons = score_music_candidate(metadata, saved)
+		accepted = (recording.get("local_preferences") or {}).get("accepted_duration") or {}
+		managed = recording.get("managed_file") or {}
+		# A user-accepted local recording may have a different duration from Spotify.
+		# Use that exception only for its already-bound Music ID and saved audio baseline.
+		if (
+			score < MUSIC_CONFIDENCE_MIN
+			and accepted.get("audio_sha256")
+			and accepted.get("audio_sha256") == managed.get("audio_sha256")
+			and accepted.get("duration_ms")
+		):
+			accepted_metadata = {**metadata, "duration_ms": accepted["duration_ms"]}
+			accepted_score, accepted_reasons = score_music_candidate(accepted_metadata, saved)
+			if accepted_score >= MUSIC_CONFIDENCE_MIN:
+				score, reasons = accepted_score, accepted_reasons
 		if score >= MUSIC_CONFIDENCE_MIN:
 			if preferred_album and not _album_matches(preferred_album, saved):
 				album_match = match_music_track(metadata, [item for item in index.candidates(metadata) if _album_matches(preferred_album, item)])
