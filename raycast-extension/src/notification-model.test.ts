@@ -77,7 +77,7 @@ test("long names truncate without cutting off the event count", () => {
   const job = fixture("needs_attention");
   job.source.name = "A name made deliberately much longer than the toast message can display without truncation";
   const value = jobToast(job);
-  assert.equal(value.title, "Album needs approval");
+  assert.equal(value.title, "Album needs review");
   assert.ok((value.message || "").endsWith(" · 2 tracks"));
   assert.ok(length(value.message || "") <= TOAST_MESSAGE_LIMIT);
 });

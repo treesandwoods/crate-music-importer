@@ -39,6 +39,14 @@
       "mode": "view"
     },
     {
+      "name": "import-completion-hud",
+      "title": "Import Completion HUD",
+      "subtitle": "Crate Music Importer",
+      "description": "Show a HUD when an import or playlist update finishes.",
+      "mode": "no-view",
+      "interval": "1m"
+    },
+    {
       "name": "update-dependencies",
       "title": "Library Health & Updates",
       "subtitle": "Crate Music Importer",
