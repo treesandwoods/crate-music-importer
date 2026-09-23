@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Callable
 
@@ -17,7 +18,7 @@ from crate_music_importer.ipod_import.manifest import (
 	upsert_recording,
 	write_playlist_m3u8,
 )
-from crate_music_importer.ipod_import.identity import clean_release_labels, match_music_track, normalize_recording_title, normalize_text, normalized_artists
+from crate_music_importer.ipod_import.identity import clean_release_labels, duration_score, match_music_track, normalize_recording_title, normalize_text, normalized_artists, version_markers
 from crate_music_importer.ipod_import.media import (
 	MediaError,
 	download_recording,
@@ -81,6 +82,54 @@ def _album_matches(track: dict[str, Any], candidate: dict[str, Any]) -> bool:
 		normalize_text(clean_release_labels(track.get("album")))
 		and normalize_text(clean_release_labels(track.get("album"))) == normalize_text(clean_release_labels(candidate.get("album")))
 	)
+
+
+def _mislabelled_album_matches(album: dict[str, Any], music_tracks: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+	"""Find a whole album whose album title was saved in Music's album-artist field."""
+	requested = normalize_text(clean_release_labels(album.get("name")))
+	source_tracks = album.get("tracks") or []
+	if not requested or len(source_tracks) < 3:
+		return {}
+	groups: dict[str, list[dict[str, Any]]] = {}
+	for candidate in music_tracks:
+		actual_album = normalize_text(clean_release_labels(candidate.get("album")))
+		if (
+			candidate.get("persistent_id")
+			and actual_album and actual_album != requested
+			and normalize_text(clean_release_labels(candidate.get("album_artist"))) == requested
+			and normalize_text(clean_release_labels(candidate.get("artist"))) == requested
+		):
+			groups.setdefault(actual_album, []).append(candidate)
+	qualified: list[dict[int, dict[str, Any]]] = []
+	for candidates in groups.values():
+		if len(candidates) != len(source_tracks):
+			continue
+		by_position: dict[tuple[int, int], list[dict[str, Any]]] = {}
+		for candidate in candidates:
+			position = (int(candidate.get("disc_no") or 1), int(candidate.get("track_no") or 0))
+			by_position.setdefault(position, []).append(candidate)
+		matches: dict[int, dict[str, Any]] = {}
+		strong_titles = 0
+		for ordinal, track in enumerate(source_tracks):
+			position = (int(track.get("disc_no") or 1), int(track.get("track_no") or ordinal + 1))
+			at_position = by_position.get(position, [])
+			if len(at_position) != 1:
+				break
+			candidate = at_position[0]
+			wanted_title = normalize_recording_title(track.get("title"))
+			found_title = normalize_recording_title(candidate.get("title"))
+			title_score = SequenceMatcher(None, wanted_title, found_title).ratio()
+			if not wanted_title or not found_title or (title_score < 0.8 and not found_title.startswith(wanted_title + " ")):
+				break
+			if version_markers(track.get("title")) != version_markers(candidate.get("title")):
+				break
+			if duration_score(int(track.get("duration_ms") or 0), float(candidate.get("duration_s") or 0)) < 0.94:
+				break
+			strong_titles += title_score >= 0.95
+			matches[ordinal] = candidate
+		if len(matches) == len(source_tracks) and strong_titles >= max(3, len(source_tracks) * 4 // 5):
+			qualified.append(matches)
+	return qualified[0] if len(qualified) == 1 else {}
 
 
 def _expected_track_from_manifest(recording: dict[str, Any], persistent_id: str) -> dict[str, Any]:
@@ -227,6 +276,7 @@ def build_album_preview(
 	planned = clone_manifest(manifest)
 	planned.setdefault("albums", {})
 	index = MusicIndex(music_tracks)
+	mislabelled = _mislabelled_album_matches(album, music_tracks)
 	rows: list[dict[str, Any]] = []
 	items: list[dict[str, Any]] = []
 	counts: dict[str, int] = {}
@@ -235,6 +285,10 @@ def build_album_preview(
 		key, recording = upsert_recording(planned, track, source_type="album")
 		requested_album = str(track.get("album") or album.get("name") or "")
 		resolution = reconcile_recording_music(recording, index, preferred_album=requested_album)
+		if source_position - 1 in mislabelled and resolution["status"] in ("missing", "album_mismatch"):
+			candidate = mislabelled[source_position - 1]
+			changed = bind_recording_to_music(recording, candidate)
+			resolution = {"status": "resolved", "candidate": candidate, "candidates": [candidate], "binding_changed": changed}
 		managed_ready = _managed_exists(recording, paths) and managed_duration_is_valid(recording, paths)
 		managed = recording.get("managed_file") or {}
 		candidate = resolution.get("candidate")
@@ -312,6 +366,7 @@ def build_album_library_preview(
 ) -> AlbumPreview:
 	"""Show current Music album membership and repair only unique recording bindings."""
 	planned = clone_manifest(manifest)
+	mislabelled = _mislabelled_album_matches(album, music_tracks)
 	album_tracks: dict[str, list[dict[str, Any]]] = {}
 	for candidate in music_tracks:
 		album_name = normalize_text(clean_release_labels(candidate.get("album")))
@@ -326,6 +381,8 @@ def build_album_library_preview(
 		requested_album = normalize_text(clean_release_labels(track.get("album") or album.get("name")))
 		candidates = album_tracks.get(requested_album, [])
 		match = match_music_track(track, candidates)
+		if match["status"] == "missing" and source_position - 1 in mislabelled:
+			match = {"status": "reused", "candidate": mislabelled[source_position - 1]}
 		if match["status"] == "missing":
 			# Album editions can use different track boundaries. Exact title, artist,
 			# disc, and position still identify a Music album entry for search status.

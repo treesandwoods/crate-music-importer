@@ -80,6 +80,17 @@ class MusicAutomationTests(unittest.TestCase):
 		self.assertEqual((result["status"], result["binding_changed"]), ("resolved", True))
 		self.assertEqual(recording["music_binding"], {"persistent_id": "CURRENT"})
 
+	def test_saved_id_uses_accepted_local_duration_with_matching_audio_baseline(self):
+		recording = source_recording("PID")
+		recording["source_metadata"]["duration_ms"] = 318000
+		recording["managed_file"] = {"audio_sha256": "accepted-audio"}
+		recording["local_preferences"] = {"accepted_duration": {"duration_ms": 259000, "audio_sha256": "accepted-audio"}}
+		candidate = music_track("PID") | {"duration_s": 259}
+		self.assertEqual(reconcile_recording_music(recording, MusicIndex([candidate]))["status"], "resolved")
+		recording["local_preferences"]["accepted_duration"]["audio_sha256"] = "different-audio"
+		self.assertEqual(reconcile_recording_music(recording, MusicIndex([candidate]))["status"], "missing")
+		self.assertEqual(reconcile_recording_music(recording, MusicIndex([candidate | {"title": "Different"}]))["status"], "missing")
+
 	def test_requested_album_copy_wins_over_other_copy(self):
 		recording = source_recording("LOOSE")
 		result = reconcile_recording_music(recording, MusicIndex([music_track("LOOSE", "Playlist Imports"), music_track("ALBUM")]), preferred_album="Album")

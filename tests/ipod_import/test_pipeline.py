@@ -35,6 +35,24 @@ def music_track(persistent_id="PID", *, album_name="Album", location="/Music/Son
 
 
 class PipelineTests(unittest.TestCase):
+	def test_mislabelled_album_artist_cohort_is_in_library_without_retagging(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory) / "managed")
+			titles = ["The Girl From Ipanema", "Doralice", "Desafinado", "Corcovado"]
+			lengths = [324, 166, 255, 256]
+			tracks = [source_track(position=n, track_no=n, title=title, artists="Stan Getz, João Gilberto", album="Getz/Gilberto", duration_ms=lengths[n - 1] * 1000) for n, title in enumerate(titles, 1)]
+			candidates = [music_track(f"GETZ{n}", album_name="Stan Getz") | {"title": title if n != 4 else "Corcovado (Quiet Nights Of Quiet Stars)", "artist": "Getz/Gilberto", "album_artist": "Getz/Gilberto", "track_no": n, "disc_no": 0, "duration_s": lengths[n - 1]} for n, title in enumerate(titles, 1)]
+			source_album = album(tracks) | {"name": "Getz/Gilberto"}
+			library = build_album_library_preview(source_album, candidates, new_manifest(paths))
+			self.assertEqual(library.counts, {"in_library": 4, "not_in_library": 0})
+			preview = build_album_preview(source_album, candidates, new_manifest(paths), paths)
+			self.assertEqual(preview.counts, {"reused_music": 4})
+			self.assertFalse(paths.root.exists())
+			incomplete = build_album_library_preview(source_album, candidates[:-1], new_manifest(paths))
+			self.assertEqual(incomplete.counts, {"in_library": 0, "not_in_library": 4})
+			ambiguous = build_album_library_preview(source_album, candidates + [candidate | {"persistent_id": "OTHER"} for candidate in candidates], new_manifest(paths))
+			self.assertEqual(ambiguous.counts, {"in_library": 0, "not_in_library": 4})
+
 	def test_named_album_examples_resolve_from_music_without_file_provenance(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")
