@@ -11,9 +11,9 @@ test(
   { skip: process.platform !== "darwin" },
   async () => {
     const directory = await mkdtemp(join(tmpdir(), "crate-artwork-refresh-test-"));
-  const originalFetch = globalThis.fetch;
-  const bmp = Buffer.alloc(54 + 120 * 120 * 3, 128);
-  bmp.fill(0, 0, 54);
+    const originalFetch = globalThis.fetch;
+    const bmp = Buffer.alloc(54 + 120 * 120 * 3, 128);
+    bmp.fill(0, 0, 54);
     bmp.write("BM");
     bmp.writeUInt32LE(bmp.length, 2);
     bmp.writeUInt32LE(54, 10);

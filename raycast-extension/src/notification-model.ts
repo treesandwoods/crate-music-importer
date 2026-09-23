@@ -58,10 +58,7 @@ export function jobToast(job: ImportJob): {
     const count = job.counts.review + job.counts.failed;
     return {
       style: "failure",
-      ...compactToast(
-        `${kind} needs approval`,
-        namedDetail(sourceName, `${count} ${count === 1 ? "track" : "tracks"}`),
-      ),
+      ...compactToast(`${kind} needs review`, namedDetail(sourceName, `${count} ${count === 1 ? "track" : "tracks"}`)),
     };
   }
   return {

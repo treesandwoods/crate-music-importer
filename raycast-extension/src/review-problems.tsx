@@ -1,21 +1,8 @@
 import { mergeYouTubeCandidates } from "./youtube-review";
-import {
-  Action,
-  ActionPanel,
-  Alert,
-  Color,
-  confirmAlert,
-  Form,
-  Icon,
-  List,
-  LaunchProps,
-  Toast,
-  useNavigation,
-} from "@raycast/api";
+import { Action, ActionPanel, Alert, Color, confirmAlert, Form, Icon, List, Toast, useNavigation } from "@raycast/api";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
-  acknowledgeJobNotification,
   cancelIncompleteJob,
   cancelSourceProgress,
   loadJobs,
@@ -26,8 +13,7 @@ import {
   retryJob,
   searchYouTube,
 } from "./backend";
-import { deliverPendingNotifications } from "./notification-delivery";
-import { showCompactToast, showTerminalJobNotification, updateCompactToast } from "./notifications";
+import { showCompactToast, updateCompactToast } from "./notifications";
 import type {
   ImportJob,
   JobsSnapshot,
@@ -615,68 +601,38 @@ function JobActions({ job, refresh }: { job: ImportJob; refresh: () => Promise<v
   );
 }
 
-interface ActivityContext {
-  jobId?: string;
-  terminalEvent?: boolean;
-}
-
-export default function Command(props: LaunchProps<{ launchContext: ActivityContext }>) {
+export default function Command() {
   const [snapshot, setSnapshot] = useState<ResolverSnapshot>();
   const [jobs, setJobs] = useState<JobsSnapshot>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
-  const shownNotifications = useRef(new Set<string>());
   const refreshInFlight = useRef(false);
 
-  const handlePending = useCallback(async (values: ImportJob[]) => {
-    await deliverPendingNotifications(values, {
-      handled: shownNotifications.current,
-      showJob: showTerminalJobNotification,
-      acknowledge: acknowledgeJobNotification,
-      pauseBetweenToasts: () => new Promise((resolve) => setTimeout(resolve, 2_000)),
-    });
+  const refresh = useCallback(async (showLoading = true) => {
+    if (refreshInFlight.current) return;
+    refreshInFlight.current = true;
+    if (showLoading) setLoading(true);
+    try {
+      const [nextSnapshot, nextJobs] = await Promise.all([loadSnapshot(), loadJobs()]);
+      setSnapshot((current) => (sameSnapshot(current, nextSnapshot) ? current : nextSnapshot));
+      setJobs((current) => (sameSnapshot(current, nextJobs) ? current : nextJobs));
+      setError(undefined);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      refreshInFlight.current = false;
+      if (showLoading) setLoading(false);
+    }
   }, []);
 
-  const refresh = useCallback(
-    async (deliverNotifications = true, showLoading = true) => {
-      if (refreshInFlight.current) return;
-      refreshInFlight.current = true;
-      if (showLoading) setLoading(true);
-      try {
-        const [nextSnapshot, nextJobs] = await Promise.all([loadSnapshot(), loadJobs()]);
-        setSnapshot((current) => (sameSnapshot(current, nextSnapshot) ? current : nextSnapshot));
-        setJobs((current) => (sameSnapshot(current, nextJobs) ? current : nextJobs));
-        setError(undefined);
-        if (deliverNotifications) await handlePending(nextJobs.pendingNotifications);
-      } catch (caught) {
-        setError(caught instanceof Error ? caught.message : String(caught));
-      } finally {
-        refreshInFlight.current = false;
-        if (showLoading) setLoading(false);
-      }
-    },
-    [handlePending],
-  );
-
   useEffect(() => {
-    async function initialLoad() {
-      if (props.launchContext?.jobId && props.launchContext.terminalEvent) {
-        try {
-          const pending = (await loadJobs()).pendingNotifications;
-          await handlePending(pending);
-        } catch {
-          // Pending events remain durable for the next successful background or foreground launch.
-        }
-      }
-      await refresh();
-    }
-    void initialLoad();
-  }, [handlePending, props.launchContext?.jobId, props.launchContext?.terminalEvent, refresh]);
+    void refresh();
+  }, [refresh]);
 
   useEffect(() => {
     const active = jobs?.jobs.some((job) => job.status === "queued" || job.status === "running");
     if (!active) return;
-    const timer = setInterval(() => void refresh(true, false), 1_000);
+    const timer = setInterval(() => void refresh(false), 1_000);
     return () => clearInterval(timer);
   }, [jobs?.jobs, refresh]);
 
