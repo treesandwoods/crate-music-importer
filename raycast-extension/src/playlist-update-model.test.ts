@@ -132,6 +132,7 @@ test("command keeps new import first and exposes saved playlist, update, and inc
   assert.match(source, /Music\.app Corrections/);
   assert.match(source, /Sync Playlist with Spotify/);
   assert.match(source, /Change Stored Spotify Link/);
+  assert.match(source, /Refresh Playlist Artwork/);
   assert.match(source, /title=\{primaryActionTitle\}/);
   assert.match(source, /Spotify #\$\{row.position\}/);
   assert.match(source, /source: artwork\[playlist\.cover_url\]/);

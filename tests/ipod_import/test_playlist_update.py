@@ -4,7 +4,7 @@ from pathlib import Path
 
 from crate_music_importer.ipod_import.manifest import ManagedPaths, new_manifest, set_album, set_playlist, upsert_recording
 from crate_music_importer.ipod_import.music import MusicAutomationError
-from crate_music_importer.ipod_import.playlist_update import apply_playlist_update, backfill_playlist_covers, build_playlist_update_preview, save_pending_update, saved_playlists
+from crate_music_importer.ipod_import.playlist_update import apply_playlist_update, build_playlist_update_preview, refresh_playlist_covers, save_pending_update, saved_playlists
 
 
 URL = "https://open.spotify.com/playlist/37i9dQZF1DXTESTFIXTURE1"
@@ -59,7 +59,7 @@ class PlaylistUpdateTests(unittest.TestCase):
 		self.assertEqual(saved_playlists(manifest)[0]["spotify_url"], URL)
 		self.assertEqual(saved_playlists(manifest)[0]["cover_url"], "https://example.test/saved.jpg")
 
-	def test_backfills_missing_playlist_covers_without_replacing_cached_images(self):
+	def test_refreshes_changed_playlist_covers_and_preserves_failed_fetches(self):
 		_paths, manifest, _music = self.fixture()
 		manifest["playlists"]["saved"].pop("cover_url")
 		manifest["playlists"]["cached"] = {
@@ -69,14 +69,18 @@ class PlaylistUpdateTests(unittest.TestCase):
 			"items": [],
 		}
 		seen = []
-		updated = backfill_playlist_covers(
+		updated = refresh_playlist_covers(
 			manifest,
-			lambda url: seen.append(url) or "https://example.test/backfilled.jpg",
+			lambda url: seen.append(url) or ("https://example.test/backfilled.jpg" if url == URL else None),
 		)
-		self.assertEqual(updated, 1)
-		self.assertEqual(seen, [URL])
+		self.assertEqual(updated, {"saved": (URL, "https://example.test/backfilled.jpg")})
+		self.assertEqual(set(seen), {URL, manifest["playlists"]["cached"]["spotify_url"]})
 		self.assertEqual(manifest["playlists"]["saved"]["cover_url"], "https://example.test/backfilled.jpg")
 		self.assertEqual(manifest["playlists"]["cached"]["cover_url"], "https://example.test/cached.jpg")
+		self.assertEqual(refresh_playlist_covers(manifest, lambda _url: "https://example.test/new.jpg"), {
+			"saved": (URL, "https://example.test/new.jpg"),
+			"cached": (manifest["playlists"]["cached"]["spotify_url"], "https://example.test/new.jpg"),
+		})
 
 	def test_first_update_backfills_and_detects_reorder_only_change(self):
 		_paths, manifest, music = self.fixture(("a", "b"))

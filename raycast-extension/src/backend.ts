@@ -77,6 +77,10 @@ export function changePlaylistLink(
   return runJson(["playlist-link-set", playlistId, url, "--confirm"]);
 }
 
+export function refreshPlaylistArtwork(playlistId: string): Promise<{ playlist_id: string; cover_url: string }> {
+  return runJson(["playlist-artwork-refresh", playlistId, "--json"]);
+}
+
 export function queuePlaylistUpdate(
   playlist: SavedPlaylistSummary,
   preview: PlaylistUpdatePreview,

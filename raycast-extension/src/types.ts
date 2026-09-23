@@ -196,6 +196,7 @@ export interface PlaylistUpdatePreview {
     id: string;
     name: string;
     url: string;
+    cover_url?: string | null;
     saved_total: number;
     current_total: number;
   };

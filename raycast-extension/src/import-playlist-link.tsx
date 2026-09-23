@@ -15,7 +15,13 @@ import { join } from "node:path";
 import { squarePlaylistArtwork } from "./playlist-artwork";
 import { useCallback, useEffect, useState } from "react";
 
-import { changePlaylistLink, loadSavedPlaylists, previewPlaylistUpdate, queuePlaylistUpdate } from "./backend";
+import {
+  changePlaylistLink,
+  loadSavedPlaylists,
+  previewPlaylistUpdate,
+  queuePlaylistUpdate,
+  refreshPlaylistArtwork,
+} from "./backend";
 import { compactText } from "./notification-model";
 import { showCompactToast, updateCompactToast } from "./notifications";
 import { canQueuePlaylistUpdate, playlistUpdateConfirmation, removalLabel } from "./playlist-update-model";
@@ -108,21 +114,29 @@ function ChangePlaylistLinkForm({ playlist, onChanged }: { playlist: SavedPlayli
   );
 }
 
-export function PlaylistUpdatePreviewView({ playlist }: { playlist: SavedPlaylistSummary }) {
+export function PlaylistUpdatePreviewView({
+  playlist,
+  onArtworkChanged,
+}: {
+  playlist: SavedPlaylistSummary;
+  onArtworkChanged?: () => void;
+}) {
   const [preview, setPreview] = useState<PlaylistUpdatePreview>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setPreview(await previewPlaylistUpdate(playlist.id));
+      const next = await previewPlaylistUpdate(playlist.id);
+      setPreview(next);
+      if (next.source.cover_url && next.source.cover_url !== playlist.cover_url) onArtworkChanged?.();
       setError(undefined);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setLoading(false);
     }
-  }, [playlist.id]);
+  }, [playlist.id, playlist.cover_url, onArtworkChanged]);
   useEffect(() => void load(), [load]);
 
   async function queue() {
@@ -331,6 +345,30 @@ export default function Command() {
     }
   }, []);
   useEffect(() => void load(), [load]);
+
+  async function refreshArtwork(playlist: SavedPlaylistSummary) {
+    const toast = await showCompactToast(Toast.Style.Animated, "Refreshing playlist artwork", playlist.name);
+    try {
+      const result = await refreshPlaylistArtwork(playlist.id);
+      const path = await squarePlaylistArtwork(
+        result.cover_url,
+        join(environment.supportPath, "playlist-artwork-v1"),
+        true,
+      );
+      setArtwork((current) => ({ ...current, [result.cover_url]: path }));
+      setPlaylists((current) =>
+        current.map((row) => (row.id === playlist.id ? { ...row, cover_url: result.cover_url } : row)),
+      );
+      updateCompactToast(toast, Toast.Style.Success, "Playlist artwork refreshed", playlist.name);
+    } catch (caught) {
+      updateCompactToast(
+        toast,
+        Toast.Style.Failure,
+        "Could not refresh artwork",
+        caught instanceof Error ? caught.message : String(caught),
+      );
+    }
+  }
   return (
     <List isLoading={loading} navigationTitle="Playlists Browse & Import" searchBarPlaceholder="Filter saved playlists">
       <List.Section>
@@ -360,8 +398,9 @@ export default function Command() {
                 <Action.Push
                   title="Preview Update"
                   icon={Icon.ArrowClockwise}
-                  target={<PlaylistUpdatePreviewView playlist={playlist} />}
+                  target={<PlaylistUpdatePreviewView playlist={playlist} onArtworkChanged={load} />}
                 />
+                <Action title="Refresh Playlist Artwork" icon={Icon.Image} onAction={() => refreshArtwork(playlist)} />
                 <Action.Push
                   title="Change Stored Spotify Link"
                   icon={Icon.Link}
