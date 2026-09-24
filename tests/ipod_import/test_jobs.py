@@ -599,11 +599,11 @@ class DurableJobTests(unittest.TestCase):
 			self.assertFalse(reopened_again["notification"]["pending"])
 			self.assertIsNotNone(reopened_again["notification"]["notifiedAt"])
 
-	def test_terminal_deeplink_targets_no_view_hud_and_passes_only_durable_job_context(self):
+	def test_terminal_deeplink_targets_completion_notifications_and_passes_only_durable_job_context(self):
 		with patch.dict(os.environ, {"CRATE_RAYCAST_AUTHOR": "fixture-author", "CRATE_RAYCAST_EXTENSION": "fixture-extension"}):
 			url = _raycast_deeplink("job-id")
 			self.assertIn("fixture-author/fixture-extension", url)
-			self.assertIn("import-completion-hud", url)
+			self.assertIn("completion-notifications", url)
 			self.assertIn("launchType=background", url)
 			self.assertIn("job-id", url)
 			self.assertNotIn("Album added", url)

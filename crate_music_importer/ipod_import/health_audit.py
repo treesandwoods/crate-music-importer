@@ -137,7 +137,7 @@ def start_health_audit(paths: ManagedPaths, deep_all: bool = False) -> dict[str,
 def _notify(failed: bool) -> None:
 	try:
 		subprocess.run(["/usr/bin/osascript", "-e", 'display notification "' +
-			("Audit failed. Open Library Health & Updates to retry." if failed else "Audit complete. Open Library Health & Updates to review.") +
+			("Audit failed. Open Library Health to retry." if failed else "Audit complete. Open Library Health to review.") +
 			'" with title "Crate Music Importer"'], capture_output=True, timeout=10, check=False)
 	except (OSError, subprocess.TimeoutExpired):
 		pass

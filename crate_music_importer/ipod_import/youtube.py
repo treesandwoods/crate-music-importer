@@ -26,7 +26,7 @@ def ytdlp_path() -> str:
 	resolved = resolve_executable("yt-dlp")
 	if resolved:
 		return resolved
-	raise YouTubeError("yt-dlp is required. Install the prerequisites in the README, then run Library Health & Updates in Raycast.")
+	raise YouTubeError("yt-dlp is required. Install the prerequisites in the README, then run Library Health in Raycast.")
 
 
 def _run_json(arguments: list[str], *, timeout: float = 120) -> dict[str, Any]:

@@ -20,7 +20,7 @@ Install the external prerequisites after installing Homebrew:
 brew install python node yt-dlp ffmpeg deno
 ```
 
-This initial installation is separate from **Library Health & Updates**, which never installs or upgrades Python or application packages.
+This initial installation is separate from **Library Health**, which never installs or upgrades Python or application packages.
 
 To install the extension from source, use an isolated Python environment, install the package, then install and build the Raycast extension normally:
 
@@ -48,12 +48,12 @@ Paths may be absolute or begin with `~/`. Relative paths are rejected. Each macO
 
 ## Commands and use
 
-On first use, open **Library Health & Updates** and explicitly run **Library Health Audit**. This read-only Music scan builds the persistent index used by previews. Allow Raycast to control Music when macOS asks, and grant file access to the configured Music directory if requested.
+On first use, open **Library Health** and explicitly run **Library Health Audit**. This read-only Music scan builds the persistent index used by previews. Allow Raycast to control Music when macOS asks, and grant file access to the configured Music directory if requested.
 
-- **Albums Browse & Import** searches Spotify, previews each track against the disposable Music index, and queues a confirmed album import. The detached worker revalidates exact Music IDs, automatically repairs stale bindings when one safe current match exists, finds only high-confidence YouTube recordings, downloads and tags missing MP3s with album metadata and artwork, and serializes Music additions so every new entry is stable before the next begins. Ambiguity or a failed check stops for review instead of creating a guess or duplicate.
-- **Playlists Browse & Import** keeps **Import a New Playlist** first and lists prior imports below it with center-cropped square artwork and no rounded corners. A new public Spotify link follows the same preview, confirmation, matching, download, and exact-ID validation workflow. Selecting a saved playlist previews an occurrence-aware full sync: additions, removals, duplicate occurrences, Spotify position changes, and Music.app-only discrepancies are shown before confirmation. Applying it makes that Music.app playlist exactly match Spotify order; unexpected manual playlist entries are removed from the playlist but never deleted from the Music library. Every Spotify removal is labeled **unlink** or **delete permanently** before confirmation.
-- **Review Activity & Problems** shows the durable FIFO job queue, per-track progress, completed history, review choices, resumable failures, retry actions, and cancellation for incomplete work. Jobs continue after Raycast closes. The background **Import Completion HUD** command shows one HUD for each finished job, including jobs that need review or fail. Events remain pending until the HUD succeeds, including a new completion after a reviewed job is retried.
-- **Library Health & Updates** immediately shows the latest saved report and checks dependency versions without starting a scan. Explicit refresh and deep-check actions run a detached read-only audit, refresh the preview index only after a successful Music scan, and keep prior results visible while work runs. The same command can preview and confirm safe stable updates only for the detected Homebrew `yt-dlp`, `ffmpeg`/`ffprobe`, and Deno installations; it never performs a general upgrade.
+- **Albums** searches Spotify, previews each track against the disposable Music index, and queues a confirmed album import. The detached worker revalidates exact Music IDs, automatically repairs stale bindings when one safe current match exists, finds only high-confidence YouTube recordings, downloads and tags missing MP3s with album metadata and artwork, and serializes Music additions so every new entry is stable before the next begins. Ambiguity or a failed check stops for review instead of creating a guess or duplicate.
+- **Playlists** keeps **Import a New Playlist** first and lists prior imports below it with center-cropped square artwork and no rounded corners. A new public Spotify link follows the same preview, confirmation, matching, download, and exact-ID validation workflow. Selecting a saved playlist previews an occurrence-aware full sync: additions, removals, duplicate occurrences, Spotify position changes, and Music.app-only discrepancies are shown before confirmation. Applying it makes that Music.app playlist exactly match Spotify order; unexpected manual playlist entries are removed from the playlist but never deleted from the Music library. Every Spotify removal is labeled **unlink** or **delete permanently** before confirmation.
+- **Review Activity** shows the durable FIFO job queue, per-track progress, completed history, review choices, resumable failures, retry actions, and cancellation for incomplete work. Jobs continue after Raycast closes. The background notification entry shows one HUD for each finished job, including jobs that need review or fail. Events remain pending until the HUD succeeds, including a new completion after a reviewed job is retried.
+- **Library Health** immediately shows the latest saved report and checks dependency versions without starting a scan. Explicit refresh and deep-check actions run a detached read-only audit, refresh the preview index only after a successful Music scan, and keep prior results visible while work runs. The same command can preview and confirm safe stable updates only for the detected Homebrew `yt-dlp`, `ffmpeg`/`ffprobe`, and Deno installations; it never performs a general upgrade.
 
 Automatic YouTube selection requires a score strictly greater than `0.87`; manual choices remain deliberate. Incomplete Spotify responses, missing per-track artwork, incorrect downloaded durations, uncertain Music identity, or conflicting real albums stop progress instead of silently producing a partial import.
 
@@ -68,7 +68,7 @@ Music.app is authoritative. Previews use a disposable cache that is rebuilt from
    https://raycast.com/redirect?packageName=crate-music-importer
    ```
 
-3. Put the app's Client ID in Raycast preferences, then open **Albums Browse & Import** and sign in.
+3. Put the app's Client ID in Raycast preferences, then open **Albums** and sign in.
 4. If the app is in development mode, authorize the Spotify account in the developer dashboard as required by Spotify.
 
 This uses Authorization Code with PKCE; no client secret is used or shipped. Tokens are stored through Raycast's secure OAuth API. Changing the client ID uses a separate token namespace. The source deliberately overrides the redirect URI so it matches the URI above. A fork may keep it; if you change it, change the authorization request and your developer-app registration together. Spotify requires exact URI matching: [redirect requirements](https://developer.spotify.com/documentation/web-api/concepts/redirect_uri). See also [Raycast OAuth](https://developers.raycast.com/api-reference/oauth).

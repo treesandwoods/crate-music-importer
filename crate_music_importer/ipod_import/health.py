@@ -212,7 +212,7 @@ def _build_health_report(
 		resolutions[recording_id] = result
 		binding_repairs += int(result.get("binding_changed", False))
 		if result["status"] == "ambiguous":
-			add("ambiguous_music_match", "Multiple Music tracks plausibly represent this recording.", recording_ids=[recording_id], persistent_ids=[str(item.get("persistent_id") or "") for item in result["candidates"]], tracks=result["candidates"], next_step="Choose the correct Music track in Import Activity & Problems.")
+			add("ambiguous_music_match", "Multiple Music tracks plausibly represent this recording.", recording_ids=[recording_id], persistent_ids=[str(item.get("persistent_id") or "") for item in result["candidates"]], tracks=result["candidates"], next_step="Choose the correct Music track in Review Activity.")
 		elif result["status"] == "missing":
 			metadata = recording.get("source_metadata") or {}
 			bound_id = music_binding_id(recording)

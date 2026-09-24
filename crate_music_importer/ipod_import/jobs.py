@@ -28,7 +28,7 @@ from crate_music_importer.ipod_import.spotify import parse_source_url
 
 ACTIVE_STATES = {"queued", "running"}
 TERMINAL_STATES = {"complete", "needs_attention", "ready_to_continue", "failed", "cancelled", "superseded"}
-RAYCAST_NOTIFICATION_COMMAND = "import-completion-hud"
+RAYCAST_NOTIFICATION_COMMAND = "completion-notifications"
 
 
 def _now() -> str:

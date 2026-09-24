@@ -224,7 +224,7 @@ export function SourcePreviewView({ type, url }: { type: "album" | "playlist"; u
               <Action title="Try Again" icon={Icon.ArrowClockwise} onAction={load} />
               {error.includes("Music library cache") ? (
                 <Action
-                  title="Open Library Health & Updates"
+                  title="Open Library Health"
                   icon={Icon.HardDrive}
                   onAction={() => launchCommand({ name: "update-dependencies", type: LaunchType.UserInitiated })}
                 />

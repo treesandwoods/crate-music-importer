@@ -75,7 +75,7 @@ export default function Command({ fallbackText }: LaunchProps) {
       filtering={false}
       throttle={false}
       searchText={query}
-      navigationTitle="Albums Browse & Import"
+      navigationTitle="Albums"
       searchBarPlaceholder="Search Spotify albums"
     >
       {albums.length ? (

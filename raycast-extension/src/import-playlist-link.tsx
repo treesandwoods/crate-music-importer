@@ -370,7 +370,7 @@ export default function Command() {
     }
   }
   return (
-    <List isLoading={loading} navigationTitle="Playlists Browse & Import" searchBarPlaceholder="Filter saved playlists">
+    <List isLoading={loading} navigationTitle="Playlists" searchBarPlaceholder="Filter saved playlists">
       <List.Section>
         <List.Item
           title="Import a New Playlist"

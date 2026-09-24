@@ -650,7 +650,7 @@ def execute_album_import(
 					attention_phase = "matches_need_approval" if choice["candidates"] else "no_youtube_matches"
 					recording["review"] = {
 						"kind": "youtube_missing",
-						"message": "No verified YouTube recording met the automatic identity and duration requirements. Choose a verified recording in Import Activity & Problems.",
+						"message": "No verified YouTube recording met the automatic identity and duration requirements. Choose a verified recording in Review Activity.",
 						"candidates": choice["candidates"],
 						"search_summary": choice.get("search_summary", {}),
 					}
