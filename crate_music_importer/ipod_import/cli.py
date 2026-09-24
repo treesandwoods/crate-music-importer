@@ -531,7 +531,7 @@ def _run(
 			statuses[item["status"]] = statuses.get(item["status"], 0) + 1
 		print("Result: " + ", ".join(f"{key}={value}" for key, value in sorted(statuses.items())))
 		if statuses.get("review_required") or statuses.get("failed"):
-			print("Next action in Raycast: open Import Activity & Problems, resolve the tracks, then continue the album.")
+			print("Next action in Raycast: open Review Activity, resolve the tracks, then continue the album.")
 		else:
 			print("Album files are ready for Music. The combined Raycast command will continue automatically.")
 		return 0 if not statuses.get("failed") and not statuses.get("review_required") else 2
@@ -573,7 +573,7 @@ def _run(
 		print("Result: " + ", ".join(f"{key}={value}" for key, value in sorted(statuses.items())))
 		print(f"M3U8: {result['m3u8']}")
 		if statuses.get("review_required") or statuses.get("failed"):
-			print("Next action in Raycast: open Import Activity & Problems, resolve the tracks, then continue the playlist.")
+			print("Next action in Raycast: open Review Activity, resolve the tracks, then continue the playlist.")
 		else:
 			print("Playlist files are ready for Music. The combined Raycast command will continue automatically.")
 		return 0 if not statuses.get("failed") and not statuses.get("review_required") else 2
@@ -645,7 +645,7 @@ def _run(
 					if review.get("kind") in ("album_identity_mismatch", "album_identity_conflict"):
 						print("TO RESOLVE: choose the Music track carrying the requested album identity; Crate will not modify an unregistered physical file.")
 					else:
-						print("TO RESOLVE IN RAYCAST: open Import Activity & Problems and choose a verified recording.")
+						print("TO RESOLVE IN RAYCAST: open Review Activity and choose a verified recording.")
 			if not rows:
 				print("No unresolved recordings.")
 		return 0
@@ -663,7 +663,7 @@ def _run(
 	if args.command == "resolve":
 		result = resolve_youtube_choice(args.recording, args.youtube_url, paths=paths, allow_music_override=True)
 		print(
-			f"Saved deliberate YouTube source for {result['recordingId']}; continue it from Import Activity & Problems."
+			f"Saved deliberate YouTube source for {result['recordingId']}; continue it from Review Activity."
 		)
 		return 0
 	if args.command == "promote":

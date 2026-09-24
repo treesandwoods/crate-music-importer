@@ -25,7 +25,7 @@ def _tool(name: str) -> str:
 	resolved = resolve_executable(name)
 	if resolved:
 		return resolved
-	raise MediaError(f"{name} is required. Install the prerequisites in the README, then run Library Health & Updates in Raycast.")
+	raise MediaError(f"{name} is required. Install the prerequisites in the README, then run Library Health in Raycast.")
 
 
 def check_tools() -> dict[str, str]:

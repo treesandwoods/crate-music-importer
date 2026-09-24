@@ -4,7 +4,7 @@ import test from "node:test";
 import { transformSync } from "esbuild";
 import type { ImportJob } from "./types";
 
-const source = readFileSync("src/import-completion-hud.ts", "utf8")
+const source = readFileSync("src/completion-notifications.ts", "utf8")
   .replace(/import .* from "\.\/backend";/, "const { loadJobs, acknowledgeJobNotification } = host;")
   .replace(/import .* from "\.\/notification-delivery";/, "const { deliverPendingNotifications } = host;")
   .replace(/import .* from "\.\/notifications";/, "const { showTerminalJobHUD } = host;");

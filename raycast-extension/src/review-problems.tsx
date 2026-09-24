@@ -645,7 +645,7 @@ export default function Command() {
     <List
       isLoading={loading}
       isShowingDetail
-      navigationTitle="Review Activity & Problems"
+      navigationTitle="Review Activity"
       searchBarPlaceholder="Filter imports and tracks"
     >
       {activeJobs.length ? (

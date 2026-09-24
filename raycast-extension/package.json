@@ -19,28 +19,28 @@
   "commands": [
     {
       "name": "browse-import-albums",
-      "title": "Albums Browse & Import",
+      "title": "Albums",
       "subtitle": "Crate Music Importer",
       "description": "Search Spotify, preview album tracks, and queue a confirmed Music import.",
       "mode": "view"
     },
     {
       "name": "import-playlist-link",
-      "title": "Playlists Browse & Import",
+      "title": "Playlists",
       "subtitle": "Crate Music Importer",
       "description": "Import a public Spotify playlist or preview an exact Spotify-order sync for a saved import.",
       "mode": "view"
     },
     {
       "name": "import-activity-problems",
-      "title": "Review Activity & Problems",
+      "title": "Review Activity",
       "subtitle": "Crate Music Importer",
       "description": "Monitor durable import progress and resolve tracks that need attention.",
       "mode": "view"
     },
     {
-      "name": "import-completion-hud",
-      "title": "Import Completion HUD",
+      "name": "completion-notifications",
+      "title": "Completion Notifications",
       "subtitle": "Crate Music Importer",
       "description": "Show a HUD when an import or playlist update finishes.",
       "mode": "no-view",
@@ -48,7 +48,7 @@
     },
     {
       "name": "update-dependencies",
-      "title": "Library Health & Updates",
+      "title": "Library Health",
       "subtitle": "Crate Music Importer",
       "description": "Run a read-only library audit and check for safe, stable downloader updates.",
       "mode": "view"
