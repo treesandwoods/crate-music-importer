@@ -46,13 +46,13 @@ export default function Command() {
     setHealthError(value.error || "");
   }
 
-  async function checkHealth(deepAll = false) {
+  async function checkHealth() {
     if (healthRunning.current || operation.current) return;
     healthRunning.current = true;
     setHealthBusy(true);
     setHealthError("");
     try {
-      acceptAudit(await startHealthAudit(deepAll));
+      acceptAudit(await startHealthAudit());
     } catch (error) {
       setHealthError(String(error));
       setHealthBusy(false);
@@ -177,9 +177,6 @@ export default function Command() {
       {!dependenciesBusy && <Action title="Check Dependency Versions" onAction={checkDependencies} />}
       {!healthBusy && !operation.current && (
         <Action title={health ? "Refresh Library Health" : "Run Library Health Audit"} onAction={() => checkHealth()} />
-      )}
-      {!healthBusy && !operation.current && (
-        <Action title="Deep Check All Local Music" onAction={() => checkHealth(true)} />
       )}
     </ActionPanel>
   );
