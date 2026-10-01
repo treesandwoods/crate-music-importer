@@ -123,12 +123,20 @@ def refresh_music_cache(paths: ManagedPaths, tracks: list[dict[str, Any]]) -> di
 	return cache
 
 
-def load_music_cache(paths: ManagedPaths, *, rebuild: Callable[[], list[dict[str, Any]]] | None = None) -> dict[str, Any]:
-	"""Load the cache, rebuilding it from Music.app whenever it cannot be trusted."""
+def read_music_cache(paths: ManagedPaths) -> dict[str, Any]:
+	"""Read an existing valid snapshot without scanning Music or writing state."""
 	try:
 		with paths.music_cache.open("r", encoding="utf-8") as handle:
 			return _validate_cache(json.load(handle), paths)
-	except (OSError, ValueError, MusicCacheUnavailableError):
+	except (OSError, ValueError, MusicCacheUnavailableError) as exc:
+		raise MusicCacheUnavailableError("Music cache unavailable. Run Refresh Library Health, then retry the album checks.") from exc
+
+
+def load_music_cache(paths: ManagedPaths, *, rebuild: Callable[[], list[dict[str, Any]]] | None = None) -> dict[str, Any]:
+	"""Load the cache, rebuilding it from Music.app whenever it cannot be trusted."""
+	try:
+		return read_music_cache(paths)
+	except MusicCacheUnavailableError:
 		if rebuild is None:
 			from crate_music_importer.ipod_import.music import scan_music_library
 

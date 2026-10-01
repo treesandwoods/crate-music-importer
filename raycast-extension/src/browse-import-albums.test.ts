@@ -6,6 +6,8 @@ import { createElement, type ComponentType, type ElementType } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import type { scanAlbumLibrary } from "./album-library";
+import type { AlbumLibraryStatus } from "./types";
 
 // Render the real command and its hooks, replacing only the native host and I/O.
 // No Raycast worker, Spotify account, or Music library is needed.
@@ -18,15 +20,18 @@ const source = readFileSync(resolve("src/browse-import-albums.tsx"), "utf8")
     const Action = Object.assign(host("Action"), { Push: "Push", OpenInBrowser: "OpenInBrowser" });
     const ActionPanel = "ActionPanel";
     const List = Object.assign(host("List"), { Item: host("Item"), Section: "Section", EmptyView: host("EmptyView") });
-    const Icon = {};
+    const Icon = new Proxy({}, { get: (_, key) => key });
+    const Color = new Proxy({}, { get: (_, key) => key });
     const Toast = { Style: { Failure: "failure" } };
   `,
   )
   .replace(/import .* from "\.\/notifications";/, "const showCompactToast = testHarness.toast;")
   .replace(/import .* from "\.\/source-preview";/, 'const SourcePreviewView = "Preview";')
+  .replace(/import .* from "\.\/album-library";/, "const scanAlbumLibrary = testHarness.scan;")
+  .replace(/import .* from "\.\/backend";/, "const openAlbumLibraryChecker = () => {};")
   .replace(
     /import .* from "\.\/spotify";/,
-    "const spotifyAccessToken = testHarness.authorize; const searchSpotifyAlbums = testHarness.search;",
+    "const spotifyAccessToken = testHarness.authorize; const searchSpotifyAlbums = testHarness.search; const fetchSpotifyAlbumTracks = () => {};",
   );
 const bundled = buildSync({
   stdin: { contents: source, loader: "tsx", resolveDir: resolve("src") },
@@ -53,6 +58,7 @@ async function mount(
   authorize: () => Promise<string>,
   search: (query: string, token: string) => Promise<unknown[]>,
   fallbackText = "",
+  scan: typeof scanAlbumLibrary = async () => {},
 ) {
   const toasts: unknown[][] = [];
   const module = { exports: {} as { default: ComponentType<{ fallbackText: string }> } };
@@ -63,6 +69,7 @@ async function mount(
     {
       authorize,
       search,
+      scan,
       toast: async (...args: unknown[]) => {
         toasts.push(args);
       },
@@ -180,4 +187,69 @@ test("closing during authorization prevents any subsequent search or toast", asy
   await ui.close();
   await act(async () => auth.resolve("token"));
   assert.deepEqual(ui.toasts, []);
+});
+
+test("every library state stays in the final icon-only accessory after the track count", async () => {
+  let update!: (id: string, status: AlbumLibraryStatus) => void;
+  let signal!: AbortSignal;
+  const ui = await mount(
+    async () => "token",
+    async () => [album("first"), { ...album("second"), totalTracks: 123, releaseDate: "2026" }],
+    "albums",
+    async (_, __, currentSignal, currentUpdate) => {
+      signal = currentSignal;
+      update = currentUpdate;
+    },
+  );
+  try {
+    await ui.settle();
+    const items = () => ui.view.root.findAllByType("Item" as ElementType);
+    assert.equal(items()[0].props.accessories[2].icon.source, "Minus");
+    for (const [status, symbol] of [
+      ["scanning", "CircleProgress25"],
+      ["complete", "CheckCircle"],
+      ["partial", "CircleProgress50"],
+      ["none", "Xmark"],
+      ["error", "QuestionMarkCircle"],
+    ] as const) {
+      await act(async () => update("first", { status, matched: 1, total: 2 }));
+      assert.equal(items()[0].props.accessories.length, 3);
+      assert.equal(items()[0].props.accessories[1].text, "1 tracks");
+      assert.equal(items()[0].props.accessories[2].icon.source, symbol);
+      assert.equal("text" in items()[0].props.accessories[2], false);
+      assert.equal(items()[1].props.accessories[1].text, "123 tracks");
+      assert.equal(items()[1].props.accessories[2].icon.source, "Minus");
+    }
+    await ui.input("another");
+    assert.ok(signal.aborted);
+    await act(async () => update("first", { status: "complete" }));
+    assert.equal(items().length, 0);
+  } finally {
+    await ui.close();
+  }
+});
+
+test("retrying checks and closing the command abort the old checker", async () => {
+  const signals: AbortSignal[] = [];
+  const ui = await mount(
+    async () => "token",
+    async () => [album("first")],
+    "albums",
+    async (_, __, signal) => {
+      signals.push(signal);
+    },
+  );
+  await ui.settle();
+  try {
+    const retry = ui.view.root
+      .findAllByType("Action" as ElementType)
+      .find((action) => action.props.title === "Retry Library Checks");
+    assert.ok(retry);
+    await act(async () => retry.props.onAction());
+    assert.equal(signals.length, 2);
+    assert.ok(signals[0].aborted);
+  } finally {
+    await ui.close();
+  }
+  assert.ok(signals[1].aborted);
 });

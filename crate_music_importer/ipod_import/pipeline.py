@@ -357,6 +357,53 @@ def build_album_preview(
 	return AlbumPreview(planned, str(album["id"]), counts, rows)
 
 
+class AlbumLibraryIndex:
+	"""Group one Music snapshot once and share preview matching with search checks."""
+
+	def __init__(self, music_tracks: list[dict[str, Any]]):
+		self.by_album: dict[str, list[dict[str, Any]]] = {}
+		self.mislabelled: dict[str, list[dict[str, Any]]] = {}
+		for candidate in music_tracks:
+			if not candidate.get("persistent_id"):
+				continue
+			album_name = self.album_key(candidate.get("album"))
+			if album_name:
+				self.by_album.setdefault(album_name, []).append(candidate)
+			album_artist = self.album_key(candidate.get("album_artist"))
+			if album_artist and album_artist != album_name and album_artist == self.album_key(candidate.get("artist")):
+				self.mislabelled.setdefault(album_artist, []).append(candidate)
+
+	@staticmethod
+	def album_key(name: Any) -> str:
+		return normalize_text(clean_release_labels(name))
+
+	def has_album(self, name: str) -> bool:
+		key = self.album_key(name)
+		return bool(self.by_album.get(key) or self.mislabelled.get(key))
+
+	def matches(self, album: dict[str, Any]) -> list[dict[str, Any] | None]:
+		mislabelled = _mislabelled_album_matches(album, self.mislabelled.get(self.album_key(album.get("name")), []))
+		matches: list[dict[str, Any] | None] = []
+		for source_position, track in enumerate(album["tracks"], start=1):
+			position = int(track.get("position") or source_position)
+			requested_album = self.album_key(track.get("album") or album.get("name"))
+			candidates = self.by_album.get(requested_album, [])
+			match = match_music_track(track, candidates)
+			if match["status"] == "missing" and source_position - 1 in mislabelled:
+				match = {"status": "reused", "candidate": mislabelled[source_position - 1]}
+			if match["status"] == "missing":
+				# Album editions can use different track boundaries. Keep the same
+				# exact title, artist, disc, and position fallback as album previews.
+				exact = [
+					candidate for candidate in candidates
+					if album_track_position_match({**track, "album": track.get("album") or album.get("name"), "track_no": track.get("track_no") or position}, candidate)[0]
+				]
+				if len(exact) == 1:
+					match = {"status": "reused", "candidate": exact[0]}
+			matches.append(match["candidate"] if match["status"] == "reused" else None)
+		return matches
+
+
 def build_album_library_preview(
 	album: dict[str, Any],
 	music_tracks: list[dict[str, Any]],
@@ -364,34 +411,16 @@ def build_album_library_preview(
 ) -> AlbumPreview:
 	"""Show current Music album membership and repair only unique recording bindings."""
 	planned = clone_manifest(manifest)
-	mislabelled = _mislabelled_album_matches(album, music_tracks)
-	album_tracks: dict[str, list[dict[str, Any]]] = {}
-	for candidate in music_tracks:
-		album_name = normalize_text(clean_release_labels(candidate.get("album")))
-		if album_name and candidate.get("persistent_id"):
-			album_tracks.setdefault(album_name, []).append(candidate)
+	matches = AlbumLibraryIndex(music_tracks).matches(album)
 	rows: list[dict[str, Any]] = []
 	items: list[dict[str, Any]] = []
 	counts = {"in_library": 0, "not_in_library": 0}
 	for source_position, track in enumerate(album["tracks"], start=1):
 		position = int(track.get("position") or source_position)
 		key, recording = upsert_recording(planned, track, source_type="album")
-		requested_album = normalize_text(clean_release_labels(track.get("album") or album.get("name")))
-		candidates = album_tracks.get(requested_album, [])
-		match = match_music_track(track, candidates)
-		if match["status"] == "missing" and source_position - 1 in mislabelled:
-			match = {"status": "reused", "candidate": mislabelled[source_position - 1]}
-		if match["status"] == "missing":
-			# Album editions can use different track boundaries. Exact title, artist,
-			# disc, and position still identify a Music album entry for search status.
-			exact = [
-				candidate for candidate in candidates
-				if album_track_position_match({**track, "album": track.get("album") or album.get("name"), "track_no": track.get("track_no") or position}, candidate)[0]
-			]
-			if len(exact) == 1:
-				match = {"status": "reused", "candidate": exact[0]}
-		if match["status"] == "reused":
-			bind_recording_to_music(recording, match["candidate"])
+		candidate = matches[source_position - 1]
+		if candidate is not None:
+			bind_recording_to_music(recording, candidate)
 			status = "in_library"
 		else:
 			status = "not_in_library"

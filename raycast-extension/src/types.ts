@@ -296,3 +296,19 @@ export interface SpotifyAlbumSummary {
   totalTracks: number;
   albumType?: string;
 }
+
+export interface SpotifyAlbumTrack {
+  title: string;
+  artists: string;
+  duration_ms: number;
+  track_no: number;
+  disc_no: number;
+  position: number;
+}
+
+export interface AlbumLibraryStatus {
+  status: "pending" | "scanning" | "complete" | "partial" | "none" | "error";
+  matched?: number;
+  total?: number;
+  error?: string;
+}

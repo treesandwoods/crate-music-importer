@@ -53,6 +53,7 @@ def _parser() -> argparse.ArgumentParser:
 		description="Preview, download, and deliberately apply public Spotify albums and playlists to Music.app for normal whole-library iPod sync.",
 	)
 	subparsers = parser.add_subparsers(dest="command", required=True)
+	subparsers.add_parser("album-search-check", help="Check search results against the existing Music cache over stdin/stdout.")
 
 	preview = subparsers.add_parser("preview", aliases=["dry-run"], help="Read Spotify and Music metadata without downloading or changing Music.")
 	preview.add_argument("url", nargs="?")
@@ -363,6 +364,11 @@ def _progress(callback: Callable[[dict[str, Any]], None] | None, phase: str, **v
 
 def run(argv: list[str] | None = None, *, on_progress: Callable[[dict[str, Any]], None] | None = None) -> int:
 	arguments = list(sys.argv[1:] if argv is None else argv)
+	if arguments[:1] == ["album-search-check"]:
+		from crate_music_importer.ipod_import.album_search import run_album_search_session
+		_parser().parse_args(arguments)
+		run_album_search_session(ManagedPaths(), sys.stdin, sys.stdout)
+		return 0
 	if arguments[:1] == ["health-audit"]:
 		from crate_music_importer.ipod_import.health_audit import dismiss_duplicate_alert, load_health_audit, start_health_audit
 		args = _parser().parse_args(arguments)
