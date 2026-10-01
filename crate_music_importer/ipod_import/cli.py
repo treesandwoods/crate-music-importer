@@ -13,7 +13,7 @@ from typing import Any, Callable
 from crate_music_importer.ipod_import.constants import MANAGED_ROOT
 from crate_music_importer.ipod_import.manifest import ManagedPaths, backfill_playlist_urls, load_manifest, save_manifest, update_manifest
 from crate_music_importer.ipod_import.media import check_tools
-from crate_music_importer.ipod_import.music import load_music_fixture, lookup_music_track, music_binding_id, scan_music_library, scan_music_library_for_health, verify_music_tracks
+from crate_music_importer.ipod_import.music import load_music_fixture, lookup_music_track, music_binding_id, scan_music_library_for_health, verify_music_tracks
 from crate_music_importer.ipod_import.music_cache import (
 	load_music_cache,
 	music_cache_tracks,
@@ -510,10 +510,7 @@ def _run(
 		_progress(on_progress, "loading_metadata", source_type="album")
 		album = _album(args)
 		_progress(on_progress, "loading_music_cache", source_type="album", source_id=album.get("id"), name=album.get("name"), total=len(album.get("tracks") or []))
-		music_tracks = load_music_fixture(args.music_fixture) if args.music_fixture else scan_music_library()
-		if not args.music_fixture:
-			refresh_music_cache(paths, music_tracks)
-		preview = build_album_library_preview(album, music_tracks, manifest)
+		preview = build_album_library_preview(album, _music_tracks(args, paths), manifest)
 		_save_album_library_bindings(paths, manifest, preview)
 		_print_album_preview(preview, as_json=args.json)
 		return 0

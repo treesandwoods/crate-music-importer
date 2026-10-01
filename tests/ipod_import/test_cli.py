@@ -3,6 +3,7 @@ import io
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -87,7 +88,7 @@ class AlbumCliEfficiencyTests(unittest.TestCase):
 				self.assertEqual(cli.run(["playlist-update-preview", playlist_id, "--json"]), 0)
 			self.assertEqual(load_manifest(paths)["playlists"][playlist_id]["cover_url"], "https://example.test/current.jpg")
 
-	def test_album_preview_refreshes_music_and_saves_unique_binding(self):
+	def test_album_preview_reuses_cache_without_music_access_and_saves_unique_binding(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")
 			manifest = new_manifest(paths)
@@ -95,14 +96,15 @@ class AlbumCliEfficiencyTests(unittest.TestCase):
 			key, recording = upsert_recording(manifest, album["tracks"][0], source_type="album")
 			recording["music_binding"] = {"persistent_id": "STALE"}
 			save_manifest(paths, manifest)
-			save_music_cache(paths, build_full_cache(paths, []))
-			live = {
+			cached = {
 				"persistent_id": "CURRENT", "title": album["tracks"][0]["title"],
 				"artist": "Grimes", "album": "Visions", "duration_s": 116,
 			}
+			save_music_cache(paths, build_full_cache(paths, [cached]))
+			before = paths.music_cache.read_bytes()
 			output = io.StringIO()
 			with patch("crate_music_importer.ipod_import.cli.ManagedPaths", return_value=paths), \
-				patch("crate_music_importer.ipod_import.cli.scan_music_library", return_value=[live]) as full_scan, \
+				patch("crate_music_importer.ipod_import.music._osascript", side_effect=AssertionError("Cached preview must not access Music")) as automation, \
 				contextlib.redirect_stdout(output):
 				code = cli.run([
 					"album-preview",
@@ -111,10 +113,37 @@ class AlbumCliEfficiencyTests(unittest.TestCase):
 					"--json",
 				])
 			self.assertEqual(code, 0)
-			full_scan.assert_called_once_with()
-			self.assertIn("CURRENT", json.dumps(json.loads(paths.music_cache.read_text())))
+			automation.assert_not_called()
+			self.assertEqual(paths.music_cache.read_bytes(), before)
 			self.assertEqual(load_manifest(paths)["recordings"][key]["music_binding"], {"persistent_id": "CURRENT"})
 			self.assertEqual(json.loads(output.getvalue())["counts"], {"in_library": 1, "not_in_library": 1})
+
+	def test_album_preview_rebuilds_unavailable_cache_once_then_reuses_it(self):
+		album = load_fixture(FIXTURES / "spotify_album.json").to_dict()
+		live = {
+			"persistent_id": "CURRENT", "title": album["tracks"][0]["title"],
+			"artist": "Grimes", "album": "Visions", "duration_s": 116,
+		}
+		for state in ("missing", "corrupt", "expired"):
+			with self.subTest(state=state), tempfile.TemporaryDirectory() as directory:
+				paths = ManagedPaths(Path(directory) / "managed")
+				if state != "missing":
+					paths.state_dir.mkdir(parents=True)
+					cache = build_full_cache(paths, [])
+					cache["scanned_at"] = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+					paths.music_cache.write_text("not json" if state == "corrupt" else json.dumps(cache), encoding="utf-8")
+				with patch("crate_music_importer.ipod_import.cli.ManagedPaths", return_value=paths), \
+					patch("crate_music_importer.ipod_import.music.scan_music_library", return_value=[live]) as full_scan:
+					for attempt in range(2):
+						output = io.StringIO()
+						with contextlib.redirect_stdout(output):
+							self.assertEqual(cli.run(["album-preview", "--spotify-fixture", str(FIXTURES / "spotify_album.json"), "--json"]), 0)
+						self.assertEqual(json.loads(output.getvalue())["counts"], {"in_library": 1, "not_in_library": 1})
+						if attempt == 0:
+							before = paths.music_cache.read_bytes()
+						else:
+							self.assertEqual(paths.music_cache.read_bytes(), before)
+					full_scan.assert_called_once_with()
 
 	def test_album_preview_saves_new_binding_without_importing_or_changing_music(self):
 		with tempfile.TemporaryDirectory() as directory:
@@ -124,8 +153,9 @@ class AlbumCliEfficiencyTests(unittest.TestCase):
 				"persistent_id": "CURRENT", "title": album["tracks"][0]["title"],
 				"artist": "Grimes", "album": "Visions", "duration_s": 116,
 			}
+			save_music_cache(paths, build_full_cache(paths, [live]))
 			with patch("crate_music_importer.ipod_import.cli.ManagedPaths", return_value=paths), \
-				patch("crate_music_importer.ipod_import.cli.scan_music_library", return_value=[live]), \
+				patch("crate_music_importer.ipod_import.music._osascript", side_effect=AssertionError("Cached preview must not access Music")), \
 				patch("crate_music_importer.ipod_import.cli.build_album_preview") as import_planner, \
 				contextlib.redirect_stdout(io.StringIO()):
 				cli.run(["album-preview", "--spotify-fixture", str(FIXTURES / "spotify_album.json"), "--json"])

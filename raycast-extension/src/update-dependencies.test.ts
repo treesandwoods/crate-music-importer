@@ -360,6 +360,10 @@ test("explicit start is guarded against duplicate clicks and keeps previous find
     },
   });
   const action = ui.actions().find((item) => item.props.title === "Refresh Library Health")!;
+  assert.equal(
+    ui.actions().find((item) => item.props.title === "Deep Check All Local Music"),
+    undefined,
+  );
   await act(async () => {
     void action.props.onAction();
     void action.props.onAction();
@@ -379,27 +383,31 @@ test("interrupted audit keeps prior findings and offers retry", async () => {
   await act(async () => ui.view.unmount());
 });
 
-test("empty saved state offers normal and deep explicit audits without waiting for dependencies", async () => {
+test("empty saved state offers only the normal explicit audit without waiting for dependencies", async () => {
   const pending = deferred<DependencyResult>();
-  let deep: boolean | undefined;
+  const starts: unknown[][] = [];
   const ui = await render({
     status: () => pending.promise,
     health: async () => ({ ...auditState(), status: "idle", lastReport: null }),
-    start: async (deepAll: boolean) => {
-      deep = deepAll;
+    start: async (...args: unknown[]) => {
+      starts.push(args);
       return auditState(true);
     },
   });
   assert.equal(ui.calls.starts, 0);
   assert.match(ui.text(), /No saved health report/);
   assert.ok(ui.actions().find((item) => item.props.title === "Run Library Health Audit"));
+  assert.equal(
+    ui.actions().find((item) => item.props.title === "Deep Check All Local Music"),
+    undefined,
+  );
   await act(async () => {
     await ui
       .actions()
-      .find((item) => item.props.title === "Deep Check All Local Music")!
+      .find((item) => item.props.title === "Run Library Health Audit")!
       .props.onAction();
   });
-  assert.equal(deep, true);
+  assert.deepEqual(starts, [[]]);
   await act(async () => pending.resolve(dependencies()));
   assert.equal(ui.updateAction(), undefined);
   await act(async () => ui.view.unmount());
