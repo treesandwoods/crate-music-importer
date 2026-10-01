@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { environment, getPreferenceValues } from "@raycast/api";
 import { expandPath, mergeSettings, readLocalSettings, type Settings } from "./configuration";
 import identity from "../package.json";
+import { jsonLineSession, type JsonLineSession } from "./json-line-session";
 
 const exec = promisify(execFile);
 const toolsPath = `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${process.env.PATH || ""}`;
@@ -59,4 +60,18 @@ export async function backendCommand(args: string[], raycast: boolean, timeout: 
     maxBuffer: 10 * 1024 * 1024,
   });
   return stdout.trim();
+}
+
+export function backendJsonSession(args: string[], signal: AbortSignal): JsonLineSession {
+  const value = runtime();
+  const child = spawn(
+    value.cli || value.python,
+    value.cli ? args : ["-m", "crate_music_importer.ipod_import", ...args],
+    {
+      cwd: homedir(),
+      env: value.env,
+      stdio: "pipe",
+    },
+  );
+  return jsonLineSession(child, signal);
 }

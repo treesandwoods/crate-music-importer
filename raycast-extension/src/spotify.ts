@@ -4,12 +4,14 @@ import {
   acquireSpotifyAccessToken,
   authorizationCodeParameters,
   parseSpotifyAlbums,
+  loadSpotifyAlbumTrackPages,
   refreshTokenParameters,
   spotifyApiError,
   spotifySearchParameters,
+  SpotifyRequestError,
 } from "./spotify-model";
 import { showCompactToast } from "./notifications";
-import type { SpotifyAlbumSummary } from "./types";
+import type { SpotifyAlbumSummary, SpotifyAlbumTrack } from "./types";
 
 import { readLocalSettings, spotifySettings, type Settings } from "./configuration";
 
@@ -85,10 +87,17 @@ export async function spotifyAccessToken(): Promise<string> {
   });
 }
 
-async function spotifyJson(path: string, token: string): Promise<Record<string, unknown>> {
-  const response = await fetch(`${API_URL}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+async function spotifyJson(path: string, token: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  const response = await fetch(`${API_URL}${path}`, {
+    headers: { Authorization: `Bearer ${token}` },
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) : undefined,
+  });
   if (response.status === 401) await oauthClient().removeTokens();
-  if (!response.ok) throw new Error(spotifyApiError(response.status, response.headers.get("retry-after")));
+  if (!response.ok)
+    throw new SpotifyRequestError(
+      response.status,
+      spotifyApiError(response.status, response.headers.get("retry-after")),
+    );
   return (await response.json()) as Record<string, unknown>;
 }
 
@@ -96,4 +105,14 @@ export async function searchSpotifyAlbums(query: string, token: string): Promise
   const parameters = spotifySearchParameters(query);
   const value = await spotifyJson(`/search?${parameters}`, token);
   return parseSpotifyAlbums(value);
+}
+
+export async function fetchSpotifyAlbumTracks(
+  album: SpotifyAlbumSummary,
+  token: string,
+  signal: AbortSignal,
+): Promise<SpotifyAlbumTrack[]> {
+  return loadSpotifyAlbumTrackPages(album, (offset) =>
+    spotifyJson(`/albums/${encodeURIComponent(album.id)}/tracks?limit=50&offset=${offset}`, token, signal),
+  );
 }

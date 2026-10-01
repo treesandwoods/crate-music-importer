@@ -5,10 +5,36 @@ import {
   acquireSpotifyAccessToken,
   authorizationCodeParameters,
   parseSpotifyAlbums,
+  parseSpotifyAlbumTracks,
+  loadSpotifyAlbumTrackPages,
   refreshTokenParameters,
   spotifyApiError,
   spotifySearchParameters,
 } from "./spotify-model";
+
+test("album tracks keep disc positions and pagination verifies every track", async () => {
+  const album = { id: "album", name: "Album", artists: "Artist", totalTracks: 2, url: "https://example.test" };
+  const item = { name: "Song", artists: [{ name: "Artist" }], track_number: 1, disc_number: 2, duration_ms: 180000 };
+  const offsets: number[] = [];
+  const tracks = await loadSpotifyAlbumTrackPages(album, async (offset) => {
+    offsets.push(offset);
+    return { total: 2, items: [{ ...item, track_number: offset + 1 }], next: offset ? null : "next" };
+  });
+  assert.deepEqual(offsets, [0, 1]);
+  assert.equal(tracks[1].position, 2);
+  assert.equal(tracks[1].disc_no, 2);
+  assert.equal(tracks[1].track_no, 2);
+  await assert.rejects(
+    loadSpotifyAlbumTrackPages(album, async () => ({ total: 2, items: [item], next: null })),
+    /incomplete/,
+  );
+  await assert.rejects(
+    loadSpotifyAlbumTrackPages(album, async () => ({ total: 3, items: [item] })),
+    /count changed/,
+  );
+  assert.throws(() => parseSpotifyAlbumTracks({ items: [null] }, 0), /incomplete/);
+  assert.throws(() => parseSpotifyAlbumTracks({ items: [{ ...item, track_number: undefined }] }, 0), /incomplete/);
+});
 
 test("OAuth lifecycle reuses a valid stored access token", async () => {
   let connected = false;

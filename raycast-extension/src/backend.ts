@@ -1,4 +1,4 @@
-import { backendCommand } from "./runtime";
+import { backendCommand, backendJsonSession } from "./runtime";
 import { playlistUpdateQueueArgs } from "./playlist-update-model";
 
 import type {
@@ -60,6 +60,18 @@ export function loadSnapshot(): Promise<ResolverSnapshot> {
 
 export function previewSource(type: "album" | "playlist", url: string): Promise<SourcePreview> {
   return runJson<SourcePreview>([type === "album" ? "album-preview" : "preview", url, "--json"], 660_000);
+}
+
+export async function openAlbumLibraryChecker(signal: AbortSignal) {
+  const session = backendJsonSession(["album-search-check"], signal);
+  try {
+    const ready = await session.read<{ ready: boolean; scannedAt: string }>();
+    if (!ready?.ready) throw new Error("The album cache checker did not start.");
+    return session;
+  } catch (error) {
+    session.close();
+    throw error;
+  }
 }
 
 export async function loadSavedPlaylists(): Promise<SavedPlaylistSummary[]> {

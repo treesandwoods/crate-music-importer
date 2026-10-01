@@ -1,4 +1,13 @@
-import type { SpotifyAlbumSummary } from "./types";
+import type { SpotifyAlbumSummary, SpotifyAlbumTrack } from "./types";
+
+export class SpotifyRequestError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
 
 export interface StoredSpotifyTokens {
   accessToken: string;
@@ -94,6 +103,47 @@ export function parseSpotifyAlbums(value: Record<string, unknown>): SpotifyAlbum
   const albums = (value.albums || {}) as Record<string, unknown>;
   const items = Array.isArray(albums.items) ? albums.items : [];
   return items.map(albumSummary).filter((album): album is SpotifyAlbumSummary => album !== null);
+}
+
+export function parseSpotifyAlbumTracks(value: Record<string, unknown>, offset: number): SpotifyAlbumTrack[] {
+  if (!Array.isArray(value.items) || !value.items.length) throw new Error("Spotify returned incomplete album tracks.");
+  return value.items.map((item, index) => {
+    const track = item as Record<string, unknown> | null;
+    if (
+      !track ||
+      !track.name ||
+      !artists(track.artists) ||
+      !Number.isInteger(Number(track.track_number)) ||
+      Number(track.track_number) <= 0
+    ) {
+      throw new Error("Spotify returned incomplete album tracks.");
+    }
+    return {
+      title: String(track.name),
+      artists: artists(track.artists),
+      duration_ms: Number(track.duration_ms || 0),
+      track_no: Number(track.track_number),
+      disc_no: Number(track.disc_number || 1),
+      position: offset + index + 1,
+    };
+  });
+}
+
+export async function loadSpotifyAlbumTrackPages(
+  album: SpotifyAlbumSummary,
+  readPage: (offset: number) => Promise<Record<string, unknown>>,
+): Promise<SpotifyAlbumTrack[]> {
+  const tracks: SpotifyAlbumTrack[] = [];
+  while (tracks.length < album.totalTracks) {
+    const value = await readPage(tracks.length);
+    if (Number(value.total) !== album.totalTracks)
+      throw new Error("Spotify's album track count changed. Retry the search.");
+    tracks.push(...parseSpotifyAlbumTracks(value, tracks.length));
+    if (!value.next) break;
+  }
+  if (!tracks.length || tracks.length !== album.totalTracks)
+    throw new Error("Spotify returned incomplete album tracks.");
+  return tracks;
 }
 
 export function spotifyApiError(status: number, retryAfter?: string | null): string {
