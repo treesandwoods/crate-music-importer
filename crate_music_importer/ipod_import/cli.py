@@ -516,7 +516,7 @@ def _run(
 		_progress(on_progress, "loading_metadata", source_type="album")
 		album = _album(args)
 		_progress(on_progress, "loading_music_cache", source_type="album", source_id=album.get("id"), name=album.get("name"), total=len(album.get("tracks") or []))
-		preview = build_album_library_preview(album, _music_tracks(args, paths), manifest)
+		preview = build_album_library_preview(album, _music_tracks(args, paths), manifest, paths)
 		_save_album_library_bindings(paths, manifest, preview)
 		_print_album_preview(preview, as_json=args.json)
 		return 0
@@ -553,6 +553,7 @@ def _run(
 			cache_updater=lambda track: upsert_music_cache_track(paths, track),
 			cache_remover=lambda persistent_ids: remove_music_cache_tracks(paths, persistent_ids),
 			verify_music=verify_music_tracks,
+			verify_music_final=lambda persistent_ids: verify_music_tracks(persistent_ids, settle_seconds=10.0),
 		)
 		print(
 			f"Music album updated: {result['track_count']} tracks; {result['new_imports']} new imports; "

@@ -57,6 +57,8 @@ On first use, open **Library Health** and explicitly run **Library Health Audit*
 
 Automatic YouTube selection requires a score strictly greater than `0.87`; manual choices remain deliberate. Incomplete Spotify responses, missing per-track artwork, incorrect downloaded durations, uncertain Music identity, or conflicting real albums stop progress instead of silently producing a partial import.
 
+Album previews identify existing managed playlist tracks that can be upgraded to album metadata. The upgrade keeps the original Music ID and playlist membership; a missing local-file location stops for review instead of creating another entry. Music additions are checked against the validated MP3 duration and final album metadata. Serial checks read only the requested Music IDs, with one final Cloud Library settling check, and verified tracks retain **Complete** in Review Activity.
+
 Music.app is authoritative. Previews reuse a valid disposable cache, rebuilding it from Music.app when missing, invalid, or older than 24 hours, while final writes validate exact persistent IDs again. Use **Refresh Library Health** to refresh preview results after making changes directly in Music. A Music track is reusable regardless of how it entered the library. Crate changes or removes a physical file only when the registered path and hashes prove that file is Crate-managed. Full playlist updates change only the selected playlist membership, and Crate Music Importer never changes Finder or iPod whole-library sync settings.
 
 ## Spotify OAuth and forks

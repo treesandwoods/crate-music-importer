@@ -132,12 +132,37 @@ def _mislabelled_album_matches(album: dict[str, Any], music_tracks: list[dict[st
 
 def _expected_track_from_manifest(recording: dict[str, Any], persistent_id: str) -> dict[str, Any]:
 	metadata = recording.get("source_metadata") or {}
+	managed = recording.get("managed_file") or {}
 	return {
 		"persistent_id": persistent_id,
 		"title": metadata.get("title"),
 		"artist": metadata.get("artists"),
-		"duration_s": int(metadata.get("duration_ms") or 0) / 1000.0,
+		"duration_s": int(managed.get("duration_ms") or metadata.get("duration_ms") or 0) / 1000.0,
 	}
+
+
+def _expected_album_addition(recording: dict[str, Any], persistent_id: str) -> dict[str, Any]:
+	"""Music must describe the validated audio we added, including its album."""
+	expected = _expected_track_from_manifest(recording, persistent_id)
+	managed = recording.get("managed_file") or {}
+	expected["duration_s"] = int(managed.get("duration_ms") or managed.get("source_duration_ms") or 0) / 1000.0 or expected["duration_s"]
+	expected["album"] = (recording.get("album_metadata") or {}).get("album")
+	return expected
+
+
+def _managed_album_needs_update(recording: dict[str, Any], candidate: dict[str, Any], paths: ManagedPaths) -> bool:
+	managed = recording.get("managed_file") or {}
+	if not managed.get("managed_by_crate") or not managed.get("relative_path") or not candidate.get("location"):
+		return False
+	if Path(str(candidate["location"])).resolve() != (paths.root / managed["relative_path"]).resolve():
+		return False
+	album = recording.get("album_metadata") or {}
+	for field in ("track_no", "track_total", "disc_no", "disc_total"):
+		if field in candidate and int(candidate.get(field) or 0) != int(album.get(field) or 0):
+			return True
+	if "compilation" in candidate and bool(candidate["compilation"]) != bool(album.get("is_compilation")):
+		return True
+	return "album_artist" in candidate and normalize_text(candidate["album_artist"]) != normalize_text(album.get("album_artist"))
 
 
 def _validate_exact_reference(
@@ -155,12 +180,25 @@ def _validate_exact_reference(
 		return validated[persistent_id]
 	cached = index.by_persistent_id.get(persistent_id)
 	actual = exact_lookup(persistent_id)
-	expected = cached or _expected_track_from_manifest(recording, persistent_id)
+	expected = {**_expected_track_from_manifest(recording, persistent_id), **{key: value for key, value in (cached or {}).items() if value}}
+	# Retagging the registered file can refresh Music before its cached album
+	# name is updated. Keep validating the ID, title, artist, and audio baseline.
+	managed = recording.get("managed_file") or {}
+	wanted_album = (recording.get("album_metadata") or {}).get("album")
+	if (
+		actual and wanted_album and managed.get("managed_by_crate")
+		and managed.get("relative_path") and actual.get("location")
+		and _album_matches({"album": wanted_album}, actual)
+		and Path(str(actual["location"])).resolve() == (paths.root / managed["relative_path"]).resolve()
+	):
+		expected["album"] = wanted_album
 	valid, _reason = validate_exact_track(expected, actual)
 	if not valid:
 		fallback = MusicIndex([track for track in index.tracks if str(track.get("persistent_id") or "") != persistent_id])
 		result = reconcile_recording_music(recording, fallback)
 		if result["status"] != "resolved":
+			if actual is not None:
+				raise MusicAutomationError(f"The saved Music track for {recording['source_metadata']['title']} failed validation because {_reason}; refusing to add a duplicate.")
 			recording["music_binding"] = None
 			return None
 		candidate_id = music_binding_id(recording)
@@ -307,6 +345,7 @@ def build_album_preview(
 				status = "review_music"
 				detail = "managed file already carries a different album identity"
 			else:
+				bind_recording_to_music(recording, candidate)
 				recording.pop("review", None)
 				recording.pop("last_error", None)
 				status = "upgrade_managed"
@@ -408,10 +447,12 @@ def build_album_library_preview(
 	album: dict[str, Any],
 	music_tracks: list[dict[str, Any]],
 	manifest: dict[str, Any],
+	paths: ManagedPaths | None = None,
 ) -> AlbumPreview:
 	"""Show current Music album membership and repair only unique recording bindings."""
 	planned = clone_manifest(manifest)
 	matches = AlbumLibraryIndex(music_tracks).matches(album)
+	index = MusicIndex(music_tracks)
 	rows: list[dict[str, Any]] = []
 	items: list[dict[str, Any]] = []
 	counts = {"in_library": 0, "not_in_library": 0}
@@ -424,6 +465,15 @@ def build_album_library_preview(
 			status = "in_library"
 		else:
 			status = "not_in_library"
+			# A loose managed recording is already in Music and can be upgraded
+			# in place. Show that action even though this album is not yet present.
+			managed = recording.get("managed_file") or {}
+			if paths and not _is_different_managed_album(recording, str(album["id"])) and _managed_exists(recording, paths) and managed_duration_is_valid(recording, paths):
+				resolution = reconcile_recording_music(recording, index, preferred_album=str(album.get("name") or ""))
+				if resolution["status"] == "album_mismatch" and str((resolution.get("candidate") or {}).get("album") or "") == "Playlist Imports":
+					bind_recording_to_music(recording, resolution["candidate"])
+					status = "upgrade_managed"
+		counts.setdefault(status, 0)
 		counts[status] += 1
 		rows.append({
 			"position": position,
@@ -434,7 +484,7 @@ def build_album_library_preview(
 			"track_no": int(track.get("track_no") or position),
 			"disc_no": int(track.get("disc_no") or 1),
 			"status": status,
-			"detail": "In Library" if status == "in_library" else "Not in Library",
+			"detail": "Existing Music match; upgrade album metadata" if status == "upgrade_managed" else "In Library" if status == "in_library" else "Not in Library",
 		})
 		items.append({
 			"position": position,
@@ -742,6 +792,7 @@ def apply_album_to_music(
 	cache_updater: CacheTrackUpdater | None = None,
 	cache_remover: CacheTrackRemover | None = None,
 	verify_music: MusicTrackVerifier | None = None,
+	verify_music_final: MusicTrackVerifier | None = None,
 ) -> dict[str, Any]:
 	album = manifest.get("albums", {})[album_id]
 	index = MusicIndex(music_tracks)
@@ -753,7 +804,7 @@ def apply_album_to_music(
 		resolution = reconcile_recording_music(recording, index, preferred_album=str(album.get("name") or ""))
 		if resolution["status"] == "ambiguous":
 			recording["review"] = {"kind": "music_ambiguity", "message": "Multiple Music tracks are plausible matches for this album.", "candidates": resolution["candidates"]}
-		if recording.get("review") or recording.get("last_error"):
+		if recording.get("review"):
 			raise MusicAutomationError(
 				f"Album track {item['position']} is unresolved ({recording['source_metadata']['title']}). Resolve it before changing Music."
 			)
@@ -762,14 +813,22 @@ def apply_album_to_music(
 			_progress(on_progress, "checking_music_ids", recording_id=recording["recording_id"], position=int(item["position"]), title=recording["source_metadata"].get("title") or "", artists=recording["source_metadata"].get("artists") or "")
 			candidate = _validate_exact_reference(manifest, recording, persistent_id, index, paths, exact_lookup=exact_lookup, cache_updater=cache_updater, validated=validated)
 			persistent_id = music_binding_id(recording)
-			if candidate and _album_matches({"album": album.get("name")}, candidate):
+			if candidate and _album_matches({"album": album.get("name")}, candidate) and not _managed_album_needs_update(recording, candidate, paths):
+				recording.pop("music_import_pending", None)
+				save_manifest(paths, manifest)
 				continue
+		if recording.get("last_error"):
+			raise MusicAutomationError(f"Album track {item['position']} is unresolved ({recording['source_metadata']['title']}). Resolve it before changing Music.")
 		managed = recording.get("managed_file") or {}
 		path = paths.root / str(managed.get("relative_path") or "")
 		if not managed.get("managed_by_crate") or not path.is_file() or managed.get("metadata_profile") != "album":
 			raise MusicAutomationError(
 				f"Album track {item['position']} is not ready ({recording['source_metadata']['title']}). Run the album download again first."
 			)
+		if persistent_id and candidate:
+			candidate_location = Path(str(candidate["location"])).resolve() if candidate.get("location") else None
+			if candidate_location != path.resolve():
+				raise MusicAutomationError(f"The existing Music match for {recording['source_metadata']['title']} does not expose the registered managed file; refusing to add a duplicate.")
 		artwork_paths[recording["recording_id"]] = extract_embedded_artwork(
 			path,
 			paths.staging / recording["recording_id"] / "music-album-artwork.jpg",
@@ -793,17 +852,11 @@ def apply_album_to_music(
 			raise MusicAutomationError("Crate Music Importer could not recover a Music track whose first addition disappeared.")
 		bind_recording_to_music(recording, replacement)
 		save_manifest(paths, manifest)
-		if cache_updater:
-			try:
-				cache_updater(replacement)
-			except Exception:
-				pass
 		if cache_remover and previous_id != new_id:
 			try:
 				cache_remover({previous_id})
 			except Exception:
 				pass
-		recording.pop("music_import_pending", None)
 		recording.pop("review", None)
 		recording.pop("last_error", None)
 		index.by_persistent_id[new_id] = replacement
@@ -811,12 +864,13 @@ def apply_album_to_music(
 		stability_recoveries += 1
 		return new_id
 
-	def confirm_new_additions() -> None:
-		if not verify_music or not new_recording_ids:
+	def confirm_new_additions(*, final: bool = False) -> None:
+		verifier = (verify_music_final or verify_music) if final else verify_music
+		if not verifier or not new_recording_ids:
 			return
 		for _attempt in range(3):
 			expected_ids = [music_binding_id(manifest["recordings"][recording_id]) for recording_id in new_recording_ids]
-			verified = verify_music(expected_ids)
+			verified = verifier(expected_ids)
 			missing = [(recording_id, persistent_id) for recording_id, persistent_id in zip(new_recording_ids, expected_ids) if persistent_id not in verified]
 			if missing:
 				for recording_id, previous_id in missing:
@@ -825,11 +879,18 @@ def apply_album_to_music(
 			for recording_id, persistent_id in zip(new_recording_ids, expected_ids):
 				recording = manifest["recordings"][recording_id]
 				actual = verified[persistent_id]
-				if all(field in actual for field in ("title", "artist", "album", "duration_s")):
-					expected = _expected_track_from_manifest(recording, persistent_id)
-					valid, reason = validate_exact_track(expected, actual)
-					if not valid:
-						raise MusicAutomationError(f"Music returned the wrong track after an album addition because {reason}.")
+				expected = _expected_album_addition(recording, persistent_id)
+				valid, reason = validate_exact_track(expected, actual)
+				if not valid:
+					recording["music_import_pending"] = {"relative_path": (recording.get("managed_file") or {}).get("relative_path"), "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+					recording["last_error"] = f"Music could not verify {recording['source_metadata']['title']} after adding it: {reason}."
+					save_manifest(paths, manifest)
+					_progress(on_progress, "failed", recording_id=recording_id, title=recording["source_metadata"].get("title") or "", error=recording["last_error"])
+					raise MusicAutomationError(f"Music returned the wrong track after an album addition because {reason}.")
+				recording.pop("music_import_pending", None)
+				if cache_updater:
+					cache_updater(actual)
+			save_manifest(paths, manifest)
 			return
 		for recording_id in new_recording_ids:
 			recording = manifest["recordings"][recording_id]
@@ -846,7 +907,7 @@ def apply_album_to_music(
 		_progress(on_progress, "adding_to_music", recording_id=recording["recording_id"], position=int(item["position"]), title=recording["source_metadata"].get("title") or "", artists=recording["source_metadata"].get("artists") or "")
 		persistent_id = music_binding_id(recording)
 		candidate = validated.get(persistent_id)
-		if candidate and _album_matches({"album": album.get("name")}, candidate):
+		if candidate and _album_matches({"album": album.get("name")}, candidate) and not _managed_album_needs_update(recording, candidate, paths):
 			reused_tracks += 1
 			_progress(on_progress, "complete", recording_id=recording["recording_id"], position=int(item["position"]), title=recording["source_metadata"].get("title") or "", artists=recording["source_metadata"].get("artists") or "")
 			continue
@@ -880,10 +941,16 @@ def apply_album_to_music(
 		if updating_existing:
 			update_managed_music_track(persistent_id, path, recording, artwork_paths[recording["recording_id"]])
 			updated_tracks += 1
+			actual = exact_lookup(persistent_id)
+			valid, reason = validate_exact_track(_expected_album_addition(recording, persistent_id), actual)
+			if not valid:
+				raise MusicAutomationError(f"Music could not verify the album upgrade because {reason}.")
+			imported = actual
 		bind_recording_to_music(recording, imported)
-		recording.pop("music_import_pending", None)
+		if updating_existing or not verify_music:
+			recording.pop("music_import_pending", None)
 		save_manifest(paths, manifest)
-		if cache_updater:
+		if cache_updater and (updating_existing or not verify_music):
 			try:
 				cache_updater(imported)
 			except Exception:
@@ -897,7 +964,7 @@ def apply_album_to_music(
 			# disappearing entry is recovered before the next Music mutation.
 			confirm_new_additions()
 		_progress(on_progress, "complete", recording_id=recording["recording_id"], position=int(item["position"]), title=recording["source_metadata"].get("title") or "", artists=recording["source_metadata"].get("artists") or "")
-	confirm_new_additions()
+	confirm_new_additions(final=True)
 	return {
 		"track_count": len(album["items"]),
 		"new_imports": new_imports,

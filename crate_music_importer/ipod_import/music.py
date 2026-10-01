@@ -118,7 +118,8 @@ on run argv
 					set trackPersistentID to my clean_field(persistent ID of libraryTrack)
 					set trackDatabaseID to my clean_field(database ID of libraryTrack)
 					try
-						set trackLocation to my clean_field(POSIX path of (location of libraryTrack))
+						set trackFileLocation to get location of libraryTrack
+						set trackLocation to my clean_field(POSIX path of trackFileLocation)
 					on error
 						set trackLocation to ""
 					end try
@@ -167,6 +168,20 @@ end run
 '''
 
 
+_VERIFY_TRACKS_SCRIPT = _SCAN_PLAYLIST_IMPORTS_SCRIPT.replace(
+	'set selectedTracks to every track of library playlist 1 whose album is "Playlist Imports"',
+	"set selectedTracks to {}",
+).replace(
+	"set selectedTracks to selectedTracks & (every track of library playlist 1 whose persistent ID is (requestedID as text))",
+	"""set matches to every track of library playlist 1 whose persistent ID is (requestedID as text)
+				if (count of matches) is greater than 1 then error "Music returned duplicate tracks for persistent ID " & requestedID
+				set selectedTracks to selectedTracks & matches""",
+).replace(
+	"\t\t\t\tend try\n\t\t\tend repeat",
+	"\t\t\t\ton error errorMessage number errorNumber\n\t\t\t\t\terror errorMessage number errorNumber\n\t\t\t\tend try\n\t\t\tend repeat",
+)
+
+
 _LOOKUP_TRACK_BY_ID_SCRIPT = r'''
 on replace_text(theText, findText, replacementText)
 	set oldDelimiters to AppleScript's text item delimiters
@@ -204,7 +219,8 @@ on run argv
 			set trackPersistentID to my clean_field(persistent ID of libraryTrack)
 			set trackDatabaseID to my clean_field(database ID of libraryTrack)
 			try
-				set trackLocation to my clean_field(POSIX path of (location of libraryTrack))
+				set trackFileLocation to get location of libraryTrack
+				set trackLocation to my clean_field(POSIX path of trackFileLocation)
 			on error
 				set trackLocation to ""
 			end try
@@ -261,7 +277,8 @@ on run argv
 			if (count of matches) is greater than 1 then error "Music returned duplicate tracks for persistent ID " & requestedID
 			set targetTrack to item 1 of matches
 			try
-				set actualPath to POSIX path of (location of targetTrack)
+				set trackFileLocation to get location of targetTrack
+				set actualPath to POSIX path of trackFileLocation
 			on error
 				error "Refusing to delete a Music track without a local managed-file location: " & requestedID
 			end try
@@ -289,7 +306,8 @@ on run argv
 		set importedPID to persistent ID of importedTrack as text
 		set importedDatabaseID to database ID of importedTrack as text
 		try
-			set importedLocation to POSIX path of (location of importedTrack)
+			set trackFileLocation to get location of importedTrack
+			set importedLocation to POSIX path of trackFileLocation
 		on error
 			set importedLocation to ""
 		end try
@@ -319,7 +337,8 @@ on run argv
 		if (count of matches) is 0 then error "The managed Music track is missing: " & requestedID
 		set targetTrack to item 1 of matches
 		try
-			set actualPath to POSIX path of (location of targetTrack)
+			set trackFileLocation to get location of targetTrack
+			set actualPath to POSIX path of trackFileLocation
 		on error
 			error "The Music track has no local managed-file location."
 		end try
@@ -360,7 +379,8 @@ on run argv
 		if (count of matches) is 0 then error "The managed Music track is missing: " & requestedID
 		set targetTrack to item 1 of matches
 		try
-			set actualPath to POSIX path of (location of targetTrack)
+			set trackFileLocation to get location of targetTrack
+			set actualPath to POSIX path of trackFileLocation
 		on error
 			error "The Music track has no local managed-file location."
 		end try
@@ -870,8 +890,8 @@ def import_managed_file(path: Path) -> dict[str, Any]:
 	}
 
 
-def verify_music_tracks(persistent_ids: list[str], *, settle_seconds: float = 10.0) -> dict[str, dict[str, Any]]:
-	"""Verify recently added Music IDs after its Cloud Library has had time to react."""
+def verify_music_tracks(persistent_ids: list[str], *, settle_seconds: float = 0.0) -> dict[str, dict[str, Any]]:
+	"""Read only the requested IDs, optionally after a final Cloud Library settle."""
 	requested = list(dict.fromkeys(str(value) for value in persistent_ids if str(value)))
 	if not requested:
 		return {}
@@ -880,7 +900,7 @@ def verify_music_tracks(persistent_ids: list[str], *, settle_seconds: float = 10
 	requested_set = set(requested)
 	return {
 		str(track["persistent_id"]): track
-		for track in scan_playlist_imports(requested)
+		for track in _parse_scan_output(_osascript(_VERIFY_TRACKS_SCRIPT, requested, timeout=300), strict=True, deduplicate=False)
 		if str(track.get("persistent_id") or "") in requested_set
 	}
 

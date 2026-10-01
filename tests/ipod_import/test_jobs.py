@@ -21,7 +21,9 @@ from crate_music_importer.ipod_import.jobs import (
 	recover_interrupted,
 	retry_job,
 	run_queue,
+	run_job,
 	sync_from_manifest,
+	update_structured_progress,
 )
 from crate_music_importer.ipod_import.manifest import ManagedPaths, load_manifest, new_manifest, save_manifest, set_album, upsert_recording
 from crate_music_importer.ipod_import.music_cache import build_full_cache, load_music_cache, save_music_cache, upsert_music_cache_track
@@ -33,6 +35,67 @@ ALBUM_URL = "https://open.spotify.com/album/48a7rOjTzpD1zzJAteeveE"
 
 
 class DurableJobTests(unittest.TestCase):
+	def test_completed_track_checkpoint_survives_later_progress_and_polling(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			paths = ManagedPaths(root)
+			manifest = new_manifest(paths)
+			keys = []
+			for title in ["First", "Second"]:
+				key, recording = upsert_recording(manifest, {"title": title, "artists": "Artist", "duration_ms": 180000})
+				recording["music_binding"] = {"persistent_id": title}
+				keys.append(key)
+			set_album(manifest, {"id": "48a7rOjTzpD1zzJAteeveE", "name": "Album", "complete": True}, [{"position": i + 1, "recording_id": key} for i, key in enumerate(keys)])
+			save_manifest(paths, manifest)
+			job = enqueue("album_combined", ALBUM_URL, root=root, popen=lambda *_a, **_kw: SimpleNamespace(pid=os.getpid()))
+			job["status"] = "running"
+			store = JobStore(root)
+			update_structured_progress(job, store, {"phase": "complete", "recording_id": keys[0], "position": 1})
+			update_structured_progress(job, store, {"phase": "adding_to_music", "recording_id": keys[1], "position": 2})
+			polled = sync_from_manifest(store.load(job["jobId"]), store)
+			self.assertEqual([t["state"] for t in polled["tracks"]], ["complete", "adding_to_music"])
+			self.assertEqual(polled["counts"]["complete"], 1)
+
+	def test_unverified_music_binding_is_not_counted_as_complete(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			paths = ManagedPaths(root)
+			manifest = new_manifest(paths)
+			key, recording = upsert_recording(manifest, {"title": "Song", "artists": "Artist", "duration_ms": 180000})
+			recording["music_binding"] = {"persistent_id": "PID"}
+			recording["music_import_pending"] = {"relative_path": "Music/Song.mp3"}
+			set_album(manifest, {"id": "48a7rOjTzpD1zzJAteeveE", "name": "Album", "complete": True}, [{"position": 1, "recording_id": key}])
+			save_manifest(paths, manifest)
+			job = enqueue("album_combined", ALBUM_URL, root=root, popen=lambda *_a, **_kw: SimpleNamespace(pid=os.getpid()))
+			job["status"] = "complete"
+			polled = sync_from_manifest(job, JobStore(root))
+			self.assertEqual(polled["tracks"][0]["state"], "checking_music_ids")
+			self.assertEqual(polled["counts"]["complete"], 0)
+
+	def test_album_apply_exception_marks_the_track_failed_and_keeps_the_job_retryable(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			paths = ManagedPaths(root)
+			manifest = new_manifest(paths)
+			key, recording = upsert_recording(manifest, {"title": "Song", "artists": "Artist", "duration_ms": 180000})
+			recording["managed_file"] = {"relative_path": "Music/Song.mp3"}
+			set_album(manifest, {"id": "48a7rOjTzpD1zzJAteeveE", "name": "Album", "complete": True}, [{"position": 1, "recording_id": key}])
+			save_manifest(paths, manifest)
+			job = enqueue("album_combined", ALBUM_URL, root=root, popen=lambda *_a, **_kw: SimpleNamespace(pid=os.getpid()))
+			store = JobStore(root)
+			def engine(command):
+				if command[0] == "album-import":
+					return 0
+				update_structured_progress(job, store, {"phase": "adding_to_music", "recording_id": key})
+				raise RuntimeError("Music read failed")
+			finished = run_job(job, store, engine=engine, notifier=lambda _id: None)
+			self.assertEqual(finished["status"], "failed")
+			self.assertTrue(finished["retryable"])
+			self.assertEqual(finished["tracks"][0]["state"], "failed")
+			self.assertEqual(finished["tracks"][0]["detail"], "Music read failed")
+			self.assertEqual(finished["errorSummary"], "Music read failed")
+			self.assertEqual(finished["counts"]["adding"], 0)
+
 	def setUp(self):
 		lock = patch("crate_music_importer.ipod_import.dependency_lock.dependency_lock", return_value=contextlib.nullcontext())
 		lock.start()
