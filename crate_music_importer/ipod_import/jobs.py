@@ -20,7 +20,7 @@ from uuid import uuid4
 
 from crate_music_importer.ipod_import import cli
 from crate_music_importer.ipod_import.constants import MANAGED_ROOT
-from crate_music_importer.ipod_import.manifest import ManagedPaths, file_sha256, load_manifest, save_manifest
+from crate_music_importer.ipod_import.manifest import ManagedPaths, file_sha256, load_manifest, save_manifest, update_manifest
 from crate_music_importer.ipod_import.music import delete_managed_music_track, lookup_music_track, music_binding_id
 from crate_music_importer.ipod_import.music_cache import remove_music_cache_tracks
 from crate_music_importer.ipod_import.spotify import parse_source_url
@@ -661,6 +661,8 @@ def _track_state(recording: dict[str, Any], *, current_id: str | None, current_s
 		return "needs_approval"
 	if recording.get("last_error"):
 		return "failed"
+	if recording.get("music_import_pending"):
+		return "checking_music_ids"
 	if music_binding_id(recording):
 		return "reused"
 	if (recording.get("managed_file") or {}).get("relative_path"):
@@ -723,7 +725,7 @@ def sync_from_manifest(job: dict[str, Any], store: JobStore) -> dict[str, Any]:
 	else:
 		items = sorted(source_value.get("items") or [], key=lambda item: int(item.get("position") or 0))
 	job["source"]["total"] = len(items)
-	current_id = str((job.get("currentTrack") or {}).get("recordingId") or "") or None
+	current_id = str((job.get("currentTrack") or {}).get("recordingId") or "") if job.get("status") == "running" else None
 	current_state = str((job.get("currentTrack") or {}).get("state") or "")
 	tracks: list[dict[str, Any]] = []
 	counts = {
@@ -752,13 +754,16 @@ def sync_from_manifest(job: dict[str, Any], store: JobStore) -> dict[str, Any]:
 			state = "complete" if checkpoint.get("applied_at") else "not_started"
 		else:
 			state = _track_state(recording, current_id=current_id, current_state=current_state)
+			completed = (job.get("trackProgress") or {}).get(str(item.get("recording_id") or "")) == "complete" or job.get("status") == "complete"
+			if completed and state == "reused":
+				state = "complete"
 		if state == "downloaded":
 			counts["downloaded"] += 1
 		if state == "reused":
 			counts["reused"] += 1
 		if state in {"downloaded", "complete", "reused"}:
 			counts["ready"] += 1
-		if state in {"complete", "reused"}:
+		if state == "complete":
 			counts["complete"] += 1
 		if state == "not_started":
 			counts["notStarted"] += 1
@@ -898,11 +903,15 @@ def update_structured_progress(job: dict[str, Any], store: JobStore, event: dict
 			"artists": str(event.get("artists") or ""),
 			"state": phase,
 		}
+		if event.get("recording_id"):
+			job.setdefault("trackProgress", {})[str(event["recording_id"])] = phase
 	sync_from_manifest(job, store)
 
 
 def _terminal_status(job: dict[str, Any], code: int) -> str:
 	counts = job.get("counts") or {}
+	if code and job.get("errorSummary"):
+		return "failed"
 	if counts.get("review") or counts.get("failed"):
 		return "needs_attention"
 	return "complete" if code == 0 else "failed"
@@ -988,6 +997,15 @@ def run_job(
 		code = 2
 		job["errorSummary"] = str(exc)[:500]
 		job["retryable"] = True
+		current_id = str((job.get("currentTrack") or {}).get("recordingId") or "")
+		if current_id:
+			def record_failure(manifest: dict[str, Any]) -> None:
+				recording = manifest.get("recordings", {}).get(current_id)
+				if recording is not None:
+					recording["last_error"] = str(exc)
+					recording["last_error_source"] = {"type": job["source"]["type"], "id": job["source"]["id"]}
+			update_manifest(ManagedPaths(store.root), record_failure)
+		job["currentTrack"] = None
 	sync_from_manifest(job, store)
 	status = _terminal_status(job, code)
 	job["status"] = status
@@ -995,8 +1013,9 @@ def run_job(
 	job["pid"] = None
 	job["currentTrack"] = None
 	job["finishedAt"] = _now()
+	sync_from_manifest(job, store)
 	if status == "needs_attention":
-		job["errorSummary"] = "Resolve or retry tracks in Import Activity."
+		job["errorSummary"] = job.get("errorSummary") or "Resolve or retry tracks in Import Activity."
 	elif status == "failed" and not job.get("errorSummary"):
 		job["errorSummary"] = "The import stopped before completion."
 	job["notification"] = {"pending": True, "notifiedAt": None}

@@ -79,14 +79,18 @@ function previewSummary(preview: SourcePreview): string {
   return entries.map(([label, count]) => `${label} ${count}`).join(" · ");
 }
 
-function albumLibraryStage(row: PreviewRow): { label: "In Library" | "Not in Library"; icon: Icon; color: Color } {
+function albumLibraryStage(row: PreviewRow): { label: string; icon: Icon; color: Color } {
+  if (row.status === "upgrade_managed") {
+    return { label: "Existing Music match — upgrade album", icon: Icon.Music, color: Color.Blue };
+  }
   return row.status === "in_library"
     ? { label: "In Library", icon: Icon.Music, color: Color.Green }
     : { label: "Not in Library", icon: Icon.Circle, color: Color.SecondaryText };
 }
 
 function albumLibrarySummary(preview: SourcePreview): string {
-  return `In Library ${preview.counts.in_library || 0} · Not in Library ${preview.counts.not_in_library || 0}`;
+  const upgrades = preview.counts.upgrade_managed || 0;
+  return `In Library ${preview.counts.in_library || 0} · Not in Library ${preview.counts.not_in_library || 0}${upgrades ? ` · Upgrade existing ${upgrades}` : ""}`;
 }
 
 export function SourcePreviewView({ type, url }: { type: "album" | "playlist"; url: string }) {

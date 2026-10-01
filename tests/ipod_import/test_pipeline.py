@@ -36,6 +36,136 @@ def music_track(persistent_id="PID", *, album_name="Album", location="/Music/Son
 
 
 class PipelineTests(unittest.TestCase):
+	def ready_album(self, paths, *, duration_ms=175000):
+		paths.create()
+		path = paths.root / "Music/Song.mp3"
+		path.parent.mkdir(parents=True, exist_ok=True)
+		path.write_bytes(b"mp3")
+		manifest = new_manifest(paths)
+		key, recording = upsert_recording(manifest, source_track(), source_type="album")
+		recording["managed_file"] = {"managed_by_crate": True, "relative_path": "Music/Song.mp3", "duration_ms": duration_ms, "metadata_profile": "album", "spotify_album_id": "album-id"}
+		set_album(manifest, album(), [{"position": 1, "recording_id": key, "status": "managed_ready"}])
+		return manifest, key, recording, path
+
+	def test_album_addition_validates_downloaded_duration_and_caches_full_music_metadata(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory))
+			manifest, key, recording, path = self.ready_album(paths)
+			actual = music_track("NEW", location=str(path)) | {"duration_s": 175.04}
+			cache = Mock()
+			verify = Mock(return_value={"NEW": actual})
+			final = Mock(return_value={"NEW": actual})
+			with patch("crate_music_importer.ipod_import.pipeline.extract_embedded_artwork", return_value=path), patch("crate_music_importer.ipod_import.pipeline.import_managed_file", return_value={"persistent_id": "NEW"}):
+				result = apply_album_to_music(manifest, "album-id", paths, [], verify_music=verify, verify_music_final=final, cache_updater=cache)
+			self.assertEqual(result["new_imports"], 1)
+			self.assertNotIn("music_import_pending", recording)
+			self.assertEqual(recording["music_binding"], {"persistent_id": "NEW"})
+			self.assertTrue(all(call.args == (actual,) for call in cache.call_args_list))
+			final.assert_called_once_with(["NEW"])
+
+	def test_album_wrong_audio_stays_pending_and_does_not_enter_cache(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory))
+			manifest, key, recording, path = self.ready_album(paths)
+			cache = Mock()
+			with patch("crate_music_importer.ipod_import.pipeline.extract_embedded_artwork", return_value=path), patch("crate_music_importer.ipod_import.pipeline.import_managed_file", return_value={"persistent_id": "NEW"}):
+				with self.assertRaisesRegex(Exception, "duration changed"):
+					apply_album_to_music(manifest, "album-id", paths, [], verify_music=lambda _ids: {"NEW": music_track("NEW") | {"duration_s": 100}}, cache_updater=cache)
+			self.assertIn("music_import_pending", recording)
+			self.assertIn("duration", recording["last_error"])
+			cache.assert_not_called()
+
+	def test_music_read_failure_keeps_addition_pending_instead_of_reimporting(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory))
+			manifest, key, recording, path = self.ready_album(paths)
+			with patch("crate_music_importer.ipod_import.pipeline.extract_embedded_artwork", return_value=path), patch("crate_music_importer.ipod_import.pipeline.import_managed_file", return_value={"persistent_id": "NEW"}) as importer:
+				with self.assertRaisesRegex(Exception, "Music read failed"):
+					apply_album_to_music(manifest, "album-id", paths, [], verify_music=Mock(side_effect=RuntimeError("Music read failed")))
+			importer.assert_called_once()
+			self.assertIn("music_import_pending", recording)
+
+	def test_album_upgrades_original_loose_music_id_without_importing_or_changing_playlist(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory))
+			manifest, key, recording, path = self.ready_album(paths, duration_ms=180000)
+			recording["music_binding"] = {"persistent_id": "ORIGINAL"}
+			recording["playlist_memberships"] = {"saved": [7]}
+			loose = music_track("ORIGINAL", album_name="Playlist Imports", location=str(path))
+			lookup = Mock(side_effect=[loose, loose | {"album": "Album"}])
+			with patch("crate_music_importer.ipod_import.pipeline.extract_embedded_artwork", return_value=path), patch("crate_music_importer.ipod_import.pipeline.import_managed_file") as importer, patch("crate_music_importer.ipod_import.pipeline.update_managed_music_track") as update:
+				result = apply_album_to_music(manifest, "album-id", paths, [loose], exact_lookup=lookup)
+			self.assertEqual((result["new_imports"], result["updated_tracks"]), (0, 1))
+			self.assertEqual(recording["music_binding"], {"persistent_id": "ORIGINAL"})
+			self.assertEqual(recording["playlist_memberships"], {"saved": [7]})
+			importer.assert_not_called()
+			update.assert_called_once()
+
+	def test_album_missing_music_location_refuses_duplicate_addition(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory))
+			manifest, key, recording, path = self.ready_album(paths, duration_ms=180000)
+			recording["music_binding"] = {"persistent_id": "ORIGINAL"}
+			loose = music_track("ORIGINAL", album_name="Playlist Imports", location=None)
+			with patch("crate_music_importer.ipod_import.pipeline.import_managed_file") as importer:
+				with self.assertRaisesRegex(Exception, "refusing to add a duplicate"):
+					apply_album_to_music(manifest, "album-id", paths, [loose], exact_lookup=lambda _pid: loose)
+			importer.assert_not_called()
+
+	def test_album_retag_refresh_before_cache_update_keeps_original_music_id(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory))
+			manifest, key, recording, path = self.ready_album(paths, duration_ms=180000)
+			recording["music_binding"] = {"persistent_id": "ORIGINAL"}
+			cached = music_track("ORIGINAL", album_name="Playlist Imports", location=str(path))
+			actual = cached | {"album": "Album"}
+			with patch("crate_music_importer.ipod_import.pipeline.import_managed_file") as importer:
+				result = apply_album_to_music(manifest, "album-id", paths, [cached], exact_lookup=lambda _pid: actual)
+			self.assertEqual(result["new_imports"], 0)
+			self.assertEqual(recording["music_binding"], {"persistent_id": "ORIGINAL"})
+			importer.assert_not_called()
+
+	def test_managed_album_refreshes_stale_compilation_flag_in_place(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory))
+			manifest, key, recording, path = self.ready_album(paths, duration_ms=180000)
+			recording["music_binding"] = {"persistent_id": "ORIGINAL"}
+			actual = music_track("ORIGINAL", location=str(path)) | {"compilation": True}
+			lookup = Mock(side_effect=[actual, actual | {"compilation": False}])
+			with patch("crate_music_importer.ipod_import.pipeline.extract_embedded_artwork", return_value=path), patch("crate_music_importer.ipod_import.pipeline.import_managed_file") as importer, patch("crate_music_importer.ipod_import.pipeline.update_managed_music_track") as update:
+				result = apply_album_to_music(manifest, "album-id", paths, [actual], exact_lookup=lookup)
+			self.assertEqual((result["new_imports"], result["updated_tracks"]), (0, 1))
+			importer.assert_not_called()
+			update.assert_called_once()
+
+	def test_failed_verification_retry_adopts_already_added_track_without_download_or_add(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory))
+			manifest, key, recording, path = self.ready_album(paths)
+			recording["music_binding"] = {"persistent_id": "NEW"}
+			recording["music_import_pending"] = {"relative_path": "Music/Song.mp3"}
+			recording["last_error"] = "Previous Music check timed out."
+			actual = music_track("NEW", location=str(path)) | {"duration_s": 175.04}
+			with patch("crate_music_importer.ipod_import.pipeline.import_managed_file") as importer:
+				result = apply_album_to_music(manifest, "album-id", paths, [], exact_lookup=lambda _pid: actual)
+			self.assertEqual(result["new_imports"], 0)
+			self.assertEqual(recording["music_binding"], {"persistent_id": "NEW"})
+			self.assertNotIn("music_import_pending", recording)
+			self.assertNotIn("last_error", recording)
+			importer.assert_not_called()
+
+	def test_album_library_preview_identifies_a_managed_loose_track_upgrade(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory))
+			manifest, key, recording, path = self.ready_album(paths, duration_ms=180000)
+			recording["managed_file"]["metadata_profile"] = "playlist"
+			recording["music_binding"] = {"persistent_id": "ORIGINAL"}
+			with patch("crate_music_importer.ipod_import.pipeline.managed_duration_is_valid", return_value=True):
+				preview = build_album_library_preview(album(), [music_track("ORIGINAL", album_name="Playlist Imports", location=str(path))], manifest, paths)
+			self.assertEqual(preview.rows[0]["status"], "upgrade_managed")
+			self.assertEqual(preview.counts, {"in_library": 0, "not_in_library": 0, "upgrade_managed": 1})
+			self.assertEqual(preview.manifest["recordings"][key]["music_binding"], {"persistent_id": "ORIGINAL"})
+
 	def test_mislabelled_album_artist_cohort_is_in_library_without_retagging(self):
 		with tempfile.TemporaryDirectory() as directory:
 			paths = ManagedPaths(Path(directory) / "managed")

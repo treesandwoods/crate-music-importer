@@ -14,6 +14,7 @@ from crate_music_importer.ipod_import.music import (
 	_PLAYLIST_MEMBERSHIP_SCRIPT,
 	_SCAN_PLAYLIST_IMPORTS_SCRIPT,
 	_SCAN_SCRIPT,
+	_VERIFY_TRACKS_SCRIPT,
 	_UPDATE_ALBUM_TRACK_SCRIPT,
 	_UPDATE_MANAGED_ARTWORK_SCRIPT,
 	_music_location_to_posix,
@@ -139,9 +140,22 @@ class MusicAutomationTests(unittest.TestCase):
 		with patch("crate_music_importer.ipod_import.music._osascript", return_value=row + chr(30)) as run_script:
 			self.assertEqual(scan_playlist_imports(["PID", "PID"])[0]["persistent_id"], "PID")
 		run_script.assert_called_once_with(_SCAN_PLAYLIST_IMPORTS_SCRIPT, ["PID"], timeout=300)
-		with patch("crate_music_importer.ipod_import.music.time.sleep") as sleep, patch("crate_music_importer.ipod_import.music.scan_playlist_imports", return_value=[{"persistent_id": "WANTED"}]):
-			self.assertEqual(verify_music_tracks(["WANTED"], settle_seconds=1.5), {"WANTED": {"persistent_id": "WANTED"}})
+		with patch("crate_music_importer.ipod_import.music.time.sleep") as sleep, patch("crate_music_importer.ipod_import.music._osascript", return_value=row + chr(30)) as run_script:
+			self.assertEqual(list(verify_music_tracks(["PID", "PID"], settle_seconds=1.5)), ["PID"])
 		sleep.assert_called_once_with(1.5)
+		run_script.assert_called_once_with(_VERIFY_TRACKS_SCRIPT, ["PID"], timeout=300)
+
+	def test_serial_verification_neither_waits_nor_reads_unrelated_playlist_tracks(self):
+		self.assertNotIn('whose album is "Playlist Imports"', _VERIFY_TRACKS_SCRIPT)
+		self.assertIn("set trackFileLocation to get location of libraryTrack", _LOOKUP_TRACK_BY_ID_SCRIPT)
+		with patch("crate_music_importer.ipod_import.music.time.sleep") as sleep, patch("crate_music_importer.ipod_import.music._osascript", return_value=""):
+			self.assertEqual(verify_music_tracks(["PID"]), {})
+		sleep.assert_not_called()
+
+	def test_incomplete_verification_row_is_an_error_instead_of_a_missing_track(self):
+		with patch("crate_music_importer.ipod_import.music._osascript", return_value="Song\x1fArtist\x1fAlbum\x1f180\x1fPID\x1f1\x1f\x1f\x1e"):
+			with self.assertRaisesRegex(MusicAutomationError, "incomplete"):
+				verify_music_tracks(["PID"])
 
 	def test_playlist_membership_and_guarded_edit_preserve_duplicates(self):
 		with patch("crate_music_importer.ipod_import.music._osascript", return_value="OK\tA\x1fB\x1fA"):

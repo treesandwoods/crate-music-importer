@@ -94,3 +94,43 @@ test("album preview rows and summary show only Music library status", async () =
     await act(async () => view.unmount());
   }
 });
+
+test("album preview identifies an existing track that will be upgraded", async () => {
+  const preview: SourcePreview = {
+    source: { type: "album", id: "album", name: "Album", url: "https://example.test", total: 1 },
+    counts: { in_library: 0, not_in_library: 0, upgrade_managed: 1 },
+    rows: [
+      {
+        position: 1,
+        recording_id: "original",
+        title: "Song",
+        artists: "Artist",
+        status: "upgrade_managed",
+        detail: "Existing Music match; upgrade album metadata",
+      },
+    ],
+  };
+  const module = { exports: {} as { SourcePreviewView: ComponentType<{ type: "album"; url: string }> } };
+  new Function("require", "module", "exports", "harness", bundled)(
+    createRequire(resolve("package.json")),
+    module,
+    module.exports,
+    { preview: async () => preview },
+  );
+  let view!: ReturnType<typeof create>;
+  await act(async () => {
+    view = create(createElement(module.exports.SourcePreviewView, { type: "album", url: preview.source.url }));
+  });
+  try {
+    assert.equal(
+      view.root.findByType("Section" as ElementType).props.subtitle,
+      "In Library 0 · Not in Library 0 · Upgrade existing 1",
+    );
+    assert.equal(
+      view.root.findByType("Item" as ElementType).props.accessories[0].tag.value,
+      "Existing Music match — upgrade album",
+    );
+  } finally {
+    await act(async () => view.unmount());
+  }
+});
