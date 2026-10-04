@@ -1,10 +1,11 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from crate_music_importer.ipod_import.manifest import ManagedPaths, new_manifest, set_album, set_playlist, upsert_recording
+from crate_music_importer.ipod_import.manifest import ManagedPaths, load_manifest, new_manifest, set_album, set_playlist, upsert_recording
 from crate_music_importer.ipod_import.music import MusicAutomationError
-from crate_music_importer.ipod_import.playlist_update import apply_playlist_update, build_playlist_update_preview, refresh_playlist_covers, save_pending_update, saved_playlists
+from crate_music_importer.ipod_import.playlist_update import apply_playlist_update, build_playlist_update_preview, refresh_playlist_covers, resume_playlist_update, save_pending_update, saved_playlists
 
 
 URL = "https://open.spotify.com/playlist/37i9dQZF1DXTESTFIXTURE1"
@@ -58,6 +59,83 @@ class PlaylistUpdateTests(unittest.TestCase):
 		self.assertEqual(saved_playlists(manifest)[0]["track_count"], 3)
 		self.assertEqual(saved_playlists(manifest)[0]["spotify_url"], URL)
 		self.assertEqual(saved_playlists(manifest)[0]["cover_url"], "https://example.test/saved.jpg")
+
+	def test_resume_retains_confirmed_plan_and_refreshes_downloaded_and_chosen_additions(self):
+		paths, manifest, music = self.fixture(("a", "b"))
+		preview = self.preview(manifest, music, ("b", "c", "d", "c"))
+		pending = save_pending_update(preview, paths)
+		items = pending["addition_items"]
+		c = preview.manifest["recordings"][items[0]["recording_id"]]
+		file = paths.root / "tracks/c.mp3"
+		file.parent.mkdir(parents=True)
+		file.write_bytes(b"audio")
+		c["managed_file"] = {"relative_path": "tracks/c.mp3", "managed_by_crate": True}
+		d = preview.manifest["recordings"][items[1]["recording_id"]]
+		d["youtube"] = {"url": "https://www.youtube.com/watch?v=chosen", "selected_by": "manual_candidate"}
+		items[1]["status"] = "failed"
+		current = {"id": "saved", "url": URL, "tracks": [track(value) for value in ("b", "c", "d", "c")], "total_count": 4, "complete": True}
+		with patch("crate_music_importer.ipod_import.pipeline.managed_duration_is_valid", return_value=True):
+			resumed, plan = resume_playlist_update(current, music, preview.manifest, paths, pending["confirmation_token"])
+		self.assertEqual([item["status"] for item in plan["addition_items"]], ["managed_existing", "ready_to_download", "managed_existing"])
+		for field in ("confirmation_token", "created_at", "spotify_snapshot", "removals", "reorders", "music_baseline", "saved_items"):
+			self.assertEqual(plan[field], pending[field])
+		self.assertEqual(resumed["playlists"]["saved"]["items"], manifest["playlists"]["saved"]["items"])
+		self.assertEqual(resumed["recordings"][items[0]["recording_id"]]["pending_playlist_memberships"]["saved"], [3, 5])
+		self.assertNotIn("saved", resumed["recordings"][items[0]["recording_id"]]["playlist_memberships"])
+		self.assertEqual(d["youtube"], resumed["recordings"][items[1]["recording_id"]]["youtube"])
+
+	def test_resume_blocks_changed_order_duplicates_incomplete_data_and_wrong_confirmation(self):
+		paths, manifest, music = self.fixture(("a", "b"))
+		preview = self.preview(manifest, music, ("b", "b", "c"))
+		pending = save_pending_update(preview, paths)
+		current = {"id": "saved", "url": URL, "tracks": [track(value) for value in ("b", "b", "c")], "total_count": 3, "complete": True}
+		cases = [
+			(dict(current, tracks=[track(value) for value in ("b", "c", "b")]), pending["confirmation_token"]),
+			(dict(current, total_count=4), pending["confirmation_token"]),
+			(dict(current, complete=False), pending["confirmation_token"]),
+			(dict(current, url=URL + "changed"), pending["confirmation_token"]),
+			(current, None), (current, "wrong"),
+		]
+		before = paths.manifest.read_bytes()
+		for source, token in cases:
+			with self.subTest(source=source, token=token), self.assertRaises(ValueError):
+				resume_playlist_update(source, music, preview.manifest, paths, token)
+		self.assertEqual(before, paths.manifest.read_bytes())
+
+	def test_resume_does_not_replan_a_partial_music_checkpoint(self):
+		paths, manifest, music = self.fixture(("a", "b"))
+		preview = self.preview(manifest, music, ("b", "c"))
+		pending = save_pending_update(preview, paths)
+		pending["music_checkpoint"] = {"baseline": ["PID-A", "PID-B"], "survivors": [], "append_ids": ["PID-B", "PID-C"], "final": ["PID-B", "PID-C"]}
+		current = {"id": "saved", "url": URL, "tracks": [track("b"), track("c")], "total_count": 2, "complete": True}
+		with patch("crate_music_importer.ipod_import.pipeline.build_preview", side_effect=AssertionError("must retain checkpoint")):
+			resumed, plan = resume_playlist_update(current, music, preview.manifest, paths, pending["confirmation_token"])
+		self.assertEqual(plan, pending)
+		self.assertIsNot(resumed, preview.manifest)
+
+	def test_retry_after_membership_apply_preserves_original_occurrences_and_avoids_duplicate_edits(self):
+		paths, manifest, music = self.fixture(("a", "b", "c"))
+		preview = self.preview(manifest, music, ("c", "b", "c"))
+		save_pending_update(preview, paths)
+		membership = ["PID-A", "PID-B", "PID-C"]
+		edits = []
+		def editor(_name, _pid, expected, removals, additions):
+			self.assertEqual(expected, membership)
+			edits.append((removals, additions))
+			membership[:] = [value for index, value in enumerate(expected) if index not in removals] + additions
+			return list(membership)
+		kwargs = dict(exact_lookup=lambda pid: next((row for row in music if row["persistent_id"] == pid), None), cache_updater=lambda _track: None, cache_remover=lambda _ids: 0, membership_reader=lambda *_args: list(membership), membership_editor=editor, status_checker=lambda _name, pid: ("FOUND", pid))
+		with patch("crate_music_importer.ipod_import.playlist_update.write_playlist_m3u8", side_effect=OSError("write interrupted")), self.assertRaises(OSError):
+			apply_playlist_update(preview.manifest, "saved", paths, music, **kwargs)
+		interrupted = load_manifest(paths)
+		self.assertEqual([item["spotify_id"] for item in interrupted["playlists"]["saved"]["items"]], ["c", "b", "c"])
+		current = {"id": "saved", "url": URL, "tracks": [track(value) for value in ("c", "b", "c")], "total_count": 3, "complete": True}
+		resumed, _pending = resume_playlist_update(current, music, interrupted, paths, preview.confirmation_token())
+		apply_playlist_update(resumed, "saved", paths, music, **kwargs)
+		self.assertEqual(len(edits), 1)
+		self.assertEqual(membership, ["PID-C", "PID-B", "PID-C"])
+		self.assertEqual([item["spotify_id"] for item in resumed["playlists"]["saved"]["items"]], ["c", "b", "c"])
+		self.assertNotIn("pending_update", load_manifest(paths)["playlists"]["saved"])
 
 	def test_refreshes_changed_playlist_covers_and_preserves_failed_fetches(self):
 		_paths, manifest, _music = self.fixture()

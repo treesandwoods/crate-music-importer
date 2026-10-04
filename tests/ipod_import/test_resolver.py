@@ -89,6 +89,20 @@ class ResolverTests(unittest.TestCase):
 			snapshot = resolver_snapshot(paths)
 			self.assertEqual(snapshot["sources"][0]["state"], "complete")
 
+	def test_pending_update_is_ready_even_when_every_recording_already_has_a_music_binding(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory) / "managed")
+			manifest = new_manifest(paths)
+			key, recording = upsert_recording(manifest, source_track())
+			recording["music_binding"] = {"persistent_id": "PID"}
+			add_playlist(manifest, key)
+			manifest["playlists"]["playlist-id"]["pending_update"] = {"addition_items": [], "removals": [{"recording_id": key}], "reorders": [{"recording_id": key}], "music_changes": [{"persistent_id": "PID"}]}
+			save_manifest(paths, manifest)
+			snapshot = resolver_snapshot(paths)
+			self.assertEqual(snapshot["sources"][0]["state"], "ready")
+			self.assertEqual(snapshot["readySources"][0]["mode"], "update")
+			self.assertEqual(snapshot["readySources"][0]["itemCount"], 3)
+
 
 if __name__ == "__main__":
 	unittest.main()

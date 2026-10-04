@@ -442,15 +442,66 @@ def save_pending_update(preview: PlaylistUpdatePreview, paths: ManagedPaths) -> 
 		"removal_positions": preview.removal_positions,
 		"removals_deferred": preview.removals_deferred,
 		"music_checkpoint": None,
+		"saved_items": copy.deepcopy(playlist.get("items") or []),
 		"confirmation_token": preview.confirmation_token(),
 	}
 	playlist["latest_observed_spotify_snapshot"] = preview.spotify_snapshot
 	playlist["latest_observed_spotify_counts"] = _occurrence_counts(preview.spotify_snapshot)
+	for recording in preview.manifest.get("recordings", {}).values():
+		(recording.get("pending_playlist_memberships") or {}).pop(preview.playlist_id, None)
 	for item in preview.addition_items:
 		recording = preview.manifest["recordings"][item["recording_id"]]
-		recording.setdefault("pending_playlist_memberships", {})[preview.playlist_id] = [int(item["position"])]
+		recording.setdefault("pending_playlist_memberships", {}).setdefault(preview.playlist_id, []).append(int(item["position"]))
 	save_manifest(paths, preview.manifest)
 	return playlist["pending_update"]
+
+
+def resume_playlist_update(
+	current: dict[str, Any],
+	music_tracks: list[dict[str, Any]],
+	manifest: dict[str, Any],
+	paths: ManagedPaths,
+	confirmation_token: str | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+	"""Refresh addition readiness while retaining the confirmed plan and Music checkpoint."""
+	from crate_music_importer.ipod_import.pipeline import build_preview
+
+	playlist_id = str(current.get("id") or "")
+	saved = manifest.get("playlists", {}).get(playlist_id) or {}
+	pending = saved.get("pending_update")
+	if not isinstance(pending, dict) or not confirmation_token or confirmation_token != pending.get("confirmation_token"):
+		raise ValueError("No matching confirmed playlist update is pending. Refresh and confirm the exact playlist sync again.")
+	tracks = list(current.get("tracks") or [])
+	if not current.get("complete", True) or current.get("total_count") is None or int(current["total_count"]) != len(tracks):
+		raise ValueError(current.get("warning") or "Spotify returned an incomplete playlist. Saved update progress was kept.")
+	expected = [str(row.get("spotify_id") or "") for row in sorted(pending.get("spotify_snapshot") or [], key=lambda row: int(row.get("spotify_position") or 0))]
+	if current.get("url") != pending.get("spotify_url") or [str(track.get("sp_id") or "") for track in tracks] != expected:
+		raise ValueError("Spotify changed after the update preview. Refresh and confirm the exact playlist sync again.")
+	planned = clone_manifest(manifest)
+	# Once Music application starts, its checkpoint owns the remaining work. Replanning
+	# here would lose the original membership baseline after a partial mutation.
+	if isinstance(pending.get("music_checkpoint"), dict):
+		return planned, planned["playlists"][playlist_id]["pending_update"]
+	addition_items = list(pending.get("addition_items") or [])
+	if addition_items:
+		partial = dict(current, tracks=[tracks[int(item["spotify_position"]) - 1] for item in addition_items], total_count=len(addition_items))
+		standard = build_preview(partial, music_tracks, planned, paths)
+		planned = standard.manifest
+		generated = planned["playlists"][playlist_id]["items"]
+		for item, refreshed in zip(addition_items, generated):
+			if item["recording_id"] != refreshed["recording_id"]:
+				raise ValueError("A saved playlist addition changed identity. Refresh and confirm the exact playlist sync again.")
+		planned["playlists"][playlist_id] = copy.deepcopy(saved)
+		for recording_id, recording in planned.get("recordings", {}).items():
+			memberships = recording.setdefault("playlist_memberships", {})
+			prior = (manifest.get("recordings", {}).get(recording_id) or {}).get("playlist_memberships") or {}
+			if playlist_id in prior:
+				memberships[playlist_id] = copy.deepcopy(prior[playlist_id])
+			else:
+				memberships.pop(playlist_id, None)
+		for item, refreshed in zip(planned["playlists"][playlist_id]["pending_update"]["addition_items"], generated):
+			item["status"] = refreshed["status"]
+	return planned, planned["playlists"][playlist_id]["pending_update"]
 
 
 def _updated_playlist_items(
@@ -676,7 +727,9 @@ def apply_playlist_update(
 	save_manifest(paths, manifest)
 
 	remove_saved = set(int(value) for value in pending.get("removal_positions") or [])
-	original_items = sorted(playlist.get("items") or [], key=lambda item: int(item.get("position") or 0))
+	# Keep the original occurrence positions across retries after membership application.
+	pending.setdefault("saved_items", copy.deepcopy(playlist.get("items") or []))
+	original_items = sorted(pending["saved_items"], key=lambda item: int(item.get("position") or 0))
 	playlist["items"], spotify_snapshot = _updated_playlist_items(
 		original_items,
 		addition_items,

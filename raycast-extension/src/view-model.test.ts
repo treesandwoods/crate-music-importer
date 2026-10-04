@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  activityReadySources,
   activeSources,
   hasVisibleItems,
   jobPhaseLabel,
@@ -80,6 +81,24 @@ test("recognizes ready and active source rows as visible", () => {
   ];
   assert.equal(activeSources(value).length, 1);
   assert.equal(hasVisibleItems(value), true);
+});
+
+test("ready sources appear once while failed album and playlist jobs keep their error rows", () => {
+  for (const type of ["album", "playlist"] as const) {
+    const value = snapshot();
+    const source = { type, id: "source", name: "Source", url: "url", itemCount: 3 };
+    value.readySources = [source];
+    for (const status of ["queued", "running", "needs_attention", "failed"] as const) {
+      const job = { status, source: { ...source, total: 3 } };
+      assert.deepEqual(activityReadySources(value, [job]), [], status);
+      assert.deepEqual(activityReadySources(value, [{ ...job, source: { ...job.source, id: "different" } }]), [source]);
+    }
+    for (const status of ["ready_to_continue", "complete", "cancelled", "superseded"] as const) {
+      assert.deepEqual(activityReadySources(value, [{ status, source: { ...source, total: 3 } }]), [source]);
+    }
+    assert.deepEqual(activityReadySources(value, []), [source]);
+  }
+  assert.deepEqual(activityReadySources(undefined, []), []);
 });
 
 test("polling snapshots reuse unchanged state", () => {

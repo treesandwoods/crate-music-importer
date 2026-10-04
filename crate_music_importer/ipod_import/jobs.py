@@ -313,6 +313,13 @@ def enqueue(
 	if retry_of:
 		job["retryOf"] = retry_of
 	with store.enqueue_lock():
+		if action == "playlist_update_combined":
+			manifest = load_manifest(ManagedPaths(root))
+			pending = ((manifest.get("playlists", {}).get(job["source"]["id"]) or {}).get("pending_update") or {})
+			token = str(pending.get("confirmation_token") or "")
+			if token and (not job.get("confirmationToken") or job["confirmationToken"] == token):
+				job["confirmationToken"] = token
+				job["resumeUpdate"] = True
 		existing_jobs = store.list()
 		for existing in existing_jobs:
 			if (
@@ -693,7 +700,9 @@ def sync_from_manifest(job: dict[str, Any], store: JobStore) -> dict[str, Any]:
 			if job.get("status") == "running":
 				for track in job.get("tracks") or []:
 					track["state"] = "complete"
-				job["counts"] = {**(job.get("counts") or {}), "complete": len(job.get("tracks") or []), "pending": 0, "review": 0, "failed": 0}
+				count = len(job.get("tracks") or [])
+				job["counts"] = {key: 0 for key in job.get("counts") or {}}
+				job["counts"].update({"total": count, "complete": count, "ready": count})
 				return store.save(job)
 			return job
 		items = list(pending.get("addition_items") or []) + [
@@ -872,6 +881,8 @@ def _commands(job: dict[str, Any]) -> list[list[str]]:
 		prepare = ["playlist-update-prepare", playlist_id, "--confirm-download"]
 		if job.get("confirmationToken"):
 			prepare += ["--confirmation-token", str(job["confirmationToken"])]
+		if job.get("resumeUpdate"):
+			prepare.append("--resume")
 		return [prepare, ["playlist-update-apply", playlist_id, "--confirm-music-write"]]
 	if job["source"]["type"] == "album":
 		return [["album-import", url, "--confirm-download"], ["album-apply", url, "--confirm-music-write"]]
@@ -1010,6 +1021,7 @@ def run_job(
 	status = _terminal_status(job, code)
 	job["status"] = status
 	job["phase"] = status
+	job["retryable"] = status == "failed"
 	job["pid"] = None
 	job["currentTrack"] = None
 	job["finishedAt"] = _now()
@@ -1107,7 +1119,7 @@ def reconcile_terminal_jobs(store: JobStore) -> list[dict[str, Any]]:
 			(
 				candidate for candidate in jobs
 				if str(candidate.get("createdAt") or "") > str(job.get("createdAt") or "")
-				and candidate.get("status") in {"queued", "running", "complete"}
+				and candidate.get("status") in {"queued", "running", "complete", "needs_attention", "ready_to_continue", "failed"}
 				and _same_source(job, candidate)
 			),
 			None,
@@ -1122,11 +1134,17 @@ def reconcile_terminal_jobs(store: JobStore) -> list[dict[str, Any]]:
 		store.save(job)
 	jobs = store.list()
 	for job in jobs:
-		if job.get("status") != "needs_attention":
+		if job.get("status") not in {"needs_attention", "ready_to_continue", "failed"}:
 			continue
 		job = sync_from_manifest(job, store)
+		if job.get("status") == "failed":
+			continue
 		counts = job.get("counts") or {}
 		if counts.get("review") or counts.get("failed"):
+			if job.get("status") == "ready_to_continue":
+				job["status"] = "needs_attention"
+				job["phase"] = "needs_attention"
+				store.save(job)
 			continue
 		job["status"] = "complete" if counts.get("total") and counts.get("complete") == counts.get("total") else "ready_to_continue"
 		job["phase"] = job["status"]
