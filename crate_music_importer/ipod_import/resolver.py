@@ -63,7 +63,7 @@ def _source_entry(source_type: str, source_id: str, source: dict[str, Any]) -> d
 	pending = source.get("pending_update") if source_type == "playlist" else None
 	item_count = len(source.get("items") or [])
 	if isinstance(pending, dict):
-		item_count = len(pending.get("addition_items") or []) + len(pending.get("removals") or [])
+		item_count = sum(len(pending.get(key) or []) for key in ("addition_items", "removals", "reorders", "music_changes"))
 	return {
 		"type": source_type,
 		"id": source_id,
@@ -275,7 +275,7 @@ def _source_rows(manifest: dict[str, Any], paths: ManagedPaths, problems: list[d
 				state = "needs_choice"
 			elif "retryable" in states:
 				state = "retryable"
-			elif items and all(
+			elif not isinstance(source.get("pending_update"), dict) and items and all(
 				_recording_complete(manifest["recordings"][item["recording_id"]], source_type, source_id)
 				for item in items
 			):

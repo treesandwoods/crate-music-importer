@@ -9,9 +9,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from crate_music_importer.ipod_import import cli
+from crate_music_importer.ipod_import.jobs import JobStore, enqueue, run_job, jobs_snapshot
 from crate_music_importer.ipod_import.manifest import ManagedPaths, load_manifest, new_manifest, save_manifest, set_album, set_playlist, upsert_recording
 from crate_music_importer.ipod_import.music_cache import build_full_cache, save_music_cache
 from crate_music_importer.ipod_import.spotify import load_fixture
+from crate_music_importer.ipod_import.playlist_update import build_playlist_update_preview
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -23,6 +25,64 @@ class AlbumCliEfficiencyTests(unittest.TestCase):
 		lock = patch("crate_music_importer.ipod_import.dependency_lock.dependency_lock", return_value=contextlib.nullcontext())
 		lock.start()
 		self.addCleanup(lock.stop)
+
+	def test_playlist_update_checkpoints_before_download_and_classifies_review_pause(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory) / "managed")
+			playlist_id = "37i9dQZF1DXTESTFIXTURE1"
+			url = f"https://open.spotify.com/playlist/{playlist_id}"
+			manifest = new_manifest(paths)
+			saved_track = {"sp_id": "saved", "title": "Saved", "artists": "Artist", "duration_ms": 180000}
+			key, recording = upsert_recording(manifest, saved_track)
+			recording["music_binding"] = {"persistent_id": "PID"}
+			set_playlist(manifest, {"id": playlist_id, "name": "Playlist", "url": url, "complete": True, "total_count": 1}, [{"position": 1, "recording_id": key, "spotify_id": "saved", "status": "reused_music"}])["music_playlist_persistent_id"] = "PLAYLIST-PID"
+			save_manifest(paths, manifest)
+			music = [{"persistent_id": "PID", "title": "Saved", "artist": "Artist", "duration_s": 180}]
+			save_music_cache(paths, build_full_cache(paths, music))
+			current = {"id": playlist_id, "name": "Playlist", "url": url, "tracks": [saved_track, {"sp_id": "new", "title": "New", "artists": "Artist", "duration_ms": 180000}], "total_count": 2, "complete": True}
+			preview = build_playlist_update_preview(current, music, manifest, paths, status_checker=lambda _name, pid: ("FOUND", pid), membership_reader=lambda *_args: ["PID"])
+			popen = lambda *_args, **_kwargs: SimpleNamespace(pid=1)
+			job = enqueue("playlist_update_combined", url, root=paths.root, popen=popen, seed={"confirmationToken": preview.confirmation_token()})
+			def pause_for_review(*, preview, items_override, on_progress, **_kwargs):
+				pending = load_manifest(paths)["playlists"][playlist_id]["pending_update"]
+				self.assertEqual(pending["confirmation_token"], job["confirmationToken"])
+				self.assertEqual(pending["addition_items"], items_override)
+				new_key = items_override[0]["recording_id"]
+				preview.manifest["recordings"][new_key]["review"] = {"kind": "youtube_missing", "message": "Choose", "candidates": []}
+				preview.manifest["recordings"][new_key]["last_error"] = "No verified YouTube recording met the automatic identity and duration requirements."
+				items_override[0]["status"] = "failed"
+				save_manifest(paths, preview.manifest)
+				on_progress({"phase": "no_youtube_matches", "recording_id": new_key})
+			with patch("crate_music_importer.ipod_import.cli.ManagedPaths", return_value=paths), \
+				patch("crate_music_importer.ipod_import.cli._current_saved_playlist", return_value=current), \
+				patch("crate_music_importer.ipod_import.cli.build_playlist_update_preview", return_value=preview), \
+				patch("crate_music_importer.ipod_import.cli.check_tools"), \
+				patch("crate_music_importer.ipod_import.cli.execute_import", side_effect=pause_for_review), \
+				patch("crate_music_importer.ipod_import.cli.apply_playlist_update") as apply:
+				finished = run_job(job, JobStore(paths.root), notifier=lambda _job_id: None)
+			self.assertEqual(finished["status"], "needs_attention")
+			self.assertEqual(finished["counts"]["review"], 1)
+			apply.assert_not_called()
+			latest = load_manifest(paths)
+			addition = latest["playlists"][playlist_id]["pending_update"]["addition_items"][0]
+			chosen = latest["recordings"][addition["recording_id"]]
+			chosen.pop("review")
+			chosen.pop("last_error")
+			chosen["youtube"] = {"url": "https://www.youtube.com/watch?v=chosen", "selected_by": "manual_candidate"}
+			save_manifest(paths, latest)
+			self.assertEqual(jobs_snapshot(root=paths.root)["jobs"][0]["status"], "ready_to_continue")
+			continued = enqueue("playlist_update_combined", url, root=paths.root, popen=popen)
+			self.assertEqual(continued["confirmationToken"], job["confirmationToken"])
+			self.assertTrue(continued["resumeUpdate"])
+			with patch("crate_music_importer.ipod_import.cli.ManagedPaths", return_value=paths), \
+				patch("crate_music_importer.ipod_import.cli._current_saved_playlist", return_value=current), \
+				patch("crate_music_importer.ipod_import.cli.build_playlist_update_preview", side_effect=AssertionError("must resume saved plan")), \
+				patch("crate_music_importer.ipod_import.cli.check_tools"), \
+				patch("crate_music_importer.ipod_import.cli.execute_import") as download, \
+				contextlib.redirect_stdout(io.StringIO()):
+				self.assertEqual(cli.run(["playlist-update-prepare", playlist_id, "--confirm-download", "--resume", "--confirmation-token", continued["confirmationToken"]]), 0)
+			self.assertEqual(download.call_args.kwargs["items_override"][0]["status"], "ready_to_download")
+			self.assertEqual(load_manifest(paths)["playlists"][playlist_id]["pending_update"]["confirmation_token"], job["confirmationToken"])
 
 	def test_saved_playlists_backfills_and_returns_playlist_thumbnail(self):
 		with tempfile.TemporaryDirectory() as directory:

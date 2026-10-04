@@ -23,6 +23,7 @@ import type {
   SourceReference,
 } from "./types";
 import {
+  activityReadySources,
   hasVisibleItems,
   jobPhaseLabel,
   jobProgressSummary,
@@ -640,6 +641,7 @@ export default function Command() {
   const activeJobs = jobs?.jobs.filter((job) => job.status === "queued" || job.status === "running") || [];
   const attentionJobs = jobs?.jobs.filter((job) => job.status === "needs_attention" || job.status === "failed") || [];
   const recentJobs = jobs?.jobs.filter((job) => job.status === "complete") || [];
+  const readySources = activityReadySources(snapshot, jobs?.jobs || []);
 
   return (
     <List
@@ -694,9 +696,9 @@ export default function Command() {
           ))}
         </List.Section>
       ))}
-      {snapshot?.readySources.length ? (
-        <List.Section title="Ready to Continue" subtitle={`${snapshot.readySources.length}`}>
-          {snapshot.readySources.map((source) => {
+      {readySources.length ? (
+        <List.Section title="Ready to Continue" subtitle={`${readySources.length}`}>
+          {readySources.map((source) => {
             return (
               <List.Item
                 key={`${source.type}-${source.id}`}

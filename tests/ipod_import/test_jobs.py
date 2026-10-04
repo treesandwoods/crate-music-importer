@@ -163,6 +163,48 @@ class DurableJobTests(unittest.TestCase):
 				["playlist-update-apply", "saved-id", "--confirm-music-write"],
 			])
 
+	def test_update_continuation_and_retry_recover_the_saved_confirmation(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			paths = ManagedPaths(root)
+			manifest = new_manifest(paths)
+			manifest["playlists"]["saved-id"] = {"name": "Saved", "items": [], "pending_update": {"confirmation_token": "confirmed", "addition_items": [], "music_checkpoint": {"baseline": ["PID"]}}}
+			save_manifest(paths, manifest)
+			popen = lambda *_args, **_kwargs: SimpleNamespace(pid=os.getpid())
+			job = enqueue("playlist_update_combined", PLAYLIST_URL, root=root, popen=popen, seed={"savedPlaylistId": "saved-id"})
+			self.assertEqual(job["confirmationToken"], "confirmed")
+			self.assertTrue(job["resumeUpdate"])
+			self.assertEqual(_commands(job)[0], ["playlist-update-prepare", "saved-id", "--confirm-download", "--confirmation-token", "confirmed", "--resume"])
+			job["status"] = "failed"
+			job["retryable"] = True
+			job["confirmationToken"] = None  # Legacy Continue jobs omitted the token.
+			JobStore(root).save(job)
+			retried = retry_job(job["jobId"], root=root, popen=popen)
+			self.assertEqual(retried["confirmationToken"], "confirmed")
+			self.assertTrue(retried["resumeUpdate"])
+			self.assertEqual(load_manifest(paths)["playlists"]["saved-id"]["pending_update"]["music_checkpoint"], {"baseline": ["PID"]})
+
+	def test_fresh_update_confirmation_does_not_resume_an_older_plan(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			paths = ManagedPaths(root)
+			manifest = new_manifest(paths)
+			manifest["playlists"]["saved-id"] = {"pending_update": {"confirmation_token": "old"}}
+			save_manifest(paths, manifest)
+			job = enqueue("playlist_update_combined", PLAYLIST_URL, root=root, popen=lambda *_args, **_kwargs: SimpleNamespace(pid=os.getpid()), seed={"savedPlaylistId": "saved-id", "confirmationToken": "new"})
+			self.assertEqual(job["confirmationToken"], "new")
+			self.assertNotIn("--resume", _commands(job)[0])
+
+	def test_snapshot_retires_old_attention_attempts_even_when_newer_attempt_failed(self):
+		with tempfile.TemporaryDirectory() as directory:
+			store = JobStore(Path(directory))
+			for job_id, created, status in (("old", "1", "needs_attention"), ("new", "2", "failed")):
+				store.save({"jobId": job_id, "createdAt": created, "source": {"type": "album", "id": "album"}, "status": status, "errorSummary": "failure", "notification": {"pending": True}})
+			snapshot = jobs_snapshot(root=store.root)
+			self.assertEqual([job["jobId"] for job in snapshot["jobs"]], ["new"])
+			self.assertEqual(store.load("old")["status"], "superseded")
+			self.assertFalse(store.load("old")["notification"]["pending"])
+
 	def test_cancelling_update_preserves_saved_playlist_progress(self):
 		with tempfile.TemporaryDirectory() as directory:
 			root = Path(directory)

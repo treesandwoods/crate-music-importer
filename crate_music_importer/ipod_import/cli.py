@@ -35,6 +35,7 @@ from crate_music_importer.ipod_import.playlist_update import (
 	apply_playlist_update,
 	refresh_playlist_covers,
 	build_playlist_update_preview,
+	resume_playlist_update,
 	save_pending_update,
 	saved_playlists,
 )
@@ -78,6 +79,7 @@ def _parser() -> argparse.ArgumentParser:
 	update_prepare = subparsers.add_parser("playlist-update-prepare", help="Prepare a confirmed full Spotify playlist sync.")
 	update_prepare.add_argument("playlist")
 	update_prepare.add_argument("--confirmation-token")
+	update_prepare.add_argument("--resume", action="store_true", help="Continue the saved confirmed update without replacing its checkpoints.")
 	update_prepare.add_argument("--confirm-download", action="store_true", required=True)
 	update_apply = subparsers.add_parser("playlist-update-apply", help="Apply a confirmed guarded full-order playlist sync.")
 	update_apply.add_argument("playlist")
@@ -471,17 +473,26 @@ def _run(
 		playlist_id = _find_playlist_id(manifest, args.playlist)
 		current = _current_saved_playlist(args, manifest, playlist_id)
 		_save_playlist_cover(paths, playlist_id, str(manifest["playlists"][playlist_id].get("spotify_url") or ""), current.get("cover_url"))
-		preview = build_playlist_update_preview(current, music_cache_tracks(load_music_cache(paths)), manifest, paths)
-		if preview.state != "ready":
-			raise ValueError(preview.warning or "Playlist is up to date; no update was queued.")
-		if (preview.removals or preview.reorders or preview.music_changes) and args.confirmation_token != preview.confirmation_token():
-			raise ValueError("Spotify or Music changed after the update preview. Refresh and confirm the exact playlist sync again.")
-		if preview.addition_items:
+		music_tracks = music_cache_tracks(load_music_cache(paths))
+		if args.resume:
+			manifest, pending = resume_playlist_update(current, music_tracks, manifest, paths, args.confirmation_token)
+			save_manifest(paths, manifest)
+		else:
+			preview = build_playlist_update_preview(current, music_tracks, manifest, paths)
+			if preview.state != "ready":
+				raise ValueError(preview.warning or "Playlist is up to date; no update was queued.")
+			if (preview.removals or preview.reorders or preview.music_changes) and args.confirmation_token != preview.confirmation_token():
+				raise ValueError("Spotify or Music changed after the update preview. Refresh and confirm the exact playlist sync again.")
+			manifest = preview.manifest
+			# Persist the plan before downloads so structured progress and review choices
+			# can always find its additions, even if the worker stops mid-download.
+			pending = save_pending_update(preview, paths)
+		addition_items = pending.get("addition_items") or []
+		if addition_items and not isinstance(pending.get("music_checkpoint"), dict):
 			check_tools()
-			execute_import(preview=type("AdditionPreview", (), {"manifest": preview.manifest, "playlist_id": playlist_id})(), paths=paths, on_output=print, on_progress=on_progress, items_override=preview.addition_items)
-		save_pending_update(preview, paths)
-		print(f"Prepared {len(preview.additions)} additions, {len(preview.removals)} removals, {len(preview.reorders)} Spotify position changes, and {len(preview.music_changes)} Music repairs.")
-		statuses = {str(item.get("status") or "") for item in preview.addition_items}
+			execute_import(preview=type("AdditionPreview", (), {"manifest": manifest, "playlist_id": playlist_id})(), paths=paths, on_output=print, on_progress=on_progress, items_override=addition_items)
+		print(f"Prepared {len(addition_items)} additions, {len(pending.get('removals') or [])} removals, {len(pending.get('reorders') or [])} Spotify position changes, and {len(pending.get('music_changes') or [])} Music repairs.")
+		statuses = {str(item.get("status") or "") for item in addition_items}
 		return 2 if statuses & {"review_required", "failed", "review_music"} else 0
 	if args.command == "playlist-update-apply":
 		playlist_id = _find_playlist_id(manifest, args.playlist)

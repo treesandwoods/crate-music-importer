@@ -26,6 +26,18 @@ export function activeSources(snapshot: ResolverSnapshot): SourceReference[] {
   return snapshot.sources.filter((source) => Boolean(source.activeJob));
 }
 
+export function activityReadySources(
+  snapshot: ResolverSnapshot | undefined,
+  jobs: Pick<ImportJob, "status" | "source">[],
+): SourceReference[] {
+  const represented = new Set(
+    jobs
+      .filter((job) => ["queued", "running", "needs_attention", "failed"].includes(job.status))
+      .map((job) => `${job.source.type}:${job.source.id}`),
+  );
+  return snapshot?.readySources.filter((source) => !represented.has(`${source.type}:${source.id}`)) || [];
+}
+
 export function hasVisibleItems(snapshot: ResolverSnapshot): boolean {
   return snapshot.problems.length > 0 || snapshot.readySources.length > 0 || activeSources(snapshot).length > 0;
 }
