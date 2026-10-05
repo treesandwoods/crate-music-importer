@@ -568,7 +568,7 @@ def _run(
 		)
 		print(
 			f"Music album updated: {result['track_count']} tracks; {result['new_imports']} new imports; "
-			f"{result['updated_tracks']} Crate-managed files updated in place; {result['reused_tracks']} existing album tracks reused; "
+			f"{result['updated_tracks']} existing album tracks updated in place; {result['reused_tracks']} existing album tracks reused; "
 			f"{result.get('stability_recoveries', 0)} Music additions recovered by Crate Music Importer."
 		)
 		print("No album playlist was created. Existing Spotify playlists keep using the same Music track IDs. Finder/iPod sync settings were not touched.")

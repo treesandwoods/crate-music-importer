@@ -16,6 +16,7 @@ from crate_music_importer.ipod_import.music import (
 	_SCAN_SCRIPT,
 	_VERIFY_TRACKS_SCRIPT,
 	_UPDATE_ALBUM_TRACK_SCRIPT,
+	_UPDATE_ALBUM_POSITION_SCRIPT,
 	_UPDATE_MANAGED_ARTWORK_SCRIPT,
 	_music_location_to_posix,
 	_osascript,
@@ -27,6 +28,7 @@ from crate_music_importer.ipod_import.music import (
 	reconcile_recording_music,
 	scan_playlist_imports,
 	update_managed_music_artwork,
+	update_music_album_position,
 	verify_music_tracks,
 )
 
@@ -44,6 +46,19 @@ def music_track(persistent_id: str, album: str = "Album", comment: str = "") -> 
 
 
 class MusicAutomationTests(unittest.TestCase):
+	def test_album_position_update_rejects_other_album_and_incomplete_snapshot(self):
+		with patch("crate_music_importer.ipod_import.music._osascript") as run_script:
+			for expected in [music_track("PID", "Other"), music_track("PID")]:
+				with self.assertRaises(MusicAutomationError):
+					update_music_album_position(expected, {"album": "Album", "track_no": 2, "disc_no": 1})
+			run_script.assert_not_called()
+
+	def test_album_position_update_passes_live_identity_and_previous_numbers(self):
+		before = music_track("PID") | {"album_artist": "Artist", "track_no": 6, "track_total": 0, "disc_no": 0, "disc_total": 0}
+		with patch("crate_music_importer.ipod_import.music._osascript", return_value="OK") as run_script:
+			update_music_album_position(before, {"album": "Album", "track_no": 7, "track_total": 12, "disc_no": 1, "disc_total": 1})
+		run_script.assert_called_once_with(_UPDATE_ALBUM_POSITION_SCRIPT, ["PID", "Song", "Artist", "Album", "Artist", "/Music/PID.mp3", "6", "0", "0", "0", "7", "12", "1", "1"])
+
 	def test_scan_and_path_conversion(self):
 		self.assertIn("with timeout of 600 seconds", _SCAN_SCRIPT)
 		self.assertIn("location of every track of library playlist 1", _SCAN_SCRIPT)

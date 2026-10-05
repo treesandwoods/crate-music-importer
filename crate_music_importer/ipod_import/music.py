@@ -398,6 +398,35 @@ end run
 '''
 
 
+_UPDATE_ALBUM_POSITION_SCRIPT = r'''
+on run argv
+	set requestedID to item 1 of argv
+	tell application "Music"
+		set matches to every track of library playlist 1 whose persistent ID is requestedID
+		if (count of matches) is not 1 then error "The verified album track is missing or ambiguous."
+		set targetTrack to item 1 of matches
+		if name of targetTrack is not item 2 of argv then error "The verified album track title changed."
+		if artist of targetTrack is not item 3 of argv then error "The verified album track artist changed."
+		if album of targetTrack is not item 4 of argv then error "The verified album track album changed."
+		if album artist of targetTrack is not item 5 of argv then error "The verified album artist changed."
+		if item 6 of argv is not "" then
+			set trackFileLocation to get location of targetTrack
+			if POSIX path of trackFileLocation is not item 6 of argv then error "The verified album track location changed."
+		end if
+		if track number of targetTrack is not (item 7 of argv as integer) then error "The verified track number changed."
+		if track count of targetTrack is not (item 8 of argv as integer) then error "The verified track count changed."
+		if disc number of targetTrack is not (item 9 of argv as integer) then error "The verified disc number changed."
+		if disc count of targetTrack is not (item 10 of argv as integer) then error "The verified disc count changed."
+		set track number of targetTrack to item 11 of argv as integer
+		set track count of targetTrack to item 12 of argv as integer
+		set disc number of targetTrack to item 13 of argv as integer
+		set disc count of targetTrack to item 14 of argv as integer
+		return "OK"
+	end tell
+end run
+'''
+
+
 _PLAYLIST_STATUS_SCRIPT = r'''
 on run argv
 	set requestedName to item 1 of argv
@@ -932,6 +961,26 @@ def update_managed_music_track(
 	])
 	if result != "OK":
 		raise MusicAutomationError(f"Music returned an unexpected album metadata result: {result}")
+
+
+def update_music_album_position(expected: dict[str, Any], album: dict[str, Any]) -> None:
+	"""Align a verified album member's numbering without replacing its Music item."""
+	fields = ("track_no", "track_total", "disc_no", "disc_total")
+	if (
+		not expected.get("persistent_id") or not _album_matches(album.get("album"), expected)
+		or int(album.get("track_no") or 0) <= 0 or int(album.get("disc_no") or 0) <= 0
+		or any(field not in expected for field in fields)
+	):
+		raise MusicAutomationError("A verified requested-album track and complete numbering are required.")
+	result = _osascript(_UPDATE_ALBUM_POSITION_SCRIPT, [
+		str(expected["persistent_id"]), str(expected.get("title") or ""),
+		str(expected.get("artist") or ""), str(expected.get("album") or ""),
+		str(expected.get("album_artist") or ""), str(expected.get("location") or ""),
+		*[str(int(expected.get(field) or 0)) for field in fields],
+		*[str(int(album.get(field) or 0)) for field in fields],
+	])
+	if result != "OK":
+		raise MusicAutomationError(f"Music returned an unexpected album numbering result: {result}")
 
 
 def update_managed_music_artwork(

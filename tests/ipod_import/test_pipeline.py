@@ -32,10 +32,104 @@ def album(tracks=None):
 
 
 def music_track(persistent_id="PID", *, album_name="Album", location="/Music/Song.m4a", comment=""):
-	return {"persistent_id": persistent_id, "database_id": "1", "title": "Song", "artist": "Artist", "album": album_name, "duration_s": 180, "location": location, "comment": comment}
+	return {"persistent_id": persistent_id, "database_id": "1", "title": "Song", "artist": "Artist", "album": album_name, "duration_s": 180, "location": location, "comment": comment, "track_no": 1, "track_total": 0, "disc_no": 1, "disc_total": 1}
 
 
 class PipelineTests(unittest.TestCase):
+	def test_partial_album_aligns_unknown_disc_and_shifted_numbers_without_replacing_existing_tracks(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory))
+			sources = [source_track(title=title, position=n, track_no=n, track_total=3, disc_total=1, sp_id=f"track-{n}") for n, title in enumerate(["First", "Missing", "Last"], 1)]
+			existing = [music_track(pid) | {"title": title, "track_no": n, "track_total": 0, "disc_no": 0, "disc_total": 0} for pid, title, n in [("FIRST", "First", 1), ("LAST", "Last", 2)]]
+			preview = build_album_preview(album(sources), existing, new_manifest(paths), paths)
+			missing = preview.manifest["recordings"][preview.rows[1]["recording_id"]]
+			path = paths.root / "Music/Missing.mp3"
+			path.parent.mkdir(parents=True)
+			path.write_bytes(b"mp3")
+			missing["managed_file"] = {"managed_by_crate": True, "relative_path": "Music/Missing.mp3", "metadata_profile": "album", "duration_ms": 180000}
+			live = {t["persistent_id"]: t.copy() for t in existing}
+			def update(before, metadata):
+				live[before["persistent_id"]] = before | {k: metadata[k] for k in ("track_no", "track_total", "disc_no", "disc_total")}
+			def add(_path):
+				live["NEW"] = music_track("NEW", location=str(path)) | {"title": "Missing", "track_no": 2, "track_total": 3}
+				return live["NEW"]
+			final = Mock(side_effect=lambda ids: {pid: live[pid] for pid in ids})
+			with patch("crate_music_importer.ipod_import.pipeline.update_music_album_position", side_effect=update) as updater, patch("crate_music_importer.ipod_import.pipeline.import_managed_file", side_effect=add) as importer, patch("crate_music_importer.ipod_import.pipeline.extract_embedded_artwork", return_value=path), patch("crate_music_importer.ipod_import.pipeline.update_managed_music_track") as retagger:
+				result = apply_album_to_music(preview.manifest, "album-id", paths, existing, exact_lookup=live.get, verify_music=lambda ids: {pid: live[pid] for pid in ids}, verify_music_final=final)
+			self.assertEqual((result["new_imports"], result["updated_tracks"]), (1, 2))
+			self.assertEqual(updater.call_count, 2)
+			importer.assert_called_once_with(path)
+			retagger.assert_not_called()
+			self.assertEqual([(live[pid]["track_no"], live[pid]["disc_no"]) for pid in ["FIRST", "NEW", "LAST"]], [(1, 1), (2, 1), (3, 1)])
+			final.assert_called_once_with(["NEW", "FIRST", "LAST"])
+
+	def test_album_numbering_update_must_survive_final_verification(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory))
+			before = music_track() | {"disc_no": 0, "disc_total": 0}
+			preview = build_album_preview(album(), [before], new_manifest(paths), paths)
+			after = before | {"disc_no": 1, "disc_total": 1}
+			with patch("crate_music_importer.ipod_import.pipeline.update_music_album_position"), patch("crate_music_importer.ipod_import.pipeline.import_managed_file") as importer:
+				with self.assertRaisesRegex(Exception, "disc_no"):
+					apply_album_to_music(preview.manifest, "album-id", paths, [before], exact_lookup=Mock(side_effect=[before, after]), verify_music_final=lambda ids: {"PID": before})
+			importer.assert_not_called()
+
+	def test_album_addition_with_wrong_disc_is_left_pending(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory))
+			manifest, key, recording, path = self.ready_album(paths)
+			actual = music_track("NEW", location=str(path)) | {"duration_s": 175.04, "disc_no": 0}
+			with patch("crate_music_importer.ipod_import.pipeline.extract_embedded_artwork", return_value=path), patch("crate_music_importer.ipod_import.pipeline.import_managed_file", return_value={"persistent_id": "NEW"}):
+				with self.assertRaisesRegex(Exception, "disc_no"):
+					apply_album_to_music(manifest, "album-id", paths, [], verify_music=lambda ids: {"NEW": actual})
+			self.assertIn("music_import_pending", recording)
+
+	def test_numbering_preflight_failure_does_not_modify_earlier_album_members(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory))
+			sources = [source_track(), source_track(title="Second", position=2, track_no=2, sp_id="second")]
+			before = music_track() | {"disc_no": 0, "disc_total": 0}
+			preview = build_album_preview(album(sources), [before], new_manifest(paths), paths)
+			with patch("crate_music_importer.ipod_import.pipeline.update_music_album_position") as updater:
+				with self.assertRaisesRegex(Exception, "not ready"):
+					apply_album_to_music(preview.manifest, "album-id", paths, [before], exact_lookup=lambda pid: before)
+			updater.assert_not_called()
+
+	def test_multidisc_album_keeps_requested_disc_and_per_disc_track_numbers(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory))
+			sources = [source_track(title=title, position=n, track_no=1, track_total=1, disc_no=n, disc_total=2, sp_id=f"track-{n}") for n, title in enumerate(["Disc One", "Disc Two"], 1)]
+			live = {str(n): music_track(str(n)) | {"title": title, "track_no": n, "disc_no": 0, "disc_total": 0} for n, title in enumerate(["Disc One", "Disc Two"], 1)}
+			before = list(live.values())
+			preview = build_album_preview(album(sources), before, new_manifest(paths), paths)
+			def update(current, metadata):
+				live[current["persistent_id"]] = current | {k: metadata[k] for k in ("track_no", "track_total", "disc_no", "disc_total")}
+			with patch("crate_music_importer.ipod_import.pipeline.update_music_album_position", side_effect=update):
+				apply_album_to_music(preview.manifest, "album-id", paths, before, exact_lookup=live.get)
+			self.assertEqual([(live[str(n)]["disc_no"], live[str(n)]["track_no"], live[str(n)]["disc_total"]) for n in [1, 2]], [(1, 1, 2), (2, 1, 2)])
+
+	def test_disappearing_existing_album_member_is_never_reimported(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory))
+			before = music_track() | {"disc_no": 0, "disc_total": 0}
+			preview = build_album_preview(album(), [before], new_manifest(paths), paths)
+			after = before | {"disc_no": 1, "disc_total": 1}
+			with patch("crate_music_importer.ipod_import.pipeline.update_music_album_position"), patch("crate_music_importer.ipod_import.pipeline.import_managed_file") as importer:
+				with self.assertRaisesRegex(Exception, "refusing to replace"):
+					apply_album_to_music(preview.manifest, "album-id", paths, [before], exact_lookup=Mock(side_effect=[before, after]), verify_music_final=lambda ids: {})
+			importer.assert_not_called()
+
+	def test_repeated_recording_positions_require_review_before_any_numbering_change(self):
+		with tempfile.TemporaryDirectory() as directory:
+			paths = ManagedPaths(Path(directory))
+			sources = [source_track(), source_track(position=2, track_no=2)]
+			before = music_track() | {"disc_no": 0, "disc_total": 0}
+			preview = build_album_preview(album(sources), [before], new_manifest(paths), paths)
+			with patch("crate_music_importer.ipod_import.pipeline.update_music_album_position") as updater:
+				with self.assertRaisesRegex(Exception, "Multiple album positions"):
+					apply_album_to_music(preview.manifest, "album-id", paths, [before], exact_lookup=lambda pid: before)
+			updater.assert_not_called()
+
 	def ready_album(self, paths, *, duration_ms=175000):
 		paths.create()
 		path = paths.root / "Music/Song.mp3"

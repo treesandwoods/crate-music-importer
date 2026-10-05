@@ -185,7 +185,7 @@ def _same_album(left: Any, right: Any) -> bool:
 	return normalize_text(clean_release_labels(left)) == normalize_text(clean_release_labels(right))
 
 
-def validate_exact_track(expected: dict[str, Any], actual: dict[str, Any] | None) -> tuple[bool, str]:
+def validate_exact_track(expected: dict[str, Any], actual: dict[str, Any] | None, *, album_position: bool = False) -> tuple[bool, str]:
 	if actual is None:
 		return False, "the persistent ID no longer exists in Music"
 	if str(actual.get("persistent_id") or "") != str(expected.get("persistent_id") or ""):
@@ -197,4 +197,7 @@ def validate_exact_track(expected: dict[str, Any], actual: dict[str, Any] | None
 	actual_duration = _number(actual.get("duration_s"))
 	if wanted_duration and (not actual_duration or abs(wanted_duration - actual_duration) > 4.0):
 		return False, "the Music duration changed materially"
+	for field in ("track_no", "track_total", "disc_no", "disc_total"):
+		if album_position and field in expected and int(expected.get(field) or 0) != int(actual.get(field) or 0):
+			return False, f"the Music {field} changed"
 	return True, ""
