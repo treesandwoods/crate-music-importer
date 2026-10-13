@@ -6,6 +6,10 @@ A **macOS-only** Raycast extension and Python CLI for importing public Spotify a
 
 The importer does not operate an iPod or change Finder's whole-library sync settings. Windows and Linux are not supported: Music integration requires macOS AppleScript and Raycast.
 
+> Please only use Crate Music Importer when you have permission or legally own the music. Don't use this as an alternative to supporting your favorite artists ([bandcamp.com](https://bandcamp.com), live shows, etc!)
+
+See [License and responsible use](#license-and-responsible-use) below for the permissions required to download and use recordings.
+
 ## Prerequisites
 
 - macOS, Music.app, and [Raycast](https://www.raycast.com/).
@@ -134,4 +138,8 @@ The build regenerates the bundled backend from Python source. Tests mock network
 
 Crate Music Importer source is available under the [MIT License](LICENSE). External dependencies retain their own licenses; the repository does not distribute their binaries or downloaded music.
 
-Use the software only for content you own or are authorized to download and use. You are responsible for complying with applicable copyright law and Spotify, YouTube, and other platform terms. Publishing this source does not grant rights to recordings or permission to bypass platform restrictions. Do not publish downloaded media, credentials, or working-library state with the source. Crate Music Importer is not affiliated with Spotify, YouTube, Apple, or Raycast.
+Crate Music Importer is intended for lawful use and does not endorse piracy. Only download or import recordings when you have permission or another valid legal basis to do so. Owning a copy of a recording does not automatically authorize downloading another copy from a third-party service. See the [U.S. Copyright Office's guidance on permission and fair use](https://www.copyright.gov/help/faq/faq-fairuse.html).
+
+You are responsible for complying with applicable copyright law and Spotify, YouTube, and other platform terms. Publishing this source does not grant rights to recordings or permission to bypass platform restrictions. Do not publish downloaded media, credentials, or working-library state with the source. Crate Music Importer is not affiliated with Spotify, YouTube, Apple, or Raycast.
+
+The software is provided "as is," subject to the warranty disclaimer and limitation of liability in the [MIT License](LICENSE).
