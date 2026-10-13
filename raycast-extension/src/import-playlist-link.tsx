@@ -26,6 +26,7 @@ import { compactText } from "./notification-model";
 import { showCompactToast, updateCompactToast } from "./notifications";
 import { canQueuePlaylistUpdate, playlistUpdateConfirmation, removalLabel } from "./playlist-update-model";
 import { SourcePreviewView } from "./source-preview";
+import { PlaylistBatchUpdatePreviewView } from "./playlist-batch-update";
 import type { PlaylistUpdatePreview, SavedPlaylistSummary } from "./types";
 
 const PLAYLIST_URL = /^https?:\/\/(open|play)\.spotify\.com\/playlist\/[A-Za-z0-9]{16,32}/;
@@ -379,6 +380,20 @@ export default function Command() {
           actions={
             <ActionPanel>
               <Action.Push title="Open Import Page" icon={Icon.Plus} target={<NewPlaylistForm />} />
+            </ActionPanel>
+          }
+        />
+        <List.Item
+          title="Update All"
+          subtitle="Preview updates across all saved playlists"
+          icon={Icon.ArrowClockwise}
+          actions={
+            <ActionPanel>
+              <Action.Push
+                title="Preview All Updates"
+                icon={Icon.ArrowClockwise}
+                target={<PlaylistBatchUpdatePreviewView />}
+              />
             </ActionPanel>
           }
         />
