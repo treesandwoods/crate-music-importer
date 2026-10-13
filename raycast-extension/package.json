@@ -41,6 +41,7 @@
     {
       "name": "completion-notifications",
       "title": "Completion Notifications",
+      "icon": "icon-monochrome.png",
       "subtitle": "Crate Music Importer",
       "description": "Show a HUD when an import or playlist update finishes.",
       "mode": "no-view",
@@ -49,6 +50,7 @@
     {
       "name": "update-dependencies",
       "title": "Library Health",
+      "icon": "icon-monochrome.png",
       "subtitle": "Crate Music Importer",
       "description": "Run a read-only library audit and check for safe, stable downloader updates.",
       "mode": "view"
