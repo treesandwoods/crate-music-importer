@@ -1,4 +1,4 @@
-import { canQueuePlaylistUpdate, playlistUpdateConfirmation } from "./playlist-update-model";
+import { canQueuePlaylistUpdate } from "./playlist-update-model";
 import type { ImportJob, PlaylistUpdatePreview, SavedPlaylistSummary } from "./types";
 
 export interface PlaylistBatchEntry {
@@ -40,10 +40,36 @@ export function pendingPlaylistUpdates(entries: PlaylistBatchEntry[]): PlaylistB
 export function playlistBatchConfirmation(entries: PlaylistBatchEntry[]): string {
   const pending = pendingPlaylistUpdates(entries);
   const skipped = entries.filter((entry) => !entry.job && !canQueuePlaylistUpdate(entry.preview));
+  const totals = { additions: 0, removals: 0, reorders: 0, corrections: 0, deletions: 0 };
+  for (const { preview } of pending) {
+    totals.additions += preview!.additions.length;
+    totals.removals += preview!.removals.length;
+    totals.reorders += preview!.reorders.length;
+    totals.corrections += preview!.music_changes.length;
+    totals.deletions += preview!.removals.filter((row) => row.action === "delete").length;
+  }
+  const changes = [
+    [totals.additions, "addition"],
+    [totals.removals, "removal"],
+    [totals.reorders, "position change"],
+    [totals.corrections, "Music.app correction"],
+  ]
+    .filter(([count]) => count)
+    .map(([count, label]) => `${count} ${label}${count === 1 ? "" : "s"}`)
+    .join(" · ");
   return [
-    `Queue updates for ${pending.length} playlists. Updates run in order; follow progress and resolve any tracks needing review in Review Activity.`,
-    ...(skipped.length ? [`${skipped.length} up-to-date, blocked, or failed playlists will be skipped.`] : []),
-    ...pending.map((entry) => `“${entry.playlist.name}”\n${playlistUpdateConfirmation(entry.preview!)}`),
+    `Sync with Spotify: ${changes || "playlist changes"}.`,
+    ...(skipped.length ? [`${skipped.length} playlist${skipped.length === 1 ? "" : "s"} skipped.`] : []),
+    ...(totals.deletions
+      ? [
+          `${totals.deletions} track${totals.deletions === 1 ? "" : "s"} will be permanently deleted from Music and disk.`,
+        ]
+      : []),
+    ...(totals.removals > totals.deletions ||
+    pending.some(({ preview }) => preview!.music_changes.some((row) => row.kind === "remove"))
+      ? [totals.deletions ? "Other removals only unlink playlist entries." : "Removals only unlink playlist entries."]
+      : []),
+    "Follow progress in Review Activity.",
   ].join("\n\n");
 }
 

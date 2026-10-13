@@ -7,7 +7,12 @@ import { buildSync } from "esbuild";
 import { createElement, type ComponentType, type ElementType } from "react";
 import { act, create } from "react-test-renderer";
 
-import { loadPlaylistBatch, pendingPlaylistUpdates, queuePlaylistBatch } from "./playlist-batch-update-model";
+import {
+  loadPlaylistBatch,
+  pendingPlaylistUpdates,
+  playlistBatchConfirmation,
+  queuePlaylistBatch,
+} from "./playlist-batch-update-model";
 import type { ImportJob, PlaylistUpdatePreview, SavedPlaylistSummary } from "./types";
 
 function playlist(id: string): SavedPlaylistSummary {
@@ -124,7 +129,7 @@ const source = readFileSync(resolve("src/playlist-batch-update.tsx"), "utf8")
     const host = (name) => (props) => require("react").createElement(name, props, props.children, props.actions);
     const Action = host("Action"), ActionPanel = host("ActionPanel");
     const List = Object.assign(host("List"), { Item: host("Item"), Section: host("Section") });
-    const Icon = {}, Color = {};
+    const Icon = new Proxy({}, { get: (_, key) => key }), Color = {};
     const Alert = { ActionStyle: { Default: "default", Destructive: "destructive", Cancel: "cancel" } };
     const Toast = { Style: { Animated: "animated", Success: "success", Failure: "failure" } };
     const confirmAlert = harness.confirm, launchCommand = async () => {}, LaunchType = {};
@@ -203,6 +208,9 @@ test("combined preview itemizes every playlist and accepts all with one destruct
         .some((row) => row.props.accessories?.[0]?.tag?.value === "delete permanently"),
     );
     assert.ok(view.root.findAllByType("Item" as ElementType).some((row) => row.props.title === "Update blocked"));
+    const items = view.root.findAllByType("Item" as ElementType);
+    assert.equal(items.find((row) => row.props.title === "Up to date")?.props.icon.source, "Checkmark");
+    assert.equal(items.find((row) => row.props.title === "Update ready")?.props.icon.source, "ArrowClockwise");
     assert.ok(
       view.root.findAllByType("Item" as ElementType).some((row) => row.props.subtitle === "Spotify unavailable"),
     );
@@ -219,14 +227,40 @@ test("combined preview itemizes every playlist and accepts all with one destruct
     assert.deepEqual(queued, ["one", "two"]);
     assert.equal(confirmations.length, 2);
     assert.equal(confirmations[1].primaryAction.style, "destructive");
-    assert.match(confirmations[1].message, /“one”/);
-    assert.match(confirmations[1].message, /“two”/);
-    assert.match(confirmations[1].message, /Removed song: delete permanently/);
-    assert.match(confirmations[1].message, /3 .* playlists will be skipped/);
+    assert.match(confirmations[1].message, /2 removals/);
+    assert.match(confirmations[1].message, /2 tracks will be permanently deleted from Music and disk/);
+    assert.match(confirmations[1].message, /3 playlists skipped/);
     assert.equal(action(), undefined);
   } finally {
     await act(async () => view.unmount());
   }
+});
+
+test("batch confirmation stays compact as playlist and track lists grow", () => {
+  const entries = Array.from({ length: 100 }, (_, index) => ({
+    playlist: { ...playlist(String(index)), name: "Long playlist name ".repeat(50) },
+    preview: preview(String(index), {
+      removals: Array.from({ length: 100 }, () => preview("fixture").removals[0]),
+      reorders: [{ from_position: 1, to_position: 2 } as PlaylistUpdatePreview["reorders"][number]],
+      music_changes: [{ kind: "remove" } as PlaylistUpdatePreview["music_changes"][number]],
+    }),
+  }));
+  const message = playlistBatchConfirmation(entries);
+  assert.ok(message.length < 400);
+  assert.match(message, /10000 removals/);
+  assert.match(message, /100 position changes/);
+  assert.match(message, /100 Music.app corrections/);
+  assert.match(message, /10000 tracks will be permanently deleted/);
+  assert.doesNotMatch(message, /Long playlist name|Removed song/);
+  const unlinkMessage = playlistBatchConfirmation([
+    {
+      playlist: playlist("unlink"),
+      preview: preview("unlink", { removals: [{ ...preview("fixture").removals[0], action: "unlink" }] }),
+    },
+  ]);
+  assert.match(unlinkMessage, /1 removal/);
+  assert.match(unlinkMessage, /Removals only unlink playlist entries/);
+  assert.doesNotMatch(unlinkMessage, /permanently deleted/);
 });
 
 test("Update All sits after import in the same section and before the saved playlists", () => {

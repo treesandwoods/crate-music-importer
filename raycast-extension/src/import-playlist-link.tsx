@@ -211,7 +211,7 @@ export function PlaylistUpdatePreviewView({
       ) : null}
       {preview?.up_to_date ? (
         <List.EmptyView
-          title="Playlist is up to date"
+          title="Up to date"
           description="Spotify order and the Music.app playlist membership match exactly."
           actions={utilityActions}
         />

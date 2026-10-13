@@ -74,7 +74,7 @@ export function PlaylistBatchUpdatePreviewView() {
         title: `Update ${pending.length} Playlists?`,
         message: playlistBatchConfirmation(entries),
         primaryAction: {
-          title: deletes ? "Accept All Updates and Permanent Deletions" : "Accept All Updates",
+          title: deletes ? "Update and Delete" : "Accept All Updates",
           style: deletes ? Alert.ActionStyle.Destructive : Alert.ActionStyle.Default,
         },
         dismissAction: { title: "Cancel", style: Alert.ActionStyle.Cancel },
@@ -170,7 +170,7 @@ export function PlaylistBatchUpdatePreviewView() {
                   : preview?.blocked
                     ? "Update blocked"
                     : preview?.up_to_date
-                      ? "Playlist is up to date"
+                      ? "Up to date"
                       : "Update ready"
             }
             subtitle={
@@ -187,8 +187,15 @@ export function PlaylistBatchUpdatePreviewView() {
                 ? Icon.Checkmark
                 : previewError || preview?.blocked || queueError
                   ? Icon.ExclamationMark
-                  : Icon.List,
-              tintColor: previewError || preview?.blocked || queueError ? Color.Orange : Color.Green,
+                  : preview?.up_to_date
+                    ? Icon.Checkmark
+                    : Icon.ArrowClockwise,
+              tintColor:
+                previewError || preview?.blocked || queueError
+                  ? Color.Orange
+                  : job || preview?.up_to_date
+                    ? Color.Green
+                    : Color.Blue,
             }}
             accessories={queueError ? [{ tag: { value: "Queue failed", color: Color.Red } }] : undefined}
             actions={actions}

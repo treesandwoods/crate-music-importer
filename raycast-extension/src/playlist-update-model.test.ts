@@ -126,7 +126,7 @@ test("queue payload uses the distinct update action and saved playlist identity"
 test("command keeps new import first and exposes saved playlist, update, and incomplete states", () => {
   const source = readFileSync("src/import-playlist-link.tsx", "utf8");
   assert.ok(source.indexOf('title="Import a New Playlist"') < source.indexOf('title="Saved Imported Playlists"'));
-  assert.match(source, /Playlist is up to date/);
+  assert.match(source, /Up to date/);
   assert.match(source, /Spotify Data Incomplete/);
   assert.match(source, /Spotify Position Changes/);
   assert.match(source, /Music\.app Corrections/);
