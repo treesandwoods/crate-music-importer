@@ -9,6 +9,41 @@ import { act, create } from "react-test-renderer";
 
 import type { SourcePreview } from "./types";
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}
+
+function findAction(node: unknown, title: string): { props: { onAction: () => unknown } } | undefined {
+  if (!node || typeof node !== "object") return undefined;
+  const element = node as { type?: unknown; props?: { title?: string; children?: unknown; onAction?: () => unknown } };
+  if (element.props?.title === title && element.props.onAction)
+    return element as { props: { onAction: () => unknown } };
+  const children = element.props?.children;
+  if (Array.isArray(children)) {
+    for (const child of children) {
+      const action = findAction(child, title);
+      if (action) return action;
+    }
+  } else {
+    return findAction(children, title);
+  }
+  return undefined;
+}
+
+function samplePreview(name: string): SourcePreview {
+  return {
+    source: { type: "playlist", id: name, name, url: `https://example.test/${name}`, total: 1 },
+    counts: {},
+    rows: [],
+  };
+}
+
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const source = readFileSync(resolve("src/source-preview.tsx"), "utf8")
   .replace(
@@ -25,10 +60,10 @@ const source = readFileSync(resolve("src/source-preview.tsx"), "utf8")
     const Color = { Green: "green", SecondaryText: "secondary" };
     const Toast = { Style: { Animated: "animated", Success: "success", Failure: "failure" } };
     const Alert = { ActionStyle: { Cancel: "cancel" } };
-    const confirmAlert = async () => false, launchCommand = async () => {}, LaunchType = {};
+    const confirmAlert = (...args) => harness.confirm(...args), launchCommand = async () => {}, LaunchType = {};
   `,
   )
-  .replace(/import .* from "\.\/backend";/, "const previewSource = harness.preview, queueSource = async () => ({});")
+  .replace(/import .* from "\.\/backend";/, "const previewSource = harness.preview, queueSource = harness.queue;")
   .replace(
     /import .* from "\.\/notifications";/,
     "const showCompactToast = async () => ({}), updateCompactToast = () => {};",
@@ -130,6 +165,72 @@ test("album preview identifies an existing track that will be upgraded", async (
       view.root.findByType("Item" as ElementType).props.accessories[0].tag.value,
       "Existing Music match — upgrade album",
     );
+  } finally {
+    await act(async () => view.unmount());
+  }
+});
+
+test("overlapping preview refreshes keep the newest response and repeated import submits queue once", async () => {
+  const initial = samplePreview("Initial");
+  const older = deferred<SourcePreview>();
+  const newer = deferred<SourcePreview>();
+  const confirmation = deferred<boolean>();
+  const requests: Array<{ signal?: AbortSignal; promise: Promise<SourcePreview> }> = [];
+  let confirms = 0;
+  let queued = 0;
+  const module = { exports: {} as { SourcePreviewView: ComponentType<{ type: "playlist"; url: string }> } };
+  new Function("require", "module", "exports", "harness", bundled)(
+    createRequire(resolve("package.json")),
+    module,
+    module.exports,
+    {
+      preview: (_type: string, _url: string, signal?: AbortSignal) => {
+        const next =
+          requests.length === 0 ? Promise.resolve(initial) : requests.length === 1 ? older.promise : newer.promise;
+        requests.push({ signal, promise: next });
+        return next;
+      },
+      confirm: () => {
+        confirms++;
+        return confirmation.promise;
+      },
+      queue: async () => {
+        queued++;
+        return { source: { total: 1 } };
+      },
+    },
+  );
+  let view!: ReturnType<typeof create>;
+  await act(async () => {
+    view = create(createElement(module.exports.SourcePreviewView, { type: "playlist", url: initial.source.url }));
+  });
+  try {
+    await act(async () => {
+      await requests[0].promise;
+    });
+    const refresh = findAction(view.root.findByType("List" as ElementType).props.actions, "Refresh Preview");
+    assert.ok(refresh);
+    await act(async () => {
+      void refresh.props.onAction();
+      void refresh.props.onAction();
+    });
+    assert.equal(requests.length, 3);
+    assert.ok(requests[1].signal?.aborted);
+
+    await act(async () => newer.resolve(samplePreview("Newest")));
+    await act(async () => older.resolve(samplePreview("Older")));
+    assert.equal(view.root.findByType("List" as ElementType).props.navigationTitle, "Newest");
+
+    const start = findAction(view.root.findByType("List" as ElementType).props.actions, "Download + Add to Music");
+    assert.ok(start);
+    await act(async () => {
+      void start.props.onAction();
+      void start.props.onAction();
+    });
+    assert.equal(confirms, 1);
+    await act(async () => confirmation.resolve(true));
+    await act(async () => new Promise((resolve) => setImmediate(resolve)));
+    assert.equal(queued, 1);
   } finally {
     await act(async () => view.unmount());
   }

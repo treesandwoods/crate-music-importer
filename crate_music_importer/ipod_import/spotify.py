@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from collections import Counter
 import html
 import json
 import re
@@ -189,24 +190,35 @@ def _finalize_source(
 				track[key] = richer[key]
 		track["position"] = position
 	known_totals = [int(item.get("total_count") or 0) for item in pages]
-	total = max([len(tracks), *known_totals])
-	complete = len(tracks) >= total and (source_type != "playlist" or len(tracks) != 100)
+	reported_total = max(known_totals, default=0)
+	total = max(len(tracks), reported_total)
+	# Spotify's public embed exposes at most 100 rows. Reaching that boundary is
+	# not evidence of completeness unless an independent page total confirms it.
+	embed_cap_without_total = len(tracks) == 100 and reported_total < 100
+	complete = len(tracks) >= total and not embed_cap_without_total
 	warning = None
 	if not complete:
-		warning = (
-			f"Spotify exposed {len(tracks)} of {total} reported tracks. The importer will not download an incomplete {source_type}. "
-			f"Retry after Spotify exposes the full ordered {source_type}."
-		)
+		if embed_cap_without_total:
+			warning = (
+				"Spotify exposed exactly 100 tracks without an independent total. The importer will not download a possibly incomplete "
+				f"{source_type}. Retry after Spotify exposes the full ordered {source_type}."
+			)
+		else:
+			warning = (
+				f"Spotify exposed {len(tracks)} of {total} reported tracks. The importer will not download an incomplete {source_type}. "
+				f"Retry after Spotify exposes the full ordered {source_type}."
+			)
 	album_artist = _clean(best.get("album_artist"))
 	release_year = _integer(best.get("release_year"))
 	cover_url = next((str(page.get("cover_url")) for page in pages if page.get("cover_url")), "") or None
 	if source_type == "album":
-		disc_total = max((_integer(track.get("disc_no")) or 1 for track in tracks), default=1)
+		disc_counts = Counter(_integer(track.get("disc_no")) or 1 for track in tracks)
+		disc_total = max(disc_counts, default=1)
 		for track in tracks:
 			track["album"] = _clean(track.get("album")) or _clean(best.get("name"))
 			track["album_artist"] = _clean(track.get("album_artist")) or album_artist or _clean(track.get("artists"))
 			track["track_no"] = _integer(track.get("track_no")) or int(track["position"])
-			track["track_total"] = total
+			track["track_total"] = disc_counts[_integer(track.get("disc_no")) or 1]
 			track["disc_no"] = _integer(track.get("disc_no")) or 1
 			track["disc_total"] = disc_total
 			track["release_year"] = _integer(track.get("release_year")) or release_year

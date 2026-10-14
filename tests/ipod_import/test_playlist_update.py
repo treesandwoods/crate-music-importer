@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from crate_music_importer.ipod_import.manifest import ManagedPaths, load_manifest, new_manifest, set_album, set_playlist, upsert_recording
+from crate_music_importer.ipod_import.manifest import ManagedPaths, load_manifest, new_manifest, save_manifest, set_album, set_playlist, upsert_recording
 from crate_music_importer.ipod_import.music import MusicAutomationError
 from crate_music_importer.ipod_import.playlist_update import apply_playlist_update, build_playlist_update_preview, refresh_playlist_covers, resume_playlist_update, save_pending_update, saved_playlists
 
@@ -293,6 +293,10 @@ class PlaylistUpdateTests(unittest.TestCase):
 			membership_calls.append((expected, removals, additions))
 			return [value for index, value in enumerate(expected) if index not in set(removals)] + additions
 		deleted = []
+		def delete_music(pid, managed_file):
+			deleted.append((pid, managed_file))
+			music[:] = [track for track in music if track["persistent_id"] != pid]
+			return True
 		result = apply_playlist_update(
 			preview.manifest,
 			"saved",
@@ -303,7 +307,7 @@ class PlaylistUpdateTests(unittest.TestCase):
 			cache_remover=lambda ids: len(ids),
 			membership_reader=lambda _name, _pid: ["MANUAL-1", "PID-A", "PID-B", "MANUAL-2"],
 			membership_editor=editor,
-			music_deleter=lambda pid, recording_id: deleted.append((pid, recording_id)) or True,
+			music_deleter=delete_music,
 			status_checker=lambda _name, pid: ("FOUND", pid),
 			audio_hasher=lambda _path: "audio-b",
 		)
@@ -380,6 +384,182 @@ class PlaylistUpdateTests(unittest.TestCase):
 		playlist = preview.manifest["playlists"]["saved"]
 		self.assertEqual([item["spotify_id"] for item in playlist["items"]], ["d", "c", "a"])
 		self.assertEqual([row["spotify_id"] for row in playlist["spotify_occurrence_snapshot"]], ["d", "c", "a"])
+
+	def test_retry_recovers_import_that_succeeded_before_process_crash(self):
+		paths, manifest, music = self.fixture(("a", "b"))
+		preview = self.preview(manifest, music, ("a", "b", "c"))
+		pending = save_pending_update(preview, paths)
+		addition = pending["addition_items"][0]
+		recording = preview.manifest["recordings"][addition["recording_id"]]
+		managed_path = paths.root / "tracks/c.mp3"
+		managed_path.parent.mkdir(parents=True)
+		managed_path.write_bytes(b"verified managed audio")
+		recording["managed_file"] = {
+			"relative_path": "tracks/c.mp3", "managed_by_crate": True,
+			"audio_sha256": "audio-proof", "duration_ms": 180000,
+		}
+		save_manifest(paths, preview.manifest)
+		calls = []
+		def crash_after_import(path):
+			calls.append(path)
+			music.append({
+				"title": "c", "artist": "Artist", "album": "Album", "duration_s": 180,
+				"persistent_id": "PID-C", "database_id": "3", "location": str(managed_path), "comment": "",
+			})
+			raise RuntimeError("simulated process crash after Music accepted the file")
+		kwargs = dict(
+			exact_lookup=lambda pid: next((row for row in music if row["persistent_id"] == pid), None),
+			cache_updater=lambda _track: None, cache_remover=lambda _ids: 0,
+			membership_reader=lambda *_args: ["PID-A", "PID-B"],
+			membership_editor=lambda _name, _pid, expected, removals, additions: [value for i, value in enumerate(expected) if i not in set(removals)] + additions,
+			status_checker=lambda _name, pid: ("FOUND", pid),
+		)
+		with patch("crate_music_importer.ipod_import.playlist_update.audio_sha256", return_value="audio-proof"), \
+			patch("crate_music_importer.ipod_import.playlist_update.import_managed_file", side_effect=crash_after_import), \
+			self.assertRaisesRegex(RuntimeError, "simulated process crash"):
+			apply_playlist_update(preview.manifest, "saved", paths, music, **kwargs)
+		resumed = load_manifest(paths)
+		self.assertTrue(resumed["recordings"][addition["recording_id"]].get("music_import_pending"))
+		with patch("crate_music_importer.ipod_import.playlist_update.audio_sha256", return_value="audio-proof"), \
+			patch("crate_music_importer.ipod_import.playlist_update.import_managed_file", side_effect=AssertionError("must not duplicate when fresh Music index lacks the pending import")), \
+			self.assertRaisesRegex(MusicAutomationError, "Refresh Library Health"):
+			apply_playlist_update(resumed, "saved", paths, music[:2], **kwargs)
+		with patch("crate_music_importer.ipod_import.playlist_update.audio_sha256", return_value="audio-proof"), \
+			patch("crate_music_importer.ipod_import.playlist_update.import_managed_file", side_effect=AssertionError("must recover exact imported file")):
+			apply_playlist_update(resumed, "saved", paths, list(music), **kwargs)
+		self.assertEqual(len(calls), 1)
+		self.assertEqual(resumed["recordings"][addition["recording_id"]]["music_binding"]["persistent_id"], "PID-C")
+		self.assertNotIn("music_import_pending", resumed["recordings"][addition["recording_id"]])
+
+	def test_delete_retries_after_each_irreversible_boundary(self):
+		from crate_music_importer.ipod_import.playlist_update import _safe_delete_file
+		for boundary in ("music", "cache", "file", "recording_persistence"):
+			with self.subTest(boundary=boundary):
+				paths, manifest, music = self.fixture(("a", "b"))
+				b_item = manifest["playlists"]["saved"]["items"][1]
+				b_id = b_item["recording_id"]
+				managed_path = paths.root / "tracks/b.mp3"
+				managed_path.parent.mkdir(parents=True, exist_ok=True)
+				managed_path.write_bytes(b"verified managed audio")
+				manifest["recordings"][b_id]["managed_file"] = {
+					"relative_path": "tracks/b.mp3", "managed_by_crate": True,
+					"metadata_profile": "playlist", "audio_sha256": "audio-proof",
+				}
+				music[1]["location"] = str(managed_path)
+				preview = self.preview(manifest, music, ("a",))
+				save_pending_update(preview, paths)
+				manifest = preview.manifest
+				membership = ["PID-A", "PID-B"]
+				def editor(_name, _pid, expected, removals, additions):
+					result = [value for i, value in enumerate(expected) if i not in set(removals)] + additions
+					membership[:] = result
+					return result
+				def lookup(pid):
+					return next((row for row in music if row["persistent_id"] == pid), None)
+				def run_deleter(pid, _path):
+					music[:] = [row for row in music if row["persistent_id"] != pid]
+					if boundary == "music" and not crashed[0]:
+						crashed[0] = True
+						raise RuntimeError("simulated crash after Music delete")
+					return True
+				def remove_cache(ids):
+					cache_removed.extend(ids)
+					if boundary == "cache" and not crashed[0]:
+						crashed[0] = True
+						raise RuntimeError("simulated crash after cache removal")
+					return len(ids)
+				def remove_file(root, relative):
+					_safe_delete_file(root, relative)
+					if boundary == "file" and not crashed[0]:
+						crashed[0] = True
+						raise RuntimeError("simulated crash after file unlink")
+				def persist_then_crash(root, value):
+					save_manifest(root, value)
+					if boundary == "recording_persistence" and b_id not in value.get("recordings", {}) and not crashed[0]:
+						crashed[0] = True
+						raise RuntimeError("simulated crash after manifest persistence")
+				crashed = [False]
+				cache_removed = []
+				kwargs = dict(
+					exact_lookup=lookup, cache_updater=lambda _track: None,
+					cache_remover=remove_cache, membership_reader=lambda *_args: list(membership),
+					membership_editor=editor, music_deleter=run_deleter,
+					status_checker=lambda _name, pid: ("FOUND", pid),
+					audio_hasher=lambda _path: "audio-proof",
+				)
+				with patch("crate_music_importer.ipod_import.playlist_update.audio_sha256", return_value="audio-proof"), \
+					patch("crate_music_importer.ipod_import.playlist_update._safe_delete_file", side_effect=remove_file), \
+					patch("crate_music_importer.ipod_import.playlist_update.save_manifest", side_effect=persist_then_crash), \
+					self.assertRaisesRegex(RuntimeError, "simulated crash"):
+					apply_playlist_update(manifest, "saved", paths, music, **kwargs)
+				resumed = load_manifest(paths)
+				if boundary == "recording_persistence":
+					self.assertNotIn(b_id, resumed["recordings"])
+				kwargs["membership_reader"] = lambda *_args: ["PID-A"]
+				with patch("crate_music_importer.ipod_import.playlist_update.audio_sha256", return_value="audio-proof"), \
+					patch("crate_music_importer.ipod_import.playlist_update.import_managed_file", side_effect=AssertionError("no import expected")):
+					apply_playlist_update(resumed, "saved", paths, list(music), **kwargs)
+				self.assertNotIn(b_id, resumed["recordings"])
+				self.assertFalse(managed_path.exists())
+
+	def test_delete_retry_refuses_to_remove_file_if_music_id_reappears(self):
+		paths, manifest, music = self.fixture(("a", "b"))
+		b_item = manifest["playlists"]["saved"]["items"][1]
+		b_id = b_item["recording_id"]
+		managed_path = paths.root / "tracks/b.mp3"
+		managed_path.parent.mkdir(parents=True)
+		managed_path.write_bytes(b"verified managed audio")
+		manifest["recordings"][b_id]["managed_file"] = {
+			"relative_path": "tracks/b.mp3", "managed_by_crate": True,
+			"metadata_profile": "playlist", "audio_sha256": "audio-proof",
+		}
+		music[1]["location"] = str(managed_path)
+		preview = self.preview(manifest, music, ("a",))
+		save_pending_update(preview, paths)
+		membership = ["PID-A", "PID-B"]
+		crashed = [False]
+		def editor(_name, _pid, expected, removals, additions):
+			membership[:] = [value for index, value in enumerate(expected) if index not in set(removals)] + additions
+			return list(membership)
+		def deleter(pid, _path):
+			music[:] = [row for row in music if row["persistent_id"] != pid]
+			return True
+		def cache_remover(_ids):
+			if not crashed[0]:
+				crashed[0] = True
+				raise RuntimeError("interrupt after delete checkpoint")
+			return 1
+		kwargs = dict(
+			exact_lookup=lambda pid: next((row for row in music if row["persistent_id"] == pid), None),
+			cache_updater=lambda _track: None, cache_remover=cache_remover,
+			membership_reader=lambda *_args: list(membership), membership_editor=editor,
+			music_deleter=deleter, status_checker=lambda _name, pid: ("FOUND", pid),
+			audio_hasher=lambda _path: "audio-proof",
+		)
+		with patch("crate_music_importer.ipod_import.playlist_update.audio_sha256", return_value="audio-proof"), self.assertRaisesRegex(RuntimeError, "interrupt"):
+			apply_playlist_update(preview.manifest, "saved", paths, music, **kwargs)
+		resumed = load_manifest(paths)
+		music.append({"title": "b", "artist": "Artist", "album": "Album", "duration_s": 180, "persistent_id": "PID-B", "location": str(managed_path), "comment": ""})
+		with patch("crate_music_importer.ipod_import.playlist_update.audio_sha256", return_value="audio-proof"), self.assertRaisesRegex(MusicAutomationError, "reappeared after its deletion checkpoint"):
+			apply_playlist_update(resumed, "saved", paths, list(music), **kwargs)
+		self.assertTrue(managed_path.exists())
+		self.assertEqual(resumed["recordings"][b_id]["music_binding"]["persistent_id"], "PID-B")
+
+	def test_unknown_missing_recording_without_complete_checkpoint_is_refused(self):
+		from crate_music_importer.ipod_import.playlist_update import _validate_permanent_deletions
+		paths, manifest, music = self.fixture(("a", "b"))
+		b_item = manifest["playlists"]["saved"]["items"][1]
+		b_id = b_item["recording_id"]
+		manifest["recordings"].pop(b_id)
+		removal = {"action": "delete", "recording_id": b_id}
+		with self.assertRaisesRegex(MusicAutomationError, "missing Crate-managed file provenance"):
+			_validate_permanent_deletions(
+				manifest,
+				[removal],
+				paths,
+				audio_hasher=lambda _path: "audio-proof",
+				exact_lookup=lambda pid: next((row for row in music if row["persistent_id"] == pid), None),
+			)
 
 	def test_retry_accepts_already_applied_suffix_and_refuses_drift(self):
 		paths, manifest, music = self.fixture(("a",))

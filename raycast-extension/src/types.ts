@@ -286,6 +286,11 @@ export interface JobsSnapshot {
   pendingNotifications: ImportJob[];
 }
 
+export interface ActivitySnapshot {
+  resolver: ResolverSnapshot;
+  jobs: JobsSnapshot;
+}
+
 export interface SpotifyAlbumSummary {
   id: string;
   name: string;

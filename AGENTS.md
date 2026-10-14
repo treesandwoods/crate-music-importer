@@ -20,7 +20,9 @@ Do not run live package upgrades, imports, or Music mutations as a side effect o
 Report mocked, packaged, and live validation boundaries separately.
 
 ## Behavior to preserve
-Normal previews use the persistent Music cache; full scans require the deliberate rebuild command.
+Album-search status checks only read the cache. Existing preview/import workflows automatically rebuild missing,
+expired, corrupt, or obsolete caches; other full scans require Library Health. Failed rebuilds keep existing state
+and direct the user to Library Health.
 Preserve exact-ID validation, ownership checks, resumable checkpoints, per-track artwork, duration validation,
 and the strict YouTube score threshold above 0.87.
 Honor the configured managed directory and never migrate existing state implicitly.

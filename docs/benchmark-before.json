@@ -1,0 +1,79 @@
+{
+  "mode": "before",
+  "activity": [
+    {
+      "recordings": 20,
+      "sources": 2,
+      "history": 2,
+      "outcome_sha256": "0d076a47981a84407d0ccee54cd3519cf65695443dfd00ee64790ec0d416ee2e",
+      "subprocesses_per_ui_refresh": 2,
+      "median_ms": 1.441,
+      "manifest_reads": 4,
+      "job_reads": 10,
+      "cache_reads": 0,
+      "subprocess_median_ms": 207.26
+    },
+    {
+      "recordings": 5000,
+      "sources": 50,
+      "history": 1000,
+      "outcome_sha256": "101b9d8616ddf101376a2539a0b7fe96b23db04b83e89d3a91c44112781cff4c",
+      "subprocesses_per_ui_refresh": 2,
+      "median_ms": 1973.519,
+      "manifest_reads": 4,
+      "job_reads": 53000,
+      "cache_reads": 0,
+      "subprocess_median_ms": 2072.437
+    }
+  ],
+  "cache": [
+    {
+      "tracks": 20,
+      "upserts": 20,
+      "changed": false,
+      "outcome_sha256": "3756a42b70990c86880952f00c405e1641dfd8e853400ff7c23fc490c974a15f",
+      "writes": 20,
+      "scans": 0,
+      "median_ms": 13.504,
+      "manifest_reads": 0,
+      "job_reads": 0,
+      "cache_reads": 20
+    },
+    {
+      "tracks": 20,
+      "upserts": 20,
+      "changed": true,
+      "outcome_sha256": "dbd8be433e2ad3219675e7664029c543398e75d5f23910c96e22ac6dd3b3e9fa",
+      "writes": 20,
+      "scans": 0,
+      "median_ms": 14.49,
+      "manifest_reads": 0,
+      "job_reads": 0,
+      "cache_reads": 20
+    },
+    {
+      "tracks": 5000,
+      "upserts": 20,
+      "changed": false,
+      "outcome_sha256": "24efb8c1616acabb0c13ff61c0ebee7665f57d56683b2cd69af98ef61363ff91",
+      "writes": 20,
+      "scans": 0,
+      "median_ms": 1567.378,
+      "manifest_reads": 0,
+      "job_reads": 0,
+      "cache_reads": 20
+    },
+    {
+      "tracks": 5000,
+      "upserts": 20,
+      "changed": true,
+      "outcome_sha256": "0f9f8c8048e6c332dd3c5956ec435137a9f395e01a29fb2acdfbb542b76a2d01",
+      "writes": 20,
+      "scans": 0,
+      "median_ms": 1550.451,
+      "manifest_reads": 0,
+      "job_reads": 0,
+      "cache_reads": 20
+    }
+  ]
+}

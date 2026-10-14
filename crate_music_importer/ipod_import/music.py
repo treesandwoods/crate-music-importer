@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from crate_music_importer.ipod_import.constants import MUSIC_CONFIDENCE_MIN
+from crate_music_importer.ipod_import.music_lock import music_operation_lock
 from crate_music_importer.ipod_import.identity import clean_release_labels, duration_score, match_music_track, normalize_recording_title, normalize_text, normalized_artists, score_music_candidate, version_markers
 
 
@@ -608,7 +609,8 @@ def _osascript(script: str, args: list[str] | None = None, *, timeout: int = 300
 	command = ["/usr/bin/osascript", "-e", script]
 	command.extend(args or [])
 	try:
-		result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
+		with music_operation_lock():
+			result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
 	except (OSError, subprocess.TimeoutExpired) as exc:
 		raise MusicAutomationError(f"Could not run Music automation: {exc}") from exc
 	if result.returncode != 0:

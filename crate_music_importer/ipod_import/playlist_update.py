@@ -551,22 +551,63 @@ def _validate_permanent_deletions(
 	*,
 	audio_hasher: Callable[[Path], str],
 	exact_lookup: ExactMusicLookup,
+	deletion_checkpoints: dict[str, Any] | None = None,
 ) -> None:
 	for removal in removals:
 		if removal.get("action") != "delete":
 			continue
 		recording_id = str(removal.get("recording_id") or "")
-		recording = manifest.get("recordings", {}).get(recording_id) or {}
+		recording = manifest.get("recordings", {}).get(recording_id)
+		checkpoint = (deletion_checkpoints or {}).get(recording_id)
+		if not isinstance(recording, dict):
+			# The recording is removed only after every irreversible deletion step has
+			# been checkpointed. Its final manifest save can succeed just before a
+			# process crash leaves pending_update behind, so recover from that durable
+			# proof without accepting an unrelated missing recording.
+			if not isinstance(checkpoint, dict):
+				raise MusicAutomationError("Permanent deletion is missing Crate-managed file provenance or encoded-audio proof. Stopped before changing Music.")
+			relative_path = str(checkpoint.get("relative_path") or "")
+			persistent_id = str(checkpoint.get("persistent_id") or "")
+			path = (paths.root / relative_path).resolve()
+			root = paths.root.resolve()
+			if (
+				not checkpoint.get("managed_by_crate")
+				or not checkpoint.get("music_delete_started_at")
+				or not relative_path
+				or not checkpoint.get("audio_sha256")
+				or not persistent_id
+				or path == root
+				or root not in path.parents
+				or not checkpoint.get("music_deleted")
+				or not checkpoint.get("cache_removed")
+				or not checkpoint.get("file_deleted")
+				or path.exists()
+				or exact_lookup(persistent_id) is not None
+			):
+				raise MusicAutomationError("A missing recording does not have complete, verified Crate deletion checkpoints. Stopped before changing Music.")
+			continue
 		managed = recording.get("managed_file") or {}
 		if not managed.get("managed_by_crate") or not managed.get("audio_sha256"):
 			raise MusicAutomationError("Permanent deletion is missing Crate-managed file provenance or encoded-audio proof. Stopped before changing Music.")
 		path = (paths.root / str(managed.get("relative_path") or "")).resolve()
-		if not path.is_file() or audio_hasher(path) != str(managed.get("audio_sha256") or ""):
+		checkpoint_valid = bool(
+			isinstance(checkpoint, dict)
+			and checkpoint.get("music_delete_started_at")
+			and checkpoint.get("persistent_id") == music_binding_id(recording)
+			and checkpoint.get("relative_path") == managed.get("relative_path")
+			and checkpoint.get("audio_sha256") == managed.get("audio_sha256")
+		)
+		if path.is_file():
+			if audio_hasher(path) != str(managed.get("audio_sha256") or ""):
+				raise MusicAutomationError("A permanently deleted candidate's encoded audio no longer matches its saved proof. Stopped before changing Music.")
+		elif not (checkpoint_valid and checkpoint.get("cache_removed")):
 			raise MusicAutomationError("A permanently deleted candidate's encoded audio no longer matches its saved proof. Stopped before changing Music.")
 		persistent_id = music_binding_id(recording)
 		music_track = exact_lookup(persistent_id) if persistent_id else None
 		location = Path(str((music_track or {}).get("location") or "")).resolve() if (music_track or {}).get("location") else None
-		if not persistent_id or location != path:
+		if isinstance(checkpoint, dict) and checkpoint.get("music_deleted") and music_track is not None:
+			raise MusicAutomationError("The exact Music item reappeared after its deletion checkpoint. Stopped before deleting its managed file.")
+		if not persistent_id or (music_track is not None and location != path) or (music_track is None and not checkpoint_valid):
 			raise MusicAutomationError("A permanently deleted candidate is not the exact Music item backed by its Crate-managed file. Stopped before changing Music.")
 
 
@@ -593,6 +634,40 @@ def _ensure_addition_ids(
 			ids.append(resolved[key])
 			continue
 		persistent_id = music_binding_id(recording)
+		pending_import = recording.get("music_import_pending")
+		if pending_import:
+			managed = recording.get("managed_file") or {}
+			path = paths.root / str(managed.get("relative_path") or "")
+			if (
+				not managed.get("managed_by_crate")
+				or not managed.get("relative_path")
+				or not managed.get("audio_sha256")
+				or not path.is_file()
+				or audio_sha256(path) != str(managed.get("audio_sha256") or "")
+			):
+				raise MusicAutomationError("A previous Music import may have succeeded, but its exact Crate-managed file proof is unavailable. Refresh the Music index; refusing to create a possible duplicate.")
+			resolved_at_path = [
+				track for track in index.tracks
+				if track.get("persistent_id") and track.get("location")
+				and Path(str(track["location"])).resolve() == path.resolve()
+			]
+			if len(resolved_at_path) != 1:
+				raise MusicAutomationError("A previous Music import may have succeeded. Refresh Library Health to rebuild the Music index before retrying; refusing to create a possible duplicate.")
+			candidate_id = str(resolved_at_path[0]["persistent_id"])
+			actual = exact_lookup(candidate_id)
+			expected = {
+				"persistent_id": candidate_id,
+				"title": recording.get("source_metadata", {}).get("title"),
+				"artist": recording.get("source_metadata", {}).get("artists"),
+				"duration_s": int(managed.get("duration_ms") or recording.get("source_metadata", {}).get("duration_ms") or 0) / 1000.0,
+			}
+			valid, reason = validate_exact_track(expected, actual)
+			actual_location = Path(str((actual or {}).get("location") or "")).resolve() if (actual or {}).get("location") else None
+			if not valid or actual_location != path.resolve():
+				raise MusicAutomationError(f"The pending Music import could not be verified against its exact managed file ({reason}); refusing to create a possible duplicate.")
+			bind_recording_to_music(recording, actual)
+			persistent_id = candidate_id
+			recording.pop("music_import_pending", None)
 		if persistent_id:
 			actual = exact_lookup(persistent_id)
 			expected = index.by_persistent_id.get(persistent_id) or {
@@ -617,6 +692,8 @@ def _ensure_addition_ids(
 						raise MusicAutomationError(f"Reconciled Music ID {persistent_id} is no longer safe to reuse: {reason}")
 					cache_updater(actual)
 		if not persistent_id:
+			if pending_import:
+				raise MusicAutomationError("A previous Music import may have succeeded. Refresh Library Health to rebuild the Music index before retrying; refusing to create a possible duplicate.")
 			if not _managed_exists(recording, paths):
 				raise MusicAutomationError(f"New playlist occurrence is unresolved: {recording.get('source_metadata', {}).get('title') or key}")
 			managed = recording.get("managed_file") or {}
@@ -677,7 +754,7 @@ def apply_playlist_update(
 		raise MusicAutomationError(f"A different Music playlist now uses this name ({found_id or 'unknown ID'}). Update refused.")
 	checkpoint = pending.get("music_checkpoint")
 	if not isinstance(checkpoint, dict) or not checkpoint.get("applied_at"):
-		_validate_permanent_deletions(manifest, list(pending.get("removals") or []), paths, audio_hasher=audio_hasher, exact_lookup=exact_lookup)
+		_validate_permanent_deletions(manifest, list(pending.get("removals") or []), paths, audio_hasher=audio_hasher, exact_lookup=exact_lookup, deletion_checkpoints=pending.get("deletion_checkpoints"))
 	addition_items = [dict(item) for item in pending.get("addition_items") or []]
 	current = membership_reader(str(playlist.get("name") or "Spotify Playlist"), known_pid)
 	if not isinstance(checkpoint, dict):
@@ -751,18 +828,56 @@ def apply_playlist_update(
 		recording_id = str(removal.get("recording_id") or "")
 		recording = manifest.get("recordings", {}).get(recording_id)
 		if not isinstance(recording, dict):
+			_validate_permanent_deletions(
+				manifest,
+				[removal],
+				paths,
+				audio_hasher=audio_hasher,
+				exact_lookup=exact_lookup,
+				deletion_checkpoints=pending.get("deletion_checkpoints"),
+			)
 			continue
 		if recording.get("album_memberships") or recording.get("playlist_memberships"):
 			raise MusicAutomationError("A track gained another imported reference after preview. Permanent deletion stopped for attention.")
 		managed = recording.get("managed_file") or {}
 		if not managed.get("managed_by_crate"):
 			raise MusicAutomationError("Permanent deletion lost its Crate-managed file provenance. Stopped for attention.")
-		_validate_permanent_deletions(manifest, [removal], paths, audio_hasher=audio_hasher, exact_lookup=exact_lookup)
 		persistent_id = music_binding_id(recording)
-		if persistent_id:
-			music_deleter(persistent_id, (paths.root / str(managed.get("relative_path") or "")).resolve())
-			cache_remover({persistent_id})
-		_safe_delete_file(paths, str(managed.get("relative_path") or ""))
+		deletion_checkpoints = pending.setdefault("deletion_checkpoints", {})
+		delete_checkpoint = deletion_checkpoints.get(recording_id)
+		if not isinstance(delete_checkpoint, dict):
+			delete_checkpoint = {
+				"persistent_id": persistent_id,
+				"relative_path": managed.get("relative_path"),
+				"audio_sha256": managed.get("audio_sha256"),
+				"managed_by_crate": bool(managed.get("managed_by_crate")),
+				"music_delete_started_at": _now(),
+			}
+			deletion_checkpoints[recording_id] = delete_checkpoint
+			save_manifest(paths, manifest)
+		_validate_permanent_deletions(manifest, [removal], paths, audio_hasher=audio_hasher, exact_lookup=exact_lookup, deletion_checkpoints=deletion_checkpoints)
+		managed_path = (paths.root / str(managed.get("relative_path") or "")).resolve()
+		actual = exact_lookup(persistent_id) if persistent_id else None
+		if not delete_checkpoint.get("music_deleted"):
+			if actual is not None:
+				music_deleter(persistent_id, managed_path)
+				remaining = exact_lookup(persistent_id)
+				if remaining is not None:
+					raise MusicAutomationError("Music did not confirm deletion of the exact managed track. Update stopped for attention.")
+			delete_checkpoint["music_deleted"] = True
+			save_manifest(paths, manifest)
+		if not delete_checkpoint.get("cache_removed"):
+			if persistent_id:
+				cache_remover({persistent_id})
+			delete_checkpoint["cache_removed"] = True
+			save_manifest(paths, manifest)
+		if not delete_checkpoint.get("file_deleted"):
+			if managed_path.is_file():
+				if audio_hasher(managed_path) != str(managed.get("audio_sha256") or ""):
+					raise MusicAutomationError("A permanently deleted candidate's encoded audio no longer matches its saved proof. Stopped before changing Music.")
+				_safe_delete_file(paths, str(managed.get("relative_path") or ""))
+			delete_checkpoint["file_deleted"] = True
+			save_manifest(paths, manifest)
 		shutil.rmtree(paths.staging / recording_id, ignore_errors=True)
 		manifest["recordings"].pop(recording_id, None)
 		deleted += 1
