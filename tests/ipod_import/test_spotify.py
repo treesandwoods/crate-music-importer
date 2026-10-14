@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from crate_music_importer.ipod_import.spotify import SpotifyError, fetch_album, fetch_playlist, fetch_playlist_cover, load_fixture, parse_album_url, parse_playlist_url
+from crate_music_importer.ipod_import.spotify import SpotifyError, _finalize_source, fetch_album, fetch_playlist, fetch_playlist_cover, load_fixture, parse_album_url, parse_playlist_url
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -199,6 +199,52 @@ class SpotifyFixtureTests(unittest.TestCase):
 		self.assertTrue(playlist.complete)
 		self.assertEqual([track["title"] for track in playlist.tracks], ["First", "Second"])
 		self.assertEqual(get.call_count, 6)
+
+	def test_exactly_one_hundred_reported_playlist_tracks_are_complete(self):
+		tracks = [{"sp_id": f"track{i:03d}", "title": f"Track {i}", "artists": "Artist"} for i in range(100)]
+		result = _finalize_source(
+			[{"name": "Hundred", "tracks": tracks, "total_count": 100}],
+			[], "playlist", "37i9dQZF1DXTESTFIXTURE1", "https://open.spotify.com/playlist/37i9dQZF1DXTESTFIXTURE1",
+		)
+		self.assertTrue(result.complete)
+		self.assertEqual(result.total_count, 100)
+
+	def test_one_hundred_exposed_tracks_need_an_independent_reported_total(self):
+		tracks = [{"sp_id": f"track{i:03d}", "title": f"Track {i}", "artists": "Artist"} for i in range(100)]
+		for reported_total in (None, 0):
+			with self.subTest(reported_total=reported_total):
+				result = _finalize_source(
+					[{"name": "Capped", "tracks": tracks, "total_count": reported_total}],
+					[], "playlist", "37i9dQZF1DXTESTFIXTURE1", "https://open.spotify.com/playlist/37i9dQZF1DXTESTFIXTURE1",
+				)
+				self.assertFalse(result.complete)
+				self.assertIn("will not download a possibly incomplete playlist", result.warning)
+
+		declared_complete = _finalize_source(
+			[{"name": "Declared Hundred", "tracks": tracks, "total_count": 100}],
+			[], "playlist", "37i9dQZF1DXTESTFIXTURE1", "https://open.spotify.com/playlist/37i9dQZF1DXTESTFIXTURE1",
+		)
+		self.assertTrue(declared_complete.complete)
+
+		declared_larger = _finalize_source(
+			[{"name": "Declared Larger", "tracks": tracks, "total_count": 101}],
+			[], "playlist", "37i9dQZF1DXTESTFIXTURE1", "https://open.spotify.com/playlist/37i9dQZF1DXTESTFIXTURE1",
+		)
+		self.assertFalse(declared_larger.complete)
+		self.assertEqual(declared_larger.total_count, 101)
+
+	def test_multidisc_album_track_totals_are_per_disc(self):
+		tracks = [
+			{"sp_id": f"track{disc}{number:02d}", "title": f"Track {disc}-{number}", "artists": "Artist", "track_no": number, "disc_no": disc}
+			for disc in (1, 2) for number in range(1, 11)
+		]
+		result = _finalize_source(
+			[{"name": "Two Disc Album", "album_artist": "Artist", "tracks": tracks, "total_count": 20}],
+			[], "album", "48a7rOjTzpD1zzJAteeveE", "https://open.spotify.com/album/48a7rOjTzpD1zzJAteeveE",
+		)
+		self.assertTrue(result.complete)
+		self.assertEqual({track["disc_total"] for track in result.tracks}, {2})
+		self.assertEqual({track["track_total"] for track in result.tracks}, {10})
 
 
 if __name__ == "__main__":

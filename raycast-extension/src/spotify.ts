@@ -30,12 +30,14 @@ function oauthClient() {
 const AUTHORIZE_URL = "https://accounts.spotify.com/authorize";
 const TOKEN_URL = "https://accounts.spotify.com/api/token";
 const API_URL = "https://api.spotify.com/v1";
+const SPOTIFY_REQUEST_TIMEOUT_MS = 15_000;
 
 async function tokenRequest(parameters: URLSearchParams): Promise<OAuth.TokenResponse> {
   const response = await fetch(TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: parameters,
+    signal: AbortSignal.timeout(SPOTIFY_REQUEST_TIMEOUT_MS),
   });
   const value = (await response.json()) as OAuth.TokenResponse & { error_description?: string };
   if (!response.ok || !value.access_token) {
@@ -90,7 +92,9 @@ export async function spotifyAccessToken(): Promise<string> {
 async function spotifyJson(path: string, token: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
   const response = await fetch(`${API_URL}${path}`, {
     headers: { Authorization: `Bearer ${token}` },
-    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) : undefined,
+    signal: signal
+      ? AbortSignal.any([signal, AbortSignal.timeout(SPOTIFY_REQUEST_TIMEOUT_MS)])
+      : AbortSignal.timeout(SPOTIFY_REQUEST_TIMEOUT_MS),
   });
   if (response.status === 401) await oauthClient().removeTokens();
   if (!response.ok)
@@ -101,9 +105,13 @@ async function spotifyJson(path: string, token: string, signal?: AbortSignal): P
   return (await response.json()) as Record<string, unknown>;
 }
 
-export async function searchSpotifyAlbums(query: string, token: string): Promise<SpotifyAlbumSummary[]> {
+export async function searchSpotifyAlbums(
+  query: string,
+  token: string,
+  signal?: AbortSignal,
+): Promise<SpotifyAlbumSummary[]> {
   const parameters = spotifySearchParameters(query);
-  const value = await spotifyJson(`/search?${parameters}`, token);
+  const value = await spotifyJson(`/search?${parameters}`, token, signal);
   return parseSpotifyAlbums(value);
 }
 

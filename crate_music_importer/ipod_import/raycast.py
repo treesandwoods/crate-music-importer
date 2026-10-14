@@ -24,6 +24,10 @@ def main(argv: list[str] | None = None) -> None:
 		raise SystemExit(2)
 	action = values.pop(0)
 	try:
+		if action == "activity-json":
+			from crate_music_importer.ipod_import.activity import activity_snapshot
+			_json(activity_snapshot())
+			raise SystemExit(0)
 		if action == "queue-json":
 			if not values:
 				raise RaycastInputError("Missing background action.")

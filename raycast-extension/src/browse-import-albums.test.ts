@@ -56,7 +56,7 @@ const album = (name: string) => ({ id: name, name, artists: "Artist", url: "http
 
 async function mount(
   authorize: () => Promise<string>,
-  search: (query: string, token: string) => Promise<unknown[]>,
+  search: (query: string, token: string, signal?: AbortSignal) => Promise<unknown[]>,
   fallbackText = "",
   scan: typeof scanAlbumLibrary = async () => {},
 ) {
@@ -133,14 +133,19 @@ test("startup input mounts before OAuth and the latest text searches after delay
 test("old results cannot appear during the next query's debounce or after clearing", async () => {
   const first = deferred<unknown[]>();
   const second = deferred<unknown[]>();
+  const signals: AbortSignal[] = [];
   const ui = await mount(
     async () => "token",
-    (query) => (query === "first" ? first.promise : second.promise),
+    (query, _token, signal) => {
+      if (signal) signals.push(signal);
+      return query === "first" ? first.promise : second.promise;
+    },
   );
   try {
     await ui.input("first");
     await ui.settle();
     await ui.input("second");
+    assert.ok(signals[0].aborted);
     await act(async () => first.resolve([album("stale")]));
     assert.equal(ui.view.root.findAllByType("Item" as ElementType).length, 0);
     await ui.settle();

@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 import copy
+import contextlib
+import fcntl
 import json
 import os
 import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from crate_music_importer.ipod_import.identity import clean_release_labels, normalize_recording_title, normalize_text
 from crate_music_importer.ipod_import.manifest import ManagedPaths
+from crate_music_importer.ipod_import.music_lock import music_operation_lock
 
 
 MUSIC_CACHE_SCHEMA_VERSION = 2
 MUSIC_CACHE_MAX_AGE = timedelta(hours=24)
+_coordination = threading.local()
 
 
 class MusicCacheError(RuntimeError):
@@ -27,6 +32,41 @@ class MusicCacheUnavailableError(MusicCacheError):
 
 def _now() -> str:
 	return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+@contextlib.contextmanager
+def cache_rebuild_lock(paths: ManagedPaths):
+	"""Coordinate scans and updates; transaction locks never span Music calls.
+
+	Music operation -> cache coordination -> short cache/manifest transaction.
+	Readers of a valid atomic snapshot need no locks and never create state.
+	"""
+	with music_operation_lock():
+		key = str(paths.state_dir.resolve())
+		held = getattr(_coordination, "paths", set())
+		if key in held:
+			yield
+			return
+		paths.state_dir.mkdir(parents=True, exist_ok=True)
+		with (paths.state_dir / "music-cache-rebuild.lock").open("a+") as handle:
+			fcntl.flock(handle, fcntl.LOCK_EX)
+			_coordination.paths = held | {key}
+			try:
+				yield
+			finally:
+				_coordination.paths = held
+				fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def _cache_transaction(paths: ManagedPaths):
+	paths.state_dir.mkdir(parents=True, exist_ok=True)
+	with (paths.state_dir / "music-cache.lock").open("a+") as handle:
+		fcntl.flock(handle, fcntl.LOCK_EX)
+		try:
+			yield
+		finally:
+			fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def _integer(value: Any) -> int:
@@ -97,15 +137,20 @@ def build_full_cache(paths: ManagedPaths, tracks: list[dict[str, Any]]) -> dict[
 
 def save_music_cache(paths: ManagedPaths, cache: dict[str, Any]) -> None:
 	cache = _validate_cache(cache, paths)
+	with _cache_transaction(paths):
+		_save_music_cache_unlocked(paths, cache)
+
+
+def _save_music_cache_unlocked(paths: ManagedPaths, cache: dict[str, Any]) -> None:
 	paths.state_dir.mkdir(parents=True, exist_ok=True)
 	temporary = None
 	try:
 		with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=paths.state_dir, prefix="music-library-cache-", suffix=".tmp", delete=False) as handle:
+			temporary = handle.name
 			json.dump(cache, handle, ensure_ascii=False, indent=2, sort_keys=True)
 			handle.write("\n")
 			handle.flush()
 			os.fsync(handle.fileno())
-			temporary = handle.name
 		os.replace(temporary, paths.music_cache)
 		temporary = None
 	finally:
@@ -118,9 +163,35 @@ def save_music_cache(paths: ManagedPaths, cache: dict[str, Any]) -> None:
 
 def refresh_music_cache(paths: ManagedPaths, tracks: list[dict[str, Any]]) -> dict[str, Any]:
 	"""Replace the complete disposable snapshot with one Music.app scan."""
-	cache = build_full_cache(paths, tracks)
-	save_music_cache(paths, cache)
-	return cache
+	with cache_rebuild_lock(paths):
+		cache = build_full_cache(paths, tracks)
+		save_music_cache(paths, cache)
+		return cache
+
+
+def rebuild_music_cache(paths: ManagedPaths, rebuild: Callable[[], list[dict[str, Any]]]) -> dict[str, Any]:
+	"""Explicit full scan, coordinated from scan start through publication."""
+	with cache_rebuild_lock(paths):
+		return _rebuild_music_cache_unlocked(paths, rebuild)
+
+
+def _rebuild_music_cache_unlocked(paths: ManagedPaths, rebuild: Callable[[], list[dict[str, Any]]] | None) -> dict[str, Any]:
+	if rebuild is None:
+		from crate_music_importer.ipod_import.music import scan_music_library
+		rebuild = scan_music_library
+	try:
+		cache = build_full_cache(paths, rebuild())
+		save_music_cache(paths, cache)
+		return cache
+	except Exception as exc:
+		raise MusicCacheUnavailableError(f"The Music cache could not be rebuilt from Music.app: {exc}. Run Refresh Library Health, then retry.") from exc
+
+
+def _load_music_cache_unlocked(paths: ManagedPaths, rebuild: Callable[[], list[dict[str, Any]]] | None = None) -> dict[str, Any]:
+	try:
+		return read_music_cache(paths)
+	except MusicCacheUnavailableError:
+		return _rebuild_music_cache_unlocked(paths, rebuild)
 
 
 def read_music_cache(paths: ManagedPaths) -> dict[str, Any]:
@@ -137,14 +208,9 @@ def load_music_cache(paths: ManagedPaths, *, rebuild: Callable[[], list[dict[str
 	try:
 		return read_music_cache(paths)
 	except MusicCacheUnavailableError:
-		if rebuild is None:
-			from crate_music_importer.ipod_import.music import scan_music_library
-
-			rebuild = scan_music_library
-		try:
-			return refresh_music_cache(paths, rebuild())
-		except Exception as exc:
-			raise MusicCacheUnavailableError(f"The Music cache could not be rebuilt from Music.app: {exc}") from exc
+		with cache_rebuild_lock(paths):
+			# Another caller may have completed the required scan while we waited.
+			return _load_music_cache_unlocked(paths, rebuild)
 
 
 def music_cache_tracks(cache: dict[str, Any]) -> list[dict[str, Any]]:
@@ -152,25 +218,84 @@ def music_cache_tracks(cache: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def upsert_music_cache_track(paths: ManagedPaths, track: dict[str, Any]) -> None:
-	cache = load_music_cache(paths)
 	entry = normalize_cache_track(track)
 	persistent_id = entry["persistent_id"]
 	if not persistent_id:
 		raise MusicCacheError("A Music persistent ID is required for a cache update.")
-	cache["tracks"][persistent_id] = entry
-	cache["scanned_at"] = _now()
-	save_music_cache(paths, cache)
+	with cache_rebuild_lock(paths):
+		cache = _load_music_cache_unlocked(paths)
+		if cache["tracks"].get(persistent_id) != entry:
+			cache["tracks"][persistent_id] = entry
+			save_music_cache(paths, cache)
 
 
 def remove_music_cache_tracks(paths: ManagedPaths, persistent_ids: set[str]) -> int:
 	requested = {str(value) for value in persistent_ids if str(value)}
 	if not requested:
 		return 0
-	cache = load_music_cache(paths)
-	removed = sum(1 for persistent_id in requested if cache["tracks"].pop(persistent_id, None) is not None)
-	cache["scanned_at"] = _now()
-	save_music_cache(paths, cache)
-	return removed
+	with cache_rebuild_lock(paths):
+		cache = _load_music_cache_unlocked(paths)
+		removed = sum(1 for persistent_id in requested if cache["tracks"].pop(persistent_id, None) is not None)
+		if removed:
+			save_music_cache(paths, cache)
+		return removed
+
+
+class MusicCacheSession:
+	"""Reuse a validated snapshot within an operation, with durable per-step writes."""
+
+	def __init__(self, paths: ManagedPaths):
+		self.paths = paths
+		with cache_rebuild_lock(paths):
+			self.cache = _load_music_cache_unlocked(paths)
+			self.generation = self._generation()
+
+	def _generation(self) -> tuple[int, int, int] | None:
+		try:
+			value = self.paths.music_cache.stat()
+			return value.st_ino, value.st_mtime_ns, value.st_size
+		except FileNotFoundError:
+			return None
+
+	def _reload_if_changed(self) -> None:
+		scanned_at = datetime.fromisoformat(self.cache["scanned_at"])
+		if scanned_at.tzinfo is None:
+			scanned_at = scanned_at.replace(tzinfo=timezone.utc)
+		if self.generation != self._generation() or datetime.now(timezone.utc) - scanned_at > MUSIC_CACHE_MAX_AGE:
+			self.cache = _load_music_cache_unlocked(self.paths)
+			self.generation = self._generation()
+
+	def tracks(self) -> list[dict[str, Any]]:
+		return music_cache_tracks(self.cache)
+
+	def upsert(self, track: dict[str, Any]) -> None:
+		entry = normalize_cache_track(track)
+		pid = entry["persistent_id"]
+		if not pid:
+			raise MusicCacheError("A Music persistent ID is required for a cache update.")
+		with cache_rebuild_lock(self.paths):
+			self._reload_if_changed()
+			if self.cache["tracks"].get(pid) != entry:
+				self.cache["tracks"][pid] = entry
+				try:
+					save_music_cache(self.paths, self.cache)
+				except BaseException:
+					self.generation = None
+					raise
+				self.generation = self._generation()
+
+	def remove(self, persistent_ids: set[str]) -> int:
+		with cache_rebuild_lock(self.paths):
+			self._reload_if_changed()
+			removed = sum(1 for pid in persistent_ids if self.cache["tracks"].pop(str(pid), None) is not None)
+			if removed:
+				try:
+					save_music_cache(self.paths, self.cache)
+				except BaseException:
+					self.generation = None
+					raise
+				self.generation = self._generation()
+			return removed
 
 
 def _same_title(left: Any, right: Any) -> bool:

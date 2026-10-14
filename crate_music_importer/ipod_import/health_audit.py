@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from crate_music_importer.ipod_import.health import DUPLICATE_DISMISSALS, apply_duplicate_dismissals, build_health_report, duplicate_pair, failed_health_report, load_duplicate_dismissals, save_health_report
 from crate_music_importer.ipod_import.manifest import ManagedPaths, load_manifest
 from crate_music_importer.ipod_import.music import scan_music_library_for_health
-from crate_music_importer.ipod_import.music_cache import refresh_music_cache
+from crate_music_importer.ipod_import.music_cache import cache_rebuild_lock, refresh_music_cache
 from crate_music_importer.ipod_import.dependency_lock import dependency_lock
 
 
@@ -26,7 +26,10 @@ def _now() -> str:
 
 def _read(path: Path) -> dict[str, Any]:
 	try:
-		return json.loads(path.read_text())
+		value = json.loads(path.read_text())
+		if not isinstance(value, dict):
+			raise ValueError(f"{path.name} must contain an object.")
+		return value
 	except FileNotFoundError:
 		return {}
 
@@ -68,12 +71,32 @@ def _alive(pid: int | None) -> bool:
 
 
 def _load(paths: ManagedPaths, include_report: bool = True) -> dict[str, Any]:
-	state = _read(paths.state_dir / "health-audit.json") or {
+	defaults = {
 		"status": "idle", "mode": "normal", "pid": None, "startedAt": None,
 		"finishedAt": None, "updatedAt": None, "phase": "Idle", "checked": 0, "total": 0, "error": None,
 	}
+	try:
+		stored = _read(paths.state_dir / "health-audit.json")
+		if stored and (
+			not isinstance(stored.get("status"), str)
+			or stored.get("status") not in {"idle", "running", "complete", "failed"}
+			or (stored.get("pid") is not None and (not isinstance(stored["pid"], int) or stored["pid"] <= 0))
+			or any(not isinstance(stored.get(field, 0), int) or stored.get(field, 0) < 0 for field in ("checked", "total"))
+		):
+			raise ValueError("Invalid health audit fields.")
+		state = {**defaults, **stored}
+	except (OSError, ValueError) as exc:
+		state = {**defaults, "status": "failed", "phase": "State unavailable", "error": f"Saved health audit state is unreadable: {exc}. Run Refresh Library Health to retry."}
 	interrupted = state["status"] == "running" and not _alive(state.get("pid"))
-	report = _read(paths.state_dir / "health-last-result.json") if include_report or interrupted else {}
+	try:
+		report = _read(paths.state_dir / "health-last-result.json") if include_report or interrupted else {}
+		if report and (
+			not isinstance(report.get("status"), str) or report.get("status") not in {"healthy", "attention", "failed"}
+			or not isinstance(report.get("issues"), list) or any(not isinstance(issue, dict) for issue in report.get("issues", []))
+		):
+			raise ValueError("Invalid health report fields.")
+	except (OSError, ValueError) as exc:
+		report = failed_health_report(f"Saved health report is unreadable: {exc}. Run Refresh Library Health to retry.")
 	if report:
 		report = apply_duplicate_dismissals(report, load_duplicate_dismissals(paths))
 	if interrupted:
@@ -162,11 +185,12 @@ def run_worker(paths: ManagedPaths, run_id: str) -> None:
 			with _lock(paths):
 				_save(paths, state)
 			manifest = load_manifest(paths)
-			music_tracks = scan_music_library_for_health()
-			state.update(phase="Refreshing preview index", updatedAt=_now())
-			with _lock(paths):
-				_save(paths, state)
-			refresh_music_cache(paths, music_tracks)
+			with cache_rebuild_lock(paths):
+				music_tracks = scan_music_library_for_health()
+				state.update(phase="Refreshing preview index", updatedAt=_now())
+				with _lock(paths):
+					_save(paths, state)
+				refresh_music_cache(paths, music_tracks)
 			report = build_health_report(paths, manifest, music_tracks, on_progress=progress, deep_all=state["mode"] == "deep")
 	except Exception as exc:
 		report = failed_health_report(str(exc))

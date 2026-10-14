@@ -27,6 +27,55 @@ _YOUTUBE_SELECTION_ERRORS = {
 }
 
 _SPOTIFY_PLAYLIST_ID = re.compile(r"^[A-Za-z0-9]{16,32}$")
+_ABSENT = object()
+
+
+class ManifestSnapshot(dict[str, Any]):
+	"""A normal JSON object with an in-memory baseline for targeted checkpoints."""
+
+	def __init__(self, value: dict[str, Any], *, baseline: dict[str, Any] | None = None) -> None:
+		super().__init__(value)
+		self.baseline = copy.deepcopy(dict(value) if baseline is None else baseline)
+
+
+def _merge_changes(baseline: Any, changed: Any, latest: Any) -> Any:
+	"""Apply only the caller's delta; concurrent changes win conflicting leaves."""
+	if changed == baseline:
+		return latest
+	if latest == baseline or changed == latest:
+		return changed
+	if isinstance(changed, dict) and isinstance(latest, dict) and (isinstance(baseline, dict) or baseline is _ABSENT):
+		before = baseline if isinstance(baseline, dict) else {}
+		merged = dict(latest)
+		for key in before.keys() | changed.keys():
+			value = _merge_changes(before.get(key, _ABSENT), changed.get(key, _ABSENT), latest.get(key, _ABSENT))
+			if value is _ABSENT:
+				merged.pop(key, None)
+			else:
+				merged[key] = value
+		return merged
+	return latest
+
+
+def _sync_snapshot(target: Any, value: Any) -> None:
+	"""Rebase without invalidating recording/item references held by the worker."""
+	if isinstance(target, dict) and isinstance(value, dict):
+		for key in target.keys() - value.keys():
+			del target[key]
+		for key, item in value.items():
+			if key in target and isinstance(target[key], (dict, list)) and type(target[key]) is type(item):
+				_sync_snapshot(target[key], item)
+			else:
+				target[key] = copy.deepcopy(item)
+	elif isinstance(target, list) and isinstance(value, list):
+		for index, item in enumerate(value):
+			if index < len(target) and isinstance(target[index], (dict, list)) and type(target[index]) is type(item):
+				_sync_snapshot(target[index], item)
+			elif index < len(target):
+				target[index] = copy.deepcopy(item)
+			else:
+				target.append(copy.deepcopy(item))
+		del target[len(value):]
 
 
 def backfill_playlist_urls(manifest: dict[str, Any]) -> int:
@@ -91,7 +140,7 @@ class ManagedPaths:
 
 
 def new_manifest(paths: ManagedPaths) -> dict[str, Any]:
-	return {
+	return ManifestSnapshot({
 		"version": MANIFEST_VERSION,
 		"managed_root": str(paths.root),
 		"created_at": _now(),
@@ -100,7 +149,7 @@ def new_manifest(paths: ManagedPaths) -> dict[str, Any]:
 		"playlists": {},
 		"albums": {},
 		"manual_youtube_overrides": {},
-	}
+	}, baseline={})
 
 
 def _migrate_recording(recording: dict[str, Any]) -> None:
@@ -125,6 +174,14 @@ def _migrate_recording(recording: dict[str, Any]) -> None:
 
 
 def _migrate_manifest(data: dict[str, Any], paths: ManagedPaths) -> tuple[dict[str, Any], bool]:
+	if not isinstance(data, dict):
+		raise ValueError("Saved library state must contain an object. Existing state was kept; open Library Health to review the failure.")
+	for field in ("recordings", "playlists", "albums", "manual_youtube_overrides"):
+		if field in data and not isinstance(data[field], dict):
+			raise ValueError(f"Saved library state has invalid {field}. Existing state was kept; open Library Health to review the failure.")
+	for field in ("recordings", "playlists", "albums"):
+		if any(not isinstance(value, dict) for value in data.get(field, {}).values()):
+			raise ValueError(f"Saved library state has an invalid {field} entry. Existing state was kept; open Library Health to review the failure.")
 	version = data.get("version")
 	if version not in (1, MANIFEST_VERSION):
 		raise ValueError(f"Unsupported manifest version: {version!r}")
@@ -133,6 +190,9 @@ def _migrate_manifest(data: dict[str, Any], paths: ManagedPaths) -> tuple[dict[s
 		if not isinstance(recording, dict):
 			continue
 		managed = recording.get("managed_file")
+		for field in ("music", "active_reference", "cache_sync_pending"):
+			if recording.get(field) is not None and not isinstance(recording[field], dict):
+				raise ValueError(f"Saved recording has invalid {field}. Existing state was kept; open Library Health to review the failure.")
 		needs_cleanup = version == 1 or any(field in recording for field in ("music", "active_reference", "cache_sync_pending", "promotion")) or (isinstance(managed, dict) and "tool_owned" in managed)
 		if needs_cleanup:
 			_migrate_recording(recording)
@@ -162,6 +222,10 @@ def _load_manifest_unlocked(paths: ManagedPaths) -> dict[str, Any]:
 	with paths.manifest.open("r", encoding="utf-8") as handle:
 		data = json.load(handle)
 	data, _ = _migrate_manifest(data, paths)
+	return _validate_manifest(data, paths)
+
+
+def _validate_manifest(data: dict[str, Any], paths: ManagedPaths) -> dict[str, Any]:
 	if Path(str(data.get("managed_root"))) != paths.root:
 		raise ValueError("Manifest managed_root does not match the required output directory.")
 	if not isinstance(data.get("recordings"), dict) or not isinstance(data.get("playlists"), dict):
@@ -171,23 +235,41 @@ def _load_manifest_unlocked(paths: ManagedPaths) -> dict[str, Any]:
 		raise ValueError("Manifest albums must be an object.")
 	for recording in data["recordings"].values():
 		if isinstance(recording, dict):
+			for field in ("source_metadata", "music_binding", "managed_file", "review", "youtube", "local_preferences", "album_memberships", "playlist_memberships"):
+				if recording.get(field) is not None and not isinstance(recording[field], dict):
+					raise ValueError(f"Saved recording has invalid {field}. Existing state was kept; open Library Health to review the failure.")
+			occurrences = recording.get("source_occurrences")
+			if occurrences is not None and (not isinstance(occurrences, list) or any(not isinstance(item, dict) for item in occurrences)):
+				raise ValueError("Saved recording has invalid source occurrences. Existing state was kept; open Library Health to review the failure.")
 			recording.setdefault("album_metadata", None)
 			recording.setdefault("album_memberships", {})
+	for collection in (data["playlists"], data["albums"]):
+		for source in collection.values():
+			items = source.get("items")
+			if items is not None and (not isinstance(items, list) or any(not isinstance(item, dict) for item in items)):
+				raise ValueError("Saved source has invalid track occurrences. Existing state was kept; open Library Health to review the failure.")
+			pending = source.get("pending_update")
+			if pending is not None and not isinstance(pending, dict):
+				raise ValueError("Saved playlist has an invalid update checkpoint. Existing state was kept; open Library Health to review the failure.")
 	backfill_playlist_urls(data)
 	return data
 
 
 def load_manifest(paths: ManagedPaths) -> dict[str, Any]:
-	if not paths.manifest.exists():
-		return new_manifest(paths)
 	with _manifest_lock(paths):
-		with paths.manifest.open("r", encoding="utf-8") as handle:
-			raw = json.load(handle)
+		if not paths.manifest.exists():
+			return new_manifest(paths)
+		try:
+			with paths.manifest.open("r", encoding="utf-8") as handle:
+				raw = json.load(handle)
+		except ValueError as exc:
+			raise ValueError("Saved library state is unreadable. Existing state was kept; open Library Health to review the failure.") from exc
 		migrated, changed = _migrate_manifest(raw, paths)
+		migrated = _validate_manifest(migrated, paths)
 		if changed:
 			_backup_state(paths)
 			_save_manifest_unlocked(paths, migrated)
-		return _load_manifest_unlocked(paths)
+		return ManifestSnapshot(migrated)
 
 
 @contextlib.contextmanager
@@ -229,36 +311,51 @@ def refresh_manual_youtube_overrides(paths: ManagedPaths, manifest: dict[str, An
 def _save_manifest_unlocked(paths: ManagedPaths, manifest: dict[str, Any]) -> None:
 	paths.create()
 	manifest["updated_at"] = _now()
-	with tempfile.NamedTemporaryFile(
-		"w",
-		encoding="utf-8",
-		dir=paths.state_dir,
-		prefix="manifest-",
-		suffix=".tmp",
-		delete=False,
-	) as handle:
-		json.dump(manifest, handle, ensure_ascii=False, indent=2, sort_keys=True)
-		handle.write("\n")
-		temporary = Path(handle.name)
-	os.replace(temporary, paths.manifest)
+	temporary = None
+	try:
+		with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=paths.state_dir, prefix="manifest-", suffix=".tmp", delete=False) as handle:
+			temporary = Path(handle.name)
+			json.dump(manifest, handle, ensure_ascii=False, indent=2, sort_keys=True)
+			handle.write("\n")
+			handle.flush()
+			os.fsync(handle.fileno())
+		os.replace(temporary, paths.manifest)
+	finally:
+		if temporary:
+			temporary.unlink(missing_ok=True)
 
 
 def save_manifest(paths: ManagedPaths, manifest: dict[str, Any]) -> None:
+	"""Checkpoint a tracked delta in a short transaction, never a stale full object.
+
+	Music operations precede cache coordination and short state transactions.
+	Queue transactions never wait for Music/cache coordination, and no state
+	transaction calls Music or the network.
+	"""
 	with _manifest_lock(paths):
 		latest = _load_manifest_unlocked(paths)
+		if not isinstance(manifest, ManifestSnapshot) and paths.manifest.exists():
+			raise ValueError("Manifest checkpoint has no baseline. Load or clone a manifest, or use update_manifest.")
+		merged = _merge_changes(manifest.baseline if isinstance(manifest, ManifestSnapshot) else {}, manifest, latest)
 		overrides = dict(latest.get("manual_youtube_overrides") or {})
-		overrides.update(manifest.get("manual_youtube_overrides") or {})
-		_apply_manual_youtube_overrides(manifest, overrides)
-		_save_manifest_unlocked(paths, manifest)
+		overrides.update(merged.get("manual_youtube_overrides") or {})
+		_apply_manual_youtube_overrides(merged, overrides)
+		if merged != latest or not paths.manifest.exists():
+			_save_manifest_unlocked(paths, merged)
+		_sync_snapshot(manifest, merged)
+		if isinstance(manifest, ManifestSnapshot):
+			manifest.baseline = copy.deepcopy(dict(manifest))
 
 
 def update_manifest(paths: ManagedPaths, update: Callable[[dict[str, Any]], Any]) -> Any:
 	"""Apply one targeted mutation without replacing concurrent importer progress."""
 	with _manifest_lock(paths):
 		manifest = _load_manifest_unlocked(paths)
+		before = copy.deepcopy(dict(manifest))
 		result = update(manifest)
 		_apply_manual_youtube_overrides(manifest, manifest.get("manual_youtube_overrides") or {})
-		_save_manifest_unlocked(paths, manifest)
+		if manifest != before:
+			_save_manifest_unlocked(paths, manifest)
 		return result
 
 

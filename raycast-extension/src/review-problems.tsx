@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   cancelIncompleteJob,
   cancelSourceProgress,
-  loadJobs,
+  loadActivity,
   loadSnapshot,
   queueSource,
   resolveMusic,
@@ -608,26 +608,33 @@ export default function Command() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
   const refreshInFlight = useRef(false);
+  const refreshController = useRef<AbortController | undefined>(undefined);
 
   const refresh = useCallback(async (showLoading = true) => {
     if (refreshInFlight.current) return;
     refreshInFlight.current = true;
     if (showLoading) setLoading(true);
+    const controller = new AbortController();
+    refreshController.current = controller;
     try {
-      const [nextSnapshot, nextJobs] = await Promise.all([loadSnapshot(), loadJobs()]);
+      const activity = await loadActivity(controller.signal);
+      const nextSnapshot = activity.resolver;
+      const nextJobs = activity.jobs;
       setSnapshot((current) => (sameSnapshot(current, nextSnapshot) ? current : nextSnapshot));
       setJobs((current) => (sameSnapshot(current, nextJobs) ? current : nextJobs));
       setError(undefined);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
+      if (!controller.signal.aborted) setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       refreshInFlight.current = false;
+      if (refreshController.current === controller) refreshController.current = undefined;
       if (showLoading) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     void refresh();
+    return () => refreshController.current?.abort();
   }, [refresh]);
 
   useEffect(() => {

@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,7 +26,7 @@ from crate_music_importer.ipod_import.jobs import (
 	sync_from_manifest,
 	update_structured_progress,
 )
-from crate_music_importer.ipod_import.manifest import ManagedPaths, load_manifest, new_manifest, save_manifest, set_album, upsert_recording
+from crate_music_importer.ipod_import.manifest import ManagedPaths, load_manifest, new_manifest, save_manifest, set_album, upsert_recording, update_manifest
 from crate_music_importer.ipod_import.music_cache import build_full_cache, load_music_cache, save_music_cache, upsert_music_cache_track
 from crate_music_importer.ipod_import.resolver import resolve_youtube
 
@@ -35,6 +36,423 @@ ALBUM_URL = "https://open.spotify.com/album/48a7rOjTzpD1zzJAteeveE"
 
 
 class DurableJobTests(unittest.TestCase):
+	def test_runner_does_not_overwrite_a_newer_startup_marker(self):
+		with tempfile.TemporaryDirectory() as directory:
+			store = JobStore(Path(directory))
+			store.state_dir.mkdir(parents=True)
+
+			def slow_start(*_args, **_kwargs):
+				store.runner_path.write_text(json.dumps({"pid": 222, "status": "running"}), encoding="utf-8")
+				return SimpleNamespace(pid=111)
+
+			with patch("crate_music_importer.ipod_import.jobs._pid_running", return_value=False):
+				pid = __import__("crate_music_importer.ipod_import.jobs", fromlist=["_ensure_runner"])._ensure_runner(store, popen=slow_start)
+
+			self.assertEqual(pid, 111)
+			self.assertEqual(store.runner()["pid"], 222)
+
+	def test_dead_startup_owner_is_recovered_on_poll_without_launching_work(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			store = JobStore(root)
+			store.state_dir.mkdir(parents=True)
+			store.runner_path.write_text(json.dumps({
+				"pid": None, "status": "starting", "startupToken": "dead-token", "starterPid": 123456,
+			}), encoding="utf-8")
+			queued = {"jobId": "queued", "status": "queued", "phase": "queued", "source": {"type": "album", "id": "album"}}
+			store.save(queued)
+			with patch("crate_music_importer.ipod_import.jobs._pid_running", return_value=False), patch(
+				"crate_music_importer.ipod_import.jobs._ensure_runner",
+				side_effect=AssertionError("polling must not start imports"),
+			):
+				snapshot = jobs_snapshot(root=root, manifest={})
+			row = snapshot["jobs"][0]
+			self.assertEqual(row["status"], "failed")
+			self.assertTrue(row["retryable"])
+			self.assertIn("during startup", row["errorSummary"])
+			self.assertFalse(store.runner_path.exists())
+
+	def test_enqueue_runner_pid_checkpoint_preserves_progress_written_during_spawn(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			store = JobStore(root)
+			def spawn(*_args, **_kwargs):
+				job = store.list()[0]
+				job["phase"] = "worker_started"
+				job["trackProgress"] = {"recording-1": "downloaded"}
+				store.save(job)
+				return SimpleNamespace(pid=987654)
+
+			queued = enqueue("album_combined", ALBUM_URL, root=root, popen=spawn)
+
+		self.assertEqual(queued["phase"], "worker_started")
+		self.assertEqual(queued["trackProgress"], {"recording-1": "downloaded"})
+		self.assertEqual(queued["runnerPid"], 987654)
+
+	def test_crashed_cancellation_reservation_becomes_actionable_failed_history(self):
+		with tempfile.TemporaryDirectory() as directory:
+			store = JobStore(Path(directory))
+			store.save({
+				"jobId": "canceling",
+				"status": "cancelling",
+				"phase": "cancelling",
+				"cancellationOwnerPid": 123456,
+				"source": {"type": "album", "id": "source"},
+			})
+			with patch("crate_music_importer.ipod_import.jobs._pid_running", return_value=False):
+				recover_interrupted(store)
+
+			recovered = store.load("canceling")
+			self.assertEqual(recovered["status"], "failed")
+			self.assertFalse(recovered["retryable"])
+			self.assertIn("Review this source", recovered["errorSummary"])
+			self.assertTrue(recovered["notification"]["pending"])
+
+	def test_activity_poll_recovers_dead_workers_from_its_single_job_snapshot(self):
+		with tempfile.TemporaryDirectory() as directory:
+			store = JobStore(Path(directory))
+			store.save({
+				"jobId": "dead-running", "status": "running", "pid": 123456,
+				"source": {"type": "album", "id": "album-a"}, "notification": {"pending": False},
+			})
+			store.save({
+				"jobId": "dead-cancelling", "status": "cancelling", "cancellationOwnerPid": 123457,
+				"source": {"type": "album", "id": "album-b"}, "cancellationCleanup": {"rec": {"fileDeleteStartedAt": "checkpoint"}},
+				"notification": {"pending": False},
+			})
+			original_list = JobStore.list
+			with patch("crate_music_importer.ipod_import.jobs._pid_running", return_value=False), patch.object(
+				JobStore, "list", autospec=True, side_effect=lambda instance: original_list(instance)
+			) as listing:
+				snapshot = jobs_snapshot(root=store.root, manifest={})
+			self.assertEqual(listing.call_count, 1)
+			rows = {job["jobId"]: job for job in snapshot["jobs"]}
+			self.assertEqual(rows["dead-running"]["status"], "failed")
+			self.assertTrue(rows["dead-running"]["retryable"])
+			self.assertEqual(rows["dead-cancelling"]["status"], "failed")
+			self.assertFalse(rows["dead-cancelling"]["retryable"])
+			self.assertEqual(store.load("dead-cancelling")["cancellationCleanup"], {"rec": {"fileDeleteStartedAt": "checkpoint"}})
+
+	def test_enqueue_between_final_empty_check_and_runner_release_is_not_stranded(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			store = JobStore(root)
+			store.state_dir.mkdir(parents=True)
+			store.runner_path.write_text(json.dumps({"pid": os.getpid(), "status": "running"}), encoding="utf-8")
+			observed_empty = threading.Event()
+			continue_runner = threading.Event()
+			original_list = JobStore.list
+			worker_thread = threading.current_thread()
+			calls = {"count": 0, "done": False}
+
+			def gated_list(instance):
+				jobs = original_list(instance)
+				if instance.root == root and threading.current_thread() is not worker_thread:
+					calls["count"] += 1
+				if instance.root == root and threading.current_thread() is not worker_thread and calls["count"] >= 2 and not calls["done"] and not any(job.get("status") == "queued" for job in jobs):
+					calls["done"] = True
+					observed_empty.set()
+					continue_runner.wait(timeout=5)
+				return jobs
+
+			with patch.object(JobStore, "list", gated_list):
+				worker = threading.Thread(target=lambda: run_queue(root=root, engine=lambda _command: 0, notifier=lambda _job_id: None))
+				worker.start()
+				self.assertTrue(observed_empty.wait(timeout=5))
+				results = []
+				launched_workers = []
+				def launch(*_args, **_kwargs):
+					next_worker = threading.Thread(target=lambda: run_queue(root=root, engine=lambda _command: 0, notifier=lambda _job_id: None))
+					launched_workers.append(next_worker)
+					next_worker.start()
+					return SimpleNamespace(pid=os.getpid())
+				launcher = threading.Thread(target=lambda: results.append(enqueue("album_combined", ALBUM_URL, root=root, popen=launch)))
+				launcher.start()
+				continue_runner.set()
+				worker.join(timeout=5)
+				launcher.join(timeout=5)
+				for next_worker in launched_workers:
+					next_worker.join(timeout=5)
+
+			self.assertFalse(worker.is_alive())
+			self.assertFalse(launcher.is_alive())
+			job = results[0]
+			self.assertEqual(JobStore(root).load(job["jobId"])["status"], "complete")
+			self.assertFalse(JobStore(root).runner_path.exists())
+
+	def test_cancel_rechecks_completion_before_removing_progress(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			store = JobStore(root)
+			job = enqueue("playlist_update_combined", PLAYLIST_URL, root=root, popen=lambda *_args, **_kwargs: SimpleNamespace(pid=os.getpid()), seed={"savedPlaylistId": "saved-id"})
+			job.update(status="running", pid=os.getpid())
+			store.save(job)
+
+			def mark_complete(_pid):
+				current = store.load(job["jobId"])
+				current.update(status="complete", phase="complete", pid=None)
+				store.save(current)
+
+			with patch("crate_music_importer.ipod_import.jobs._pid_running", side_effect=[True, False, False]):
+				with self.assertRaisesRegex(ValueError, "completed import"):
+					cancel_incomplete(job["jobId"], root=root, terminate=mark_complete)
+
+			self.assertEqual(store.load(job["jobId"])["status"], "complete")
+
+	def test_phase_only_progress_is_durable_even_without_manifest_source(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			store = JobStore(root)
+			job = enqueue("album_combined", ALBUM_URL, root=root, popen=lambda *_args, **_kwargs: SimpleNamespace(pid=os.getpid()))
+			job["status"] = "running"
+			store.save(job)
+			update_structured_progress(job, store, {"phase": "loading_music_cache"})
+
+			self.assertEqual(store.load(job["jobId"])["phase"], "loading_music_cache")
+
+	def test_acknowledgement_updates_notification_without_replacing_concurrent_job_fields(self):
+		with tempfile.TemporaryDirectory() as directory:
+			store = JobStore(Path(directory))
+			store.save({"jobId": "fixture", "status": "complete", "notification": {"pending": True, "notifiedAt": None}})
+			locked = threading.Event()
+			release = threading.Event()
+
+			def concurrent_writer():
+				with store.transaction_lock():
+					current = store.load("fixture")
+					current["phase"] = "newer-phase"
+					locked.set()
+					release.wait(timeout=5)
+					store.save(current)
+
+			writer = threading.Thread(target=concurrent_writer)
+			writer.start()
+			self.assertTrue(locked.wait(timeout=5))
+			acknowledger = threading.Thread(target=lambda: acknowledge_notification("fixture", root=store.root))
+			acknowledger.start()
+			release.set()
+			writer.join(timeout=5)
+			acknowledger.join(timeout=5)
+
+			self.assertEqual(store.load("fixture")["phase"], "newer-phase")
+			self.assertFalse(store.load("fixture")["notification"]["pending"])
+
+	def test_concurrent_retries_create_only_one_active_attempt(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			original = enqueue("album_combined", ALBUM_URL, root=root, popen=lambda *_args, **_kwargs: SimpleNamespace(pid=os.getpid()))
+			original.update(status="failed", retryable=True)
+			JobStore(root).save(original)
+			results = []
+			start = threading.Barrier(3)
+
+			def retry():
+				start.wait(timeout=5)
+				try:
+					results.append(retry_job(original["jobId"], root=root, popen=lambda *_args, **_kwargs: SimpleNamespace(pid=os.getpid())))
+				except ValueError:
+					results.append(None)
+
+			threads = [threading.Thread(target=retry) for _ in range(2)]
+			for thread in threads:
+				thread.start()
+			start.wait(timeout=5)
+			for thread in threads:
+				thread.join(timeout=5)
+
+			self.assertEqual(sum(result is not None for result in results), 1)
+			self.assertEqual(sum(job["status"] == "queued" for job in JobStore(root).list()), 1)
+
+	def test_malformed_job_file_is_visible_without_hiding_valid_history(self):
+		with tempfile.TemporaryDirectory() as directory:
+			store = JobStore(Path(directory))
+			store.save({"jobId": "valid", "createdAt": "2", "status": "complete"})
+			store.jobs_dir.mkdir(parents=True, exist_ok=True)
+			malformed = store.jobs_dir / "malformed.json"
+			malformed.write_text("{", encoding="utf-8")
+
+			jobs = store.list()
+			self.assertEqual({job["jobId"] for job in jobs}, {"valid", "malformed"})
+			placeholder = next(job for job in jobs if job["jobId"] == "malformed")
+			self.assertEqual(placeholder["status"], "failed")
+			self.assertIn("invalid JSON", placeholder["errorSummary"])
+			self.assertEqual(malformed.read_text(encoding="utf-8"), "{")
+
+	def test_job_ids_and_embedded_ids_cannot_escape_or_mismatch_job_files(self):
+		with tempfile.TemporaryDirectory() as directory:
+			store = JobStore(Path(directory))
+			for job_id in ("../outside", "subdir/job", "\\outside", ".", ".."):
+				with self.subTest(job_id=job_id), self.assertRaises(ValueError):
+					store.job_path(job_id)
+			store.jobs_dir.mkdir(parents=True)
+			path = store.jobs_dir / "filename.json"
+			original = b'{"jobId":"different-name","status":"running","source":{"type":"album","id":"a"}}\n'
+			path.write_bytes(original)
+			traversal = store.jobs_dir / "traversal.json"
+			traversal_original = b'{"jobId":"../outside","status":"running","source":{"type":"album","id":"a"}}\n'
+			traversal.write_bytes(traversal_original)
+			jobs = {job["jobId"]: job for job in store.list()}
+			job = jobs["filename"]
+			self.assertEqual(job["jobId"], "filename")
+			self.assertTrue(job["malformedRecord"])
+			self.assertIn("invalid job ID", job["errorSummary"])
+			self.assertEqual(path.read_bytes(), original)
+			self.assertEqual(jobs["traversal"]["status"], "failed")
+			self.assertEqual(traversal.read_bytes(), traversal_original)
+			self.assertFalse((store.jobs_dir.parent / "outside.json").exists())
+
+	def test_malformed_staging_recording_id_cannot_delete_outside_staging(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			paths = ManagedPaths(root)
+			manifest = new_manifest(paths)
+			job = enqueue("album_combined", ALBUM_URL, root=root, popen=lambda *_args, **_kwargs: SimpleNamespace(pid=os.getpid()))
+			manifest["recordings"]["../escape"] = {"id": "../escape"}
+			set_album(manifest, {
+				"id": "48a7rOjTzpD1zzJAteeveE", "name": "Album", "url": ALBUM_URL,
+				"tracks": [], "complete": True, "total_count": 1,
+			}, [{"position": 1, "recording_id": "../escape", "status": "downloaded"}])
+			save_manifest(paths, manifest)
+			outside = root / "escape"
+			outside.mkdir()
+			(outside / "sentinel").write_text("keep", encoding="utf-8")
+			job.update(status="failed", phase="failed")
+			JobStore(root).save(job)
+			with self.assertRaisesRegex(ValueError, "outside the managed staging directory"):
+				cancel_incomplete(job["jobId"], root=root)
+			self.assertEqual((outside / "sentinel").read_text(encoding="utf-8"), "keep")
+
+	def test_malformed_job_object_is_visible_without_rewriting_original(self):
+		with tempfile.TemporaryDirectory() as directory:
+			store = JobStore(Path(directory))
+			store.jobs_dir.mkdir(parents=True)
+			path = store.job_path("malformed")
+			original = b'{"jobId":"malformed","status":"running","source":[],"pid":"bad"}\n'
+			path.write_bytes(original)
+
+			job = store.list()[0]
+			self.assertEqual(job["status"], "failed")
+			self.assertEqual(job["source"], {})
+			self.assertIn("original record was preserved", job["errorSummary"])
+			self.assertEqual(jobs_snapshot(root=store.root, manifest={})["jobs"][0]["status"], "failed")
+			self.assertEqual(path.read_bytes(), original)
+
+	def test_malformed_active_job_fields_become_read_only_attention_placeholders(self):
+		with tempfile.TemporaryDirectory() as directory:
+			store = JobStore(Path(directory))
+			store.jobs_dir.mkdir(parents=True)
+			invalid_values = {
+				"status-list": {"status": ["running"]},
+				"source-type-list": {"status": "running", "source": {"type": [], "id": "album"}},
+				"source-id-list": {"status": "running", "source": {"type": "album", "id": []}},
+				"pid-string": {"status": "running", "source": {"type": "album", "id": "album"}, "pid": "123"},
+				"pid-negative": {"status": "running", "source": {"type": "album", "id": "album"}, "pid": -1},
+				"notification-list": {"status": "queued", "source": {"type": "album", "id": "album"}, "notification": []},
+				"counts-list": {"status": "running", "source": {"type": "album", "id": "album"}, "counts": []},
+				"tracks-object": {"status": "running", "source": {"type": "album", "id": "album"}, "tracks": {}},
+			}
+			originals = {}
+			for job_id, fields in invalid_values.items():
+				payload = {"jobId": job_id, **fields}
+				originals[job_id] = json.dumps(payload).encode("utf-8")
+				store.job_path(job_id).write_bytes(originals[job_id])
+
+			with patch("crate_music_importer.ipod_import.jobs.load_manifest", return_value={}):
+				snapshot = jobs_snapshot(root=store.root)
+			self.assertEqual({job["jobId"] for job in snapshot["jobs"]}, set(invalid_values))
+			self.assertTrue(all(job["status"] == "failed" and "original record was preserved" in job["errorSummary"] for job in snapshot["jobs"]))
+			for job_id, original in originals.items():
+				self.assertEqual(store.job_path(job_id).read_bytes(), original)
+
+	def test_jobs_snapshot_uses_one_manifest_snapshot_for_many_attention_rows(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			store = JobStore(root)
+			manifest = new_manifest(ManagedPaths(root))
+			for index in range(100):
+				store.save({
+					"jobId": f"attention-{index}",
+					"createdAt": f"{index:03d}",
+					"source": {"type": "album", "id": "same-album", "name": "Album"},
+					"status": "needs_attention",
+					"counts": {"total": 1, "complete": 0, "review": 1, "failed": 0},
+					"tracks": [],
+					"notification": {"pending": False},
+				})
+
+			with patch("crate_music_importer.ipod_import.jobs.load_manifest", return_value=manifest) as load:
+				snapshot = jobs_snapshot(root=root)
+
+			self.assertEqual(load.call_count, 1)
+			self.assertEqual(len(snapshot["jobs"]), 1)
+			self.assertEqual(snapshot["jobs"][0]["jobId"], "attention-99")
+			self.assertEqual(len(store.list()), 100)
+
+	def test_large_snapshot_fixture_reads_one_manifest_and_one_job_list(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			paths = ManagedPaths(root)
+			manifest = new_manifest(paths)
+			recording_ids = []
+			for index in range(500):
+				key, _recording = upsert_recording(manifest, {
+					"title": f"Fixture Track {index}",
+					"artists": "Fixture Artist",
+					"duration_ms": 180000,
+				})
+				recording_ids.append(key)
+			store = JobStore(root)
+			for index in range(100):
+				source_id = f"fixture-album-{index}"
+				manifest["albums"][source_id] = {
+					"name": f"Fixture Album {index}",
+					"items": [{"position": 0, "recording_id": recording_ids[index], "status": "review"}],
+				}
+				store.save({
+					"jobId": f"fixture-job-{index}",
+					"createdAt": f"{index:03}",
+					"source": {"type": "album", "id": source_id, "name": f"Fixture Album {index}"},
+					"action": "album_combined",
+					"status": "needs_attention",
+					"phase": "needs_attention",
+					"counts": {"total": 1, "complete": 0, "review": 1, "failed": 0},
+					"tracks": [],
+					"notification": {"pending": False},
+				})
+			save_manifest(paths, manifest)
+
+			original_list = JobStore.list
+			with patch("crate_music_importer.ipod_import.jobs.load_manifest", wraps=load_manifest) as load, patch.object(
+				JobStore, "list", autospec=True, side_effect=lambda instance: original_list(instance)
+			) as listing:
+				snapshot = jobs_snapshot(root=root)
+
+			self.assertEqual(load.call_count, 1)
+			self.assertEqual(listing.call_count, 1)
+			self.assertEqual(len(snapshot["jobs"]), 100)
+			self.assertEqual(len(original_list(store)), 100)
+
+	def test_jobs_snapshot_reuses_supplied_reconciled_jobs(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			jobs = [{"jobId": "fixture", "status": "complete", "notification": {"pending": False}}]
+			with patch("crate_music_importer.ipod_import.jobs.reconcile_terminal_jobs", side_effect=AssertionError("must reuse supplied jobs")):
+				snapshot = jobs_snapshot(root=root, manifest={}, jobs=jobs)
+
+		self.assertEqual([job["jobId"] for job in snapshot["jobs"]], ["fixture"])
+
+	def test_job_atomic_write_failure_keeps_previous_record_and_cleans_temporary_file(self):
+		with tempfile.TemporaryDirectory() as directory:
+			store = JobStore(Path(directory))
+			store.save({"jobId": "fixture", "status": "queued"})
+			before = store.job_path("fixture").read_bytes()
+			with patch("crate_music_importer.ipod_import.jobs.json.dump", side_effect=OSError("simulated disk failure")):
+				with self.assertRaisesRegex(OSError, "simulated disk failure"):
+					store.save({"jobId": "fixture", "status": "complete"})
+
+			self.assertEqual(store.job_path("fixture").read_bytes(), before)
+			self.assertEqual(list(store.jobs_dir.glob("*.tmp")), [])
+
 	def test_completed_track_checkpoint_survives_later_progress_and_polling(self):
 		with tempfile.TemporaryDirectory() as directory:
 			root = Path(directory)
@@ -100,6 +518,14 @@ class DurableJobTests(unittest.TestCase):
 		lock = patch("crate_music_importer.ipod_import.dependency_lock.dependency_lock", return_value=contextlib.nullcontext())
 		lock.start()
 		self.addCleanup(lock.stop)
+		music_locks = [
+			patch("crate_music_importer.ipod_import.music_lock.music_operation_lock", return_value=contextlib.nullcontext()),
+			patch("crate_music_importer.ipod_import.jobs.music_operation_lock", return_value=contextlib.nullcontext()),
+			patch("crate_music_importer.ipod_import.music_cache.music_operation_lock", return_value=contextlib.nullcontext()),
+		]
+		for music_lock in music_locks:
+			music_lock.start()
+			self.addCleanup(music_lock.stop)
 
 	def test_enqueue_snapshots_preexisting_manifest_bindings_without_using_cache_as_truth(self):
 		with tempfile.TemporaryDirectory() as directory:
@@ -284,6 +710,21 @@ class DurableJobTests(unittest.TestCase):
 			self.assertEqual(launches, [])
 			self.assertEqual(store.runner()["status"], "starting")
 
+	def test_fresh_startup_marker_with_dead_owner_is_replaced_immediately(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			store = JobStore(root)
+			store.state_dir.mkdir(parents=True)
+			store.runner_path.write_text(json.dumps({
+				"pid": None, "status": "starting", "startupToken": "abandoned", "starterPid": 123456,
+			}), encoding="utf-8")
+			with patch("crate_music_importer.ipod_import.jobs._pid_running", return_value=False):
+				pid = __import__("crate_music_importer.ipod_import.jobs", fromlist=["_ensure_runner"])._ensure_runner(
+					store, popen=lambda *_args, **_kwargs: SimpleNamespace(pid=987654),
+				)
+			self.assertEqual(pid, 987654)
+			self.assertEqual(store.runner()["pid"], 987654)
+
 	def test_mutation_lock_prevents_a_second_worker(self):
 		with tempfile.TemporaryDirectory() as directory:
 			root = Path(directory)
@@ -405,12 +846,19 @@ class DurableJobTests(unittest.TestCase):
 			job["phase"] = "failed"
 			JobStore(root).save(job)
 			deleted = []
+			music = [{"persistent_id": "PID-NEW", "location": str(managed)}]
+			def exact_lookup(persistent_id):
+				return next((track for track in music if track["persistent_id"] == persistent_id), None)
+			def delete_track(persistent_id, managed_path):
+				deleted.append((persistent_id, str(managed_path)))
+				music[:] = [track for track in music if track["persistent_id"] != persistent_id]
+				return True
 
 			result = cancel_incomplete(
 				job["jobId"],
 				root=root,
-				delete_music=lambda persistent_id, managed_path: deleted.append((persistent_id, str(managed_path))) or True,
-				exact_lookup=lambda _persistent_id: {"persistent_id": "PID-NEW", "location": str(managed)},
+				delete_music=delete_track,
+				exact_lookup=exact_lookup,
 			)
 
 			self.assertEqual(deleted, [("PID-NEW", str(managed.resolve()))])
@@ -419,6 +867,172 @@ class DurableJobTests(unittest.TestCase):
 			self.assertFalse(managed.exists())
 			self.assertNotIn(key, load_manifest(paths)["recordings"])
 			self.assertEqual(set(load_music_cache(paths)["tracks"]), {"PID-BEFORE"})
+
+	def test_cancel_retry_recovers_file_unlink_before_checkpoint(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			paths = ManagedPaths(root)
+			manifest = new_manifest(paths)
+			job = enqueue("album_combined", ALBUM_URL, root=root, popen=lambda *_args, **_kwargs: SimpleNamespace(pid=os.getpid()))
+			key, recording = upsert_recording(manifest, {
+				"title": "Interrupted Delete", "artists": "Artist", "album": "Album",
+				"album_id": "48a7rOjTzpD1zzJAteeveE", "duration_ms": 180000,
+			}, source_type="album")
+			managed = root / f"tracks/{key}.mp3"
+			managed.parent.mkdir(parents=True)
+			managed.write_bytes(b"verified cancellation audio")
+			recording["managed_file"] = {
+				"relative_path": f"tracks/{key}.mp3", "managed_by_crate": True,
+				"sha256": hashlib.sha256(managed.read_bytes()).hexdigest(),
+			}
+			set_album(manifest, {
+				"id": "48a7rOjTzpD1zzJAteeveE", "name": "Album", "url": ALBUM_URL,
+				"tracks": [], "complete": True, "total_count": 1,
+			}, [{"position": 1, "recording_id": key, "status": "downloaded"}])
+			save_manifest(paths, manifest)
+			job.update(status="failed", phase="failed")
+			JobStore(root).save(job)
+			delete_file = __import__("crate_music_importer.ipod_import.jobs", fromlist=["_delete_managed_file"])._delete_managed_file
+			def crash_after_unlink(*args):
+				result = delete_file(*args)
+				raise RuntimeError("simulated crash after unlink")
+
+			with patch("crate_music_importer.ipod_import.jobs._delete_managed_file", side_effect=crash_after_unlink), self.assertRaisesRegex(RuntimeError, "after unlink"):
+				cancel_incomplete(job["jobId"], root=root)
+
+			self.assertFalse(managed.exists())
+			self.assertIn(key, load_manifest(paths)["recordings"])
+			recovered = cancel_incomplete(job["jobId"], root=root)
+			self.assertEqual(recovered["removedRecordings"], 1)
+			self.assertNotIn(key, load_manifest(paths)["recordings"])
+
+	def test_cancel_retry_recovers_music_delete_before_file_unlink(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			paths = ManagedPaths(root)
+			manifest = new_manifest(paths)
+			job = enqueue("album_combined", ALBUM_URL, root=root, popen=lambda *_args, **_kwargs: SimpleNamespace(pid=os.getpid()))
+			key, recording = upsert_recording(manifest, {
+				"title": "Interrupted Music Delete", "artists": "Artist", "album": "Album",
+				"album_id": "48a7rOjTzpD1zzJAteeveE", "duration_ms": 180000,
+			}, source_type="album")
+			managed = root / f"tracks/{key}.mp3"
+			managed.parent.mkdir(parents=True)
+			managed.write_bytes(b"verified cancellation audio")
+			recording["managed_file"] = {
+				"relative_path": f"tracks/{key}.mp3", "managed_by_crate": True,
+				"sha256": hashlib.sha256(managed.read_bytes()).hexdigest(),
+			}
+			recording["music_binding"] = {"persistent_id": "PID-CANCEL"}
+			set_album(manifest, {
+				"id": "48a7rOjTzpD1zzJAteeveE", "name": "Album", "url": ALBUM_URL,
+				"tracks": [], "complete": True, "total_count": 1,
+			}, [{"position": 1, "recording_id": key, "status": "managed_ready"}])
+			save_manifest(paths, manifest)
+			job.update(status="failed", phase="failed")
+			JobStore(root).save(job)
+			music = {"persistent_id": "PID-CANCEL", "location": str(managed.resolve())}
+			delete_calls = []
+			def delete_music(pid, _path):
+				delete_calls.append(pid)
+				music.clear()
+				raise RuntimeError("simulated crash after Music deletion")
+			def exact_lookup(pid):
+				return music if music.get("persistent_id") == pid else None
+
+			with self.assertRaisesRegex(RuntimeError, "after Music deletion"):
+				cancel_incomplete(job["jobId"], root=root, delete_music=delete_music, exact_lookup=exact_lookup)
+			self.assertTrue(managed.exists())
+
+			with patch("crate_music_importer.ipod_import.jobs.remove_music_cache_tracks", return_value=1):
+				result = cancel_incomplete(
+					job["jobId"], root=root,
+					delete_music=lambda *_args: self.fail("Music deletion must not be repeated"),
+					exact_lookup=exact_lookup,
+				)
+			self.assertEqual(delete_calls, ["PID-CANCEL"])
+			self.assertEqual(result["removedMusicTracks"], 1)
+			self.assertFalse(managed.exists())
+			self.assertNotIn(key, load_manifest(paths)["recordings"])
+
+	def test_cancel_rechecks_references_before_deleting_shared_recording(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			paths = ManagedPaths(root)
+			manifest = new_manifest(paths)
+			job = enqueue("album_combined", ALBUM_URL, root=root, popen=lambda *_args, **_kwargs: SimpleNamespace(pid=os.getpid()))
+			key, recording = upsert_recording(manifest, {
+				"title": "Shared Track", "artists": "Artist", "album": "Album",
+				"album_id": "48a7rOjTzpD1zzJAteeveE", "duration_ms": 180000,
+			}, source_type="album")
+			managed = root / f"tracks/{key}.mp3"
+			managed.parent.mkdir(parents=True)
+			managed.write_bytes(b"verified cancellation audio")
+			recording["managed_file"] = {
+				"relative_path": f"tracks/{key}.mp3", "managed_by_crate": True,
+				"sha256": hashlib.sha256(managed.read_bytes()).hexdigest(),
+			}
+			set_album(manifest, {
+				"id": "48a7rOjTzpD1zzJAteeveE", "name": "Album", "url": ALBUM_URL,
+				"tracks": [], "complete": True, "total_count": 1,
+			}, [{"position": 1, "recording_id": key, "status": "downloaded"}])
+			save_manifest(paths, manifest)
+			job.update(status="failed", phase="failed")
+			JobStore(root).save(job)
+			original_load = load_manifest
+			calls = {"count": 0}
+			def add_new_reference(managed_paths):
+				calls["count"] += 1
+				if calls["count"] == 2:
+					def add_reference(latest):
+						latest["recordings"][key].setdefault("playlist_memberships", {})["new-source"] = [1]
+					update_manifest(paths, add_reference)
+				return original_load(managed_paths)
+
+			with patch("crate_music_importer.ipod_import.jobs.load_manifest", side_effect=add_new_reference):
+				result = cancel_incomplete(
+					job["jobId"], root=root,
+					delete_music=lambda *_args: self.fail("shared Music must remain"),
+					exact_lookup=lambda _pid: self.fail("shared Music must remain"),
+				)
+			self.assertEqual(result["removedRecordings"], 0)
+			self.assertTrue(managed.exists())
+			self.assertNotIn("48a7rOjTzpD1zzJAteeveE", load_manifest(paths)["albums"])
+			self.assertEqual(load_manifest(paths)["recordings"][key]["playlist_memberships"], {"new-source": [1]})
+
+	def test_cancel_preserves_other_collection_membership_with_same_source_id(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			paths = ManagedPaths(root)
+			manifest = new_manifest(paths)
+			job = enqueue("album_combined", ALBUM_URL, root=root, popen=lambda *_args, **_kwargs: SimpleNamespace(pid=os.getpid()))
+			key, recording = upsert_recording(manifest, {
+				"title": "Shared Track", "artists": "Artist", "album": "Album",
+				"album_id": "48a7rOjTzpD1zzJAteeveE", "duration_ms": 180000,
+			}, source_type="album")
+			managed = root / f"tracks/{key}.mp3"
+			managed.parent.mkdir(parents=True)
+			managed.write_bytes(b"verified cancellation audio")
+			recording["managed_file"] = {
+				"relative_path": f"tracks/{key}.mp3", "managed_by_crate": True,
+				"sha256": hashlib.sha256(managed.read_bytes()).hexdigest(),
+			}
+			set_album(manifest, {
+				"id": "48a7rOjTzpD1zzJAteeveE", "name": "Album", "url": ALBUM_URL,
+				"tracks": [], "complete": True, "total_count": 1,
+			}, [{"position": 1, "recording_id": key, "status": "downloaded"}])
+			recording["playlist_memberships"] = {"48a7rOjTzpD1zzJAteeveE": [1]}
+			save_manifest(paths, manifest)
+			job.update(status="failed", phase="failed")
+			JobStore(root).save(job)
+			result = cancel_incomplete(
+				job["jobId"], root=root,
+				delete_music=lambda *_args: self.fail("shared Music must remain"),
+				exact_lookup=lambda _pid: self.fail("shared Music must remain"),
+			)
+			self.assertEqual(result["removedRecordings"], 0)
+			self.assertTrue(managed.exists())
+			self.assertIn("48a7rOjTzpD1zzJAteeveE", load_manifest(paths)["recordings"][key]["playlist_memberships"])
 
 	def test_cancelling_keeps_bindings_that_existed_before_the_attempt(self):
 		with tempfile.TemporaryDirectory() as directory:

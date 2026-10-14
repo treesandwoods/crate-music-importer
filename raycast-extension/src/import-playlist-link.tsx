@@ -13,7 +13,7 @@ import {
 } from "@raycast/api";
 import { join } from "node:path";
 import { squarePlaylistArtwork } from "./playlist-artwork";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   changePlaylistLink,
@@ -67,7 +67,7 @@ export function NewPlaylistForm() {
         error={error}
         autoFocus
       />
-      <Form.Description text="Preview loads Spotify metadata and checks the local Music cache. YouTube matching and downloading begin only after a second confirmation." />
+      <Form.Description text="Preview checks Spotify metadata and the local Music cache." />
     </Form>
   );
 }
@@ -75,9 +75,11 @@ export function NewPlaylistForm() {
 function ChangePlaylistLinkForm({ playlist, onChanged }: { playlist: SavedPlaylistSummary; onChanged: () => void }) {
   const [url, setUrl] = useState(playlist.spotify_url);
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const valid = PLAYLIST_URL.test(url.trim());
   async function save() {
-    if (!valid) return;
+    if (!valid || savingRef.current) return;
+    savingRef.current = true;
     setSaving(true);
     try {
       await changePlaylistLink(playlist.id, url.trim());
@@ -90,6 +92,7 @@ function ChangePlaylistLinkForm({ playlist, onChanged }: { playlist: SavedPlayli
         error instanceof Error ? error.message : String(error),
       );
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   }
@@ -125,48 +128,67 @@ export function PlaylistUpdatePreviewView({
   const [preview, setPreview] = useState<PlaylistUpdatePreview>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
+  const previewRequest = useRef(0);
+  const previewController = useRef<AbortController | undefined>(undefined);
+  const queueInFlight = useRef(false);
   const load = useCallback(async () => {
+    const request = ++previewRequest.current;
+    previewController.current?.abort();
+    const controller = new AbortController();
+    previewController.current = controller;
     setLoading(true);
     try {
-      const next = await previewPlaylistUpdate(playlist.id);
+      const next = await previewPlaylistUpdate(playlist.id, controller.signal);
+      if (request !== previewRequest.current) return;
       setPreview(next);
       if (next.source.cover_url && next.source.cover_url !== playlist.cover_url) onArtworkChanged?.();
       setError(undefined);
     } catch (caught) {
+      if (request !== previewRequest.current) return;
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
-      setLoading(false);
+      if (request === previewRequest.current) {
+        setLoading(false);
+        if (previewController.current === controller) previewController.current = undefined;
+      }
     }
   }, [playlist.id, playlist.cover_url, onArtworkChanged]);
-  useEffect(() => void load(), [load]);
+  useEffect(() => {
+    void load();
+    return () => {
+      previewRequest.current += 1;
+      previewController.current?.abort();
+    };
+  }, [load]);
 
   async function queue() {
-    if (!preview || preview.blocked || preview.up_to_date) return;
-    const confirmed = await confirmAlert({
-      title: `Update “${playlist.name}”?`,
-      message: playlistUpdateConfirmation(preview),
-      primaryAction: {
-        title: preview.removals.some((row) => row.action === "delete")
-          ? "Confirm Update and Permanent Deletions"
-          : "Confirm Update",
-        style: preview.removals.some((row) => row.action === "delete")
-          ? Alert.ActionStyle.Destructive
-          : Alert.ActionStyle.Default,
-      },
-      dismissAction: { title: "Cancel", style: Alert.ActionStyle.Cancel },
-    });
-    if (!confirmed) return;
-    const toast = await showCompactToast(Toast.Style.Animated, "Queueing playlist update");
+    if (queueInFlight.current || !preview || preview.blocked || preview.up_to_date) return;
+    queueInFlight.current = true;
+    let toast: Awaited<ReturnType<typeof showCompactToast>> | undefined;
     try {
+      const confirmed = await confirmAlert({
+        title: `Update “${playlist.name}”?`,
+        message: playlistUpdateConfirmation(preview),
+        primaryAction: {
+          title: preview.removals.some((row) => row.action === "delete")
+            ? "Confirm Update and Permanent Deletions"
+            : "Confirm Update",
+          style: preview.removals.some((row) => row.action === "delete")
+            ? Alert.ActionStyle.Destructive
+            : Alert.ActionStyle.Default,
+        },
+        dismissAction: { title: "Cancel", style: Alert.ActionStyle.Cancel },
+      });
+      if (!confirmed) return;
+      toast = await showCompactToast(Toast.Style.Animated, "Queueing playlist update");
       const job = await queuePlaylistUpdate(playlist, preview);
       updateCompactToast(toast, Toast.Style.Success, "Playlist update queued", `${job.source.total} changes`);
     } catch (caught) {
-      updateCompactToast(
-        toast,
-        Toast.Style.Failure,
-        "Could not queue update",
-        caught instanceof Error ? caught.message : String(caught),
-      );
+      const message = caught instanceof Error ? caught.message : String(caught);
+      if (toast) updateCompactToast(toast, Toast.Style.Failure, "Could not queue update", message);
+      else await showCompactToast(Toast.Style.Failure, "Could not queue update", message);
+    } finally {
+      queueInFlight.current = false;
     }
   }
 
@@ -319,47 +341,128 @@ export default function Command() {
   const [playlists, setPlaylists] = useState<SavedPlaylistSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
+  const currentPlaylists = useRef<SavedPlaylistSummary[]>([]);
+  const loadRevision = useRef(0);
+  const loadController = useRef<AbortController | undefined>(undefined);
+  const artworkRefreshRequests = useRef<Record<string, number>>({});
+
+  const cacheArtwork = useCallback(async (rows: SavedPlaylistSummary[]) => {
+    const unique = new Map<string, SavedPlaylistSummary>();
+    for (const playlist of rows) {
+      if (playlist.cover_url) unique.set(playlist.cover_url, playlist);
+    }
+    await Promise.all(
+      [...unique.values()].map(async (playlist) => {
+        try {
+          const path = await squarePlaylistArtwork(
+            playlist.cover_url!,
+            join(environment.supportPath, "playlist-artwork-v1"),
+          );
+          const stillCurrent = currentPlaylists.current.some(
+            (row) =>
+              row.id === playlist.id &&
+              row.spotify_url === playlist.spotify_url &&
+              row.cover_url === playlist.cover_url,
+          );
+          if (stillCurrent) setArtwork((current) => ({ ...current, [playlist.cover_url!]: path }));
+        } catch (caught) {
+          console.error("Could not crop playlist artwork", caught);
+        }
+      }),
+    );
+  }, []);
+
   const load = useCallback(async () => {
+    const revision = ++loadRevision.current;
+    loadController.current?.abort();
+    const controller = new AbortController();
+    loadController.current = controller;
     setLoading(true);
     try {
-      const saved = await loadSavedPlaylists();
+      const saved = await loadSavedPlaylists(true, controller.signal);
+      if (revision !== loadRevision.current) return;
+      currentPlaylists.current = saved;
       setPlaylists(saved);
-      await Promise.all(
-        saved.map(async (playlist) => {
-          if (!playlist.cover_url) return;
-          try {
-            const path = await squarePlaylistArtwork(
-              playlist.cover_url,
-              join(environment.supportPath, "playlist-artwork-v1"),
-            );
-            setArtwork((current) => ({ ...current, [playlist.cover_url!]: path }));
-          } catch (error) {
-            console.error("Could not crop playlist artwork", error);
-          }
-        }),
-      );
       setError(undefined);
+      setLoading(false);
+      void cacheArtwork(saved);
+
+      // Cover discovery can contact Spotify. Keep the saved rows usable while it runs.
+      const artworkVersionsAtStart = { ...artworkRefreshRequests.current };
+      void loadSavedPlaylists(false, controller.signal)
+        .then((fresh) => {
+          if (revision !== loadRevision.current) return;
+          const latest = currentPlaylists.current;
+          const merged = fresh.map((row) => {
+            const before = artworkVersionsAtStart[row.id] || 0;
+            const currentVersion = artworkRefreshRequests.current[row.id] || 0;
+            const latestRow = latest.find((candidate) => candidate.id === row.id);
+            return currentVersion !== before && latestRow?.spotify_url === row.spotify_url
+              ? { ...row, cover_url: latestRow.cover_url }
+              : row;
+          });
+          currentPlaylists.current = merged;
+          setPlaylists(merged);
+          void cacheArtwork(merged);
+        })
+        .catch((caught) => {
+          if (!controller.signal.aborted && revision === loadRevision.current) {
+            console.error("Could not refresh saved playlist artwork", caught);
+          }
+        });
     } catch (caught) {
+      if (revision !== loadRevision.current) return;
       setError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
       setLoading(false);
     }
-  }, []);
-  useEffect(() => void load(), [load]);
+  }, [cacheArtwork]);
+  useEffect(() => {
+    void load();
+    return () => {
+      loadRevision.current += 1;
+      loadController.current?.abort();
+    };
+  }, [load]);
 
   async function refreshArtwork(playlist: SavedPlaylistSummary) {
+    const request = (artworkRefreshRequests.current[playlist.id] || 0) + 1;
+    artworkRefreshRequests.current[playlist.id] = request;
     const toast = await showCompactToast(Toast.Style.Animated, "Refreshing playlist artwork", playlist.name);
     try {
       const result = await refreshPlaylistArtwork(playlist.id);
+      const stillCurrent = () =>
+        artworkRefreshRequests.current[playlist.id] === request &&
+        result.spotify_url === playlist.spotify_url &&
+        currentPlaylists.current.some((row) => row.id === playlist.id && row.spotify_url === result.spotify_url);
+      if (!stillCurrent()) {
+        updateCompactToast(
+          toast,
+          Toast.Style.Failure,
+          "Could not refresh artwork",
+          "The Spotify link changed. Retry the refresh.",
+        );
+        return;
+      }
       const path = await squarePlaylistArtwork(
         result.cover_url,
         join(environment.supportPath, "playlist-artwork-v1"),
         true,
       );
+      if (!stillCurrent()) {
+        updateCompactToast(
+          toast,
+          Toast.Style.Failure,
+          "Could not refresh artwork",
+          "The Spotify link changed. Retry the refresh.",
+        );
+        return;
+      }
       setArtwork((current) => ({ ...current, [result.cover_url]: path }));
-      setPlaylists((current) =>
-        current.map((row) => (row.id === playlist.id ? { ...row, cover_url: result.cover_url } : row)),
+      const next = currentPlaylists.current.map((row) =>
+        row.id === playlist.id ? { ...row, cover_url: result.cover_url } : row,
       );
+      currentPlaylists.current = next;
+      setPlaylists(next);
       updateCompactToast(toast, Toast.Style.Success, "Playlist artwork refreshed", playlist.name);
     } catch (caught) {
       updateCompactToast(

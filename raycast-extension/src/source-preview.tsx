@@ -10,7 +10,7 @@ import {
   List,
   Toast,
 } from "@raycast/api";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { previewSource, queueSource } from "./backend";
 import { compactText } from "./notification-model";
@@ -97,34 +97,53 @@ export function SourcePreviewView({ type, url }: { type: "album" | "playlist"; u
   const [preview, setPreview] = useState<SourcePreview>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
+  const previewRequest = useRef(0);
+  const previewController = useRef<AbortController | undefined>(undefined);
+  const queueInFlight = useRef(false);
 
   const load = useCallback(async () => {
+    const request = ++previewRequest.current;
+    previewController.current?.abort();
+    const controller = new AbortController();
+    previewController.current = controller;
     setLoading(true);
     try {
-      setPreview(await previewSource(type, url));
+      const next = await previewSource(type, url, controller.signal);
+      if (request !== previewRequest.current) return;
+      setPreview(next);
       setError(undefined);
     } catch (caught) {
+      if (request !== previewRequest.current) return;
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
-      setLoading(false);
+      if (request === previewRequest.current) {
+        setLoading(false);
+        if (previewController.current === controller) previewController.current = undefined;
+      }
     }
   }, [type, url]);
 
   useEffect(() => {
     void load();
+    return () => {
+      previewRequest.current += 1;
+      previewController.current?.abort();
+    };
   }, [load]);
 
   async function startImport() {
-    if (!preview || preview.source.warning) return;
-    const confirmed = await confirmAlert({
-      title: `Import this ${type}?`,
-      message: `Queue “${preview.source.name}”. YouTube matching and downloading run in the background; saved Music IDs are checked individually immediately before the final Music changes.`,
-      primaryAction: { title: "Download + Add to Music" },
-      dismissAction: { title: "Cancel", style: Alert.ActionStyle.Cancel },
-    });
-    if (!confirmed) return;
-    const toast = await showCompactToast(Toast.Style.Animated, "Queueing import");
+    if (queueInFlight.current || !preview || preview.source.warning) return;
+    queueInFlight.current = true;
+    let toast: Awaited<ReturnType<typeof showCompactToast>> | undefined;
     try {
+      const confirmed = await confirmAlert({
+        title: `Import this ${type}?`,
+        message: `Queue “${preview.source.name}”. YouTube matching and downloading run in the background; saved Music IDs are checked individually immediately before the final Music changes.`,
+        primaryAction: { title: "Download + Add to Music" },
+        dismissAction: { title: "Cancel", style: Alert.ActionStyle.Cancel },
+      });
+      if (!confirmed) return;
+      toast = await showCompactToast(Toast.Style.Animated, "Queueing import");
       const job = await queueSource(type, url, {
         name: preview.source.name,
         total: preview.rows.length,
@@ -144,12 +163,22 @@ export function SourcePreviewView({ type, url }: { type: "album" | "playlist"; u
         `${job.source.total || preview.rows.length} tracks`,
       );
     } catch (caught) {
-      updateCompactToast(
-        toast,
-        Toast.Style.Failure,
-        "Could not queue import",
-        caught instanceof Error ? caught.message : String(caught),
-      );
+      if (toast) {
+        updateCompactToast(
+          toast,
+          Toast.Style.Failure,
+          "Could not queue import",
+          caught instanceof Error ? caught.message : String(caught),
+        );
+      } else {
+        await showCompactToast(
+          Toast.Style.Failure,
+          "Could not queue import",
+          caught instanceof Error ? caught.message : String(caught),
+        );
+      }
+    } finally {
+      queueInFlight.current = false;
     }
   }
 

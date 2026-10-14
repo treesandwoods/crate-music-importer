@@ -3,6 +3,7 @@ import { playlistUpdateQueueArgs } from "./playlist-update-model";
 
 import type {
   ImportJob,
+  ActivitySnapshot,
   JobsSnapshot,
   PlaylistUpdatePreview,
   ResolverSnapshot,
@@ -28,16 +29,16 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function run(args: string[], raycast = false, timeout = 120_000): Promise<string> {
+async function run(args: string[], raycast = false, timeout = 120_000, signal?: AbortSignal): Promise<string> {
   try {
-    return await backendCommand(args, raycast, timeout);
+    return await backendCommand(args, raycast, timeout, signal);
   } catch (error) {
     throw new Error(errorMessage(error));
   }
 }
 
-async function runJson<T>(args: string[], timeout?: number): Promise<T> {
-  const output = await run(args, false, timeout);
+async function runJson<T>(args: string[], timeout?: number, signal?: AbortSignal): Promise<T> {
+  const output = await run(args, false, timeout, signal);
   try {
     return JSON.parse(output) as T;
   } catch {
@@ -45,8 +46,8 @@ async function runJson<T>(args: string[], timeout?: number): Promise<T> {
   }
 }
 
-async function runRaycastJson<T>(args: string[], timeout?: number): Promise<T> {
-  const output = await run(args, true, timeout);
+async function runRaycastJson<T>(args: string[], timeout?: number, signal?: AbortSignal): Promise<T> {
+  const output = await run(args, true, timeout, signal);
   try {
     return JSON.parse(output) as T;
   } catch {
@@ -54,12 +55,16 @@ async function runRaycastJson<T>(args: string[], timeout?: number): Promise<T> {
   }
 }
 
-export function loadSnapshot(): Promise<ResolverSnapshot> {
-  return runJson<ResolverSnapshot>(["review", "--json"]);
+export function loadSnapshot(signal?: AbortSignal): Promise<ResolverSnapshot> {
+  return runJson<ResolverSnapshot>(["review", "--json"], undefined, signal);
 }
 
-export function previewSource(type: "album" | "playlist", url: string): Promise<SourcePreview> {
-  return runJson<SourcePreview>([type === "album" ? "album-preview" : "preview", url, "--json"], 660_000);
+export function loadActivity(signal?: AbortSignal): Promise<ActivitySnapshot> {
+  return runRaycastJson<ActivitySnapshot>(["activity-json"], undefined, signal);
+}
+
+export function previewSource(type: "album" | "playlist", url: string, signal?: AbortSignal): Promise<SourcePreview> {
+  return runJson<SourcePreview>([type === "album" ? "album-preview" : "preview", url, "--json"], 660_000, signal);
 }
 
 export async function openAlbumLibraryChecker(signal: AbortSignal) {
@@ -74,12 +79,18 @@ export async function openAlbumLibraryChecker(signal: AbortSignal) {
   }
 }
 
-export async function loadSavedPlaylists(): Promise<SavedPlaylistSummary[]> {
-  return (await runJson<{ playlists: SavedPlaylistSummary[] }>(["saved-playlists", "--json"])).playlists;
+export async function loadSavedPlaylists(cached = false, signal?: AbortSignal): Promise<SavedPlaylistSummary[]> {
+  return (
+    await runJson<{ playlists: SavedPlaylistSummary[] }>(
+      ["saved-playlists", "--json", ...(cached ? ["--cached"] : [])],
+      undefined,
+      signal,
+    )
+  ).playlists;
 }
 
-export function previewPlaylistUpdate(playlistId: string): Promise<PlaylistUpdatePreview> {
-  return runJson<PlaylistUpdatePreview>(["playlist-update-preview", playlistId, "--json"], 660_000);
+export function previewPlaylistUpdate(playlistId: string, signal?: AbortSignal): Promise<PlaylistUpdatePreview> {
+  return runJson<PlaylistUpdatePreview>(["playlist-update-preview", playlistId, "--json"], 660_000, signal);
 }
 
 export function changePlaylistLink(
@@ -89,7 +100,9 @@ export function changePlaylistLink(
   return runJson(["playlist-link-set", playlistId, url, "--confirm"]);
 }
 
-export function refreshPlaylistArtwork(playlistId: string): Promise<{ playlist_id: string; cover_url: string }> {
+export function refreshPlaylistArtwork(
+  playlistId: string,
+): Promise<{ playlist_id: string; cover_url: string; spotify_url: string }> {
   return runJson(["playlist-artwork-refresh", playlistId, "--json"]);
 }
 
@@ -100,8 +113,8 @@ export function queuePlaylistUpdate(
   return runRaycastJson<ImportJob>(playlistUpdateQueueArgs(playlist, preview));
 }
 
-export function loadJobs(): Promise<JobsSnapshot> {
-  return runRaycastJson<JobsSnapshot>(["jobs-json"]);
+export function loadJobs(signal?: AbortSignal): Promise<JobsSnapshot> {
+  return runRaycastJson<JobsSnapshot>(["jobs-json"], undefined, signal);
 }
 
 export function acknowledgeJobNotification(jobId: string): Promise<ImportJob> {

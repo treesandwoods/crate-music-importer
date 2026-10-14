@@ -47,7 +47,12 @@ export function runtime() {
   };
 }
 
-export async function backendCommand(args: string[], raycast: boolean, timeout: number): Promise<string> {
+export async function backendCommand(
+  args: string[],
+  raycast: boolean,
+  timeout: number,
+  signal?: AbortSignal,
+): Promise<string> {
   const value = runtime();
   const command = value.cli || value.python;
   const commandArgs = value.cli
@@ -58,6 +63,7 @@ export async function backendCommand(args: string[], raycast: boolean, timeout: 
     env: value.env,
     timeout,
     maxBuffer: 10 * 1024 * 1024,
+    signal,
   });
   return stdout.trim();
 }

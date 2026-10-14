@@ -50,6 +50,7 @@ export default function Command({ fallbackText }: LaunchProps) {
   const [scanRetry, setScanRetry] = useState(0);
   const [spinnerFrame, setSpinnerFrame] = useState(0);
   const scanController = useRef<AbortController | undefined>(undefined);
+  const searchController = useRef<AbortController | undefined>(undefined);
   const albumToken = useRef("");
   const searchRequest = useRef(0);
   const inputText = useRef(query);
@@ -60,6 +61,7 @@ export default function Command({ fallbackText }: LaunchProps) {
     inputText.current = text;
     // Invalidate in-flight work at the input event, including the debounce gap.
     searchRequest.current += 1;
+    searchController.current?.abort();
     scanController.current?.abort();
     setQuery(text);
     setAlbums([]);
@@ -77,6 +79,8 @@ export default function Command({ fallbackText }: LaunchProps) {
     }
     let cancelled = false;
     const isCurrent = () => !cancelled && request === searchRequest.current;
+    const controller = new AbortController();
+    searchController.current = controller;
     setLoading(true);
     const timer = setTimeout(async () => {
       try {
@@ -87,7 +91,7 @@ export default function Command({ fallbackText }: LaunchProps) {
         });
         const token = await authorization.current;
         if (!isCurrent()) return;
-        const result = await searchSpotifyAlbums(text, token);
+        const result = await searchSpotifyAlbums(text, token, controller.signal);
         if (!isCurrent()) return;
         albumToken.current = token;
         setLibraryStatuses({});
@@ -105,6 +109,8 @@ export default function Command({ fallbackText }: LaunchProps) {
     return () => {
       cancelled = true;
       clearTimeout(timer);
+      controller.abort();
+      if (searchController.current === controller) searchController.current = undefined;
     };
   }, [query, retry]);
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import json
 from typing import Any, Callable
 
 from crate_music_importer.ipod_import.constants import MUSIC_CONFIDENCE_MIN
@@ -224,34 +223,25 @@ def _recording_complete(recording: dict[str, Any], source_type: str, source_id: 
 	return bool(music_binding_id(recording))
 
 
-def _active_job(paths: ManagedPaths, source_type: str, source_id: str) -> dict[str, Any] | None:
-	jobs_dir = paths.state_dir / "jobs"
-	matches: list[dict[str, Any]] = []
-	for path in jobs_dir.glob("*.json") if jobs_dir.is_dir() else []:
-		try:
-			data = json.loads(path.read_text(encoding="utf-8"))
-		except (OSError, ValueError):
+def _active_jobs(jobs: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+	indexed: dict[tuple[str, str], dict[str, Any]] = {}
+	for job in sorted(jobs, key=lambda value: str(value.get("createdAt") or "")):
+		if job.get("status") not in ("queued", "running"):
 			continue
-		if not isinstance(data, dict) or data.get("status") not in ("queued", "running"):
-			continue
-		source = data.get("source") or {}
-		if source.get("type") == source_type and source.get("id") == source_id:
-			matches.append(data)
-	if not matches:
-		return None
-	job = max(matches, key=lambda value: str(value.get("createdAt") or ""))
-	return {
-		"jobId": job.get("jobId"),
-		"pid": job.get("pid") or job.get("runnerPid"),
-		"log": job.get("logPath"),
-		"started_at": job.get("startedAt"),
-		"status": job.get("status"),
-		"phase": job.get("phase"),
-		"counts": job.get("counts"),
-	}
+		source = job.get("source") or {}
+		indexed[(str(source.get("type") or ""), str(source.get("id") or ""))] = {
+			"jobId": job.get("jobId"),
+			"pid": job.get("pid") or job.get("runnerPid"),
+			"log": job.get("logPath"),
+			"started_at": job.get("startedAt"),
+			"status": job.get("status"),
+			"phase": job.get("phase"),
+			"counts": job.get("counts"),
+		}
+	return indexed
 
 
-def _source_rows(manifest: dict[str, Any], paths: ManagedPaths, problems: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _source_rows(manifest: dict[str, Any], active_jobs: dict[tuple[str, str], dict[str, Any]], problems: list[dict[str, Any]]) -> list[dict[str, Any]]:
 	problem_by_recording = {problem["recordingId"]: problem for problem in problems}
 	rows: list[dict[str, Any]] = []
 	for source_type, sources in (("album", manifest.get("albums", {})), ("playlist", manifest.get("playlists", {}))):
@@ -287,21 +277,25 @@ def _source_rows(manifest: dict[str, Any], paths: ManagedPaths, problems: list[d
 				"state": state,
 				"problemCount": len(item_problems),
 				"problemRecordingIds": [problem["recordingId"] for problem in item_problems],
-				"activeJob": _active_job(paths, source_type, source_id),
+				"activeJob": active_jobs.get((source_type, source_id)),
 			})
 			rows.append(entry)
 	return rows
 
 
-def resolver_snapshot(paths: ManagedPaths | None = None) -> dict[str, Any]:
+def resolver_snapshot(paths: ManagedPaths | None = None, *, manifest: dict[str, Any] | None = None, jobs: list[dict[str, Any]] | None = None) -> dict[str, Any]:
 	paths = paths or ManagedPaths()
-	manifest = load_manifest(paths)
+	if manifest is None:
+		manifest = load_manifest(paths)
+	if jobs is None:
+		from crate_music_importer.ipod_import.jobs import JobStore
+		jobs = JobStore(paths.root).list()
 	problems = [
 		problem
 		for key, recording in manifest["recordings"].items()
 		if (problem := _problem_row(manifest, key, recording, paths)) is not None
 	]
-	sources = _source_rows(manifest, paths, problems)
+	sources = _source_rows(manifest, _active_jobs(jobs), problems)
 	return {
 		"version": 1,
 		"managedRoot": str(paths.root),

@@ -6,6 +6,7 @@ import contextlib
 import fcntl
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -23,10 +24,11 @@ from crate_music_importer.ipod_import.constants import MANAGED_ROOT
 from crate_music_importer.ipod_import.manifest import ManagedPaths, file_sha256, load_manifest, save_manifest, update_manifest
 from crate_music_importer.ipod_import.music import delete_managed_music_track, lookup_music_track, music_binding_id
 from crate_music_importer.ipod_import.music_cache import remove_music_cache_tracks
+from crate_music_importer.ipod_import.music_lock import music_operation_lock
 from crate_music_importer.ipod_import.spotify import parse_source_url
 
 
-ACTIVE_STATES = {"queued", "running"}
+ACTIVE_STATES = {"queued", "running", "cancelling"}
 TERMINAL_STATES = {"complete", "needs_attention", "ready_to_continue", "failed", "cancelled", "superseded"}
 RAYCAST_NOTIFICATION_COMMAND = "completion-notifications"
 
@@ -37,18 +39,29 @@ def _now() -> str:
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
 	path.parent.mkdir(parents=True, exist_ok=True)
-	with tempfile.NamedTemporaryFile(
-		"w",
-		encoding="utf-8",
-		dir=path.parent,
-		prefix=path.stem + "-",
-		suffix=".tmp",
-		delete=False,
-	) as handle:
-		json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
-		handle.write("\n")
-		temporary = Path(handle.name)
-	os.replace(temporary, path)
+	temporary: Path | None = None
+	try:
+		with tempfile.NamedTemporaryFile(
+			"w",
+			encoding="utf-8",
+			dir=path.parent,
+			prefix=path.stem + "-",
+			suffix=".tmp",
+			delete=False,
+		) as handle:
+			temporary = Path(handle.name)
+			json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
+			handle.write("\n")
+			handle.flush()
+			os.fsync(handle.fileno())
+		os.replace(temporary, path)
+		temporary = None
+	finally:
+		if temporary is not None:
+			try:
+				temporary.unlink()
+			except FileNotFoundError:
+				pass
 
 
 def _pid_running(pid: int) -> bool:
@@ -70,6 +83,42 @@ def _migrate_job(value: dict[str, Any]) -> dict[str, Any]:
 	return value
 
 
+def _safe_pid(value: Any) -> int:
+	try:
+		return int(value or 0)
+	except (TypeError, ValueError, OverflowError):
+		return 0
+
+
+def _normalize_job_record(value: dict[str, Any]) -> dict[str, Any]:
+	"""Keep malformed JSON objects visible and actionable without rewriting them."""
+	job = _migrate_job(value)
+	status = job.get("status")
+	valid_status = isinstance(status, str)
+	needs_source = valid_status and status in {"queued", "running", "cancelling", "needs_attention", "ready_to_continue", "failed"}
+	source = job.get("source")
+	valid_source = isinstance(source, dict) and isinstance(source.get("type"), str) and source.get("type") in {"album", "playlist"} and isinstance(source.get("id"), str) and bool(source.get("id"))
+	malformed = not valid_status or (needs_source and not valid_source) or ("source" in job and source is not None and not valid_source)
+	pid = job.get("pid")
+	if pid is not None and (not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0):
+		malformed = True
+	if needs_source:
+		for field, expected in (("notification", dict), ("counts", dict), ("tracks", list), ("trackProgress", dict)):
+			if field in job and not isinstance(job.get(field), expected):
+				malformed = True
+		if job.get("currentTrack") is not None and not isinstance(job.get("currentTrack"), dict):
+			malformed = True
+	if malformed:
+		job["source"] = source if isinstance(source, dict) and isinstance(source.get("type"), str) and source.get("type") in {"album", "playlist"} and isinstance(source.get("id"), str) else {}
+		job["status"] = "failed"
+		job["phase"] = "failed"
+		job["pid"] = None
+		job["retryable"] = False
+		job["errorSummary"] = "Saved job record is malformed; the original record was preserved."
+		job["malformedRecord"] = True
+	return job
+
+
 class JobStore:
 	def __init__(self, root: Path = MANAGED_ROOT):
 		self.root = Path(root)
@@ -78,15 +127,26 @@ class JobStore:
 		self.logs_dir = self.state_dir / "logs"
 		self.runner_path = self.state_dir / "job-runner.json"
 		self.enqueue_lock_path = self.state_dir / "job-enqueue.lock"
+		self.transaction_lock_path = self.enqueue_lock_path
 		self.worker_lock_path = self.state_dir / "import-mutation.lock"
 
 	def job_path(self, job_id: str) -> Path:
+		if not isinstance(job_id, str) or not re.fullmatch(r"[A-Za-z0-9._-]+", job_id) or job_id in {".", ".."}:
+			raise ValueError("Invalid import job ID.")
 		return self.jobs_dir / f"{job_id}.json"
 
 	def save(self, job: dict[str, Any]) -> dict[str, Any]:
 		job["updatedAt"] = _now()
 		_atomic_json(self.job_path(str(job["jobId"])), job)
 		return job
+
+	def update(self, job_id: str, mutate: Callable[[dict[str, Any]], Any]) -> dict[str, Any]:
+		"""Read and update one job under the lifecycle lock."""
+		with self.transaction_lock():
+			job = self.load(job_id)
+			if mutate(job) is False:
+				return job
+			return self.save(job)
 
 	def load(self, job_id: str) -> dict[str, Any]:
 		path = self.job_path(job_id)
@@ -107,9 +167,40 @@ class JobStore:
 				with path.open("r", encoding="utf-8") as handle:
 					value = json.load(handle)
 			except (OSError, ValueError):
+				jobs.append({
+					"jobId": path.stem,
+					"source": {},
+					"status": "failed",
+					"phase": "failed",
+					"retryable": False,
+					"errorSummary": "Saved job record is invalid JSON; the original record was preserved.",
+					"malformedRecord": True,
+				})
 				continue
 			if isinstance(value, dict) and value.get("jobId"):
-				jobs.append(_migrate_job(value))
+				job_id = value.get("jobId")
+				if not isinstance(job_id, str) or not re.fullmatch(r"[A-Za-z0-9._-]+", job_id) or job_id in {".", ".."} or job_id != path.stem:
+					jobs.append({
+						"jobId": path.stem,
+						"source": {},
+						"status": "failed",
+						"phase": "failed",
+						"retryable": False,
+						"errorSummary": "Saved job record has an invalid job ID; the original record was preserved.",
+						"malformedRecord": True,
+					})
+				else:
+					jobs.append(_normalize_job_record(value))
+			else:
+				jobs.append({
+					"jobId": path.stem,
+					"source": {},
+					"status": "failed",
+					"phase": "failed",
+					"retryable": False,
+					"errorSummary": "Saved job record has an invalid shape; the original record was preserved.",
+					"malformedRecord": True,
+				})
 		return sorted(jobs, key=lambda job: str(job.get("createdAt") or ""), reverse=True)
 
 	def runner(self) -> dict[str, Any] | None:
@@ -124,7 +215,7 @@ class JobStore:
 
 	def release_runner(self, pid: int) -> None:
 		current = self.runner() or {}
-		locked_pid = int(current.get("pid") or 0)
+		locked_pid = _safe_pid(current.get("pid"))
 		if locked_pid and locked_pid != pid:
 			return
 		try:
@@ -134,8 +225,14 @@ class JobStore:
 
 	@contextlib.contextmanager
 	def enqueue_lock(self):
+		"""Compatibility name for the shared queue/job lifecycle transaction."""
+		with self.transaction_lock():
+			yield
+
+	@contextlib.contextmanager
+	def transaction_lock(self):
 		self.state_dir.mkdir(parents=True, exist_ok=True)
-		with self.enqueue_lock_path.open("a+", encoding="utf-8") as handle:
+		with self.transaction_lock_path.open("a+", encoding="utf-8") as handle:
 			fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
 			try:
 				yield
@@ -258,14 +355,16 @@ def _ensure_runner(
 	popen: Callable[..., subprocess.Popen] = subprocess.Popen,
 ) -> int | None:
 	current = store.runner() or {}
-	current_pid = int(current.get("pid") or 0)
+	current_pid = _safe_pid(current.get("pid"))
 	if _pid_running(current_pid):
 		return current_pid
+	starter_pid = _safe_pid(current.get("starterPid"))
+	dead_new_starter = current.get("status") == "starting" and starter_pid > 0 and not _pid_running(starter_pid)
 	try:
 		runner_age = time.time() - store.runner_path.stat().st_mtime
 	except FileNotFoundError:
 		runner_age = None
-	if runner_age is not None and runner_age < 30 and (not current or current.get("status") == "starting"):
+	if not dead_new_starter and runner_age is not None and runner_age < 30 and (not current or current.get("status") == "starting"):
 		# Another enqueue owns the atomic startup lock but has not published its PID yet.
 		return None
 	try:
@@ -278,7 +377,8 @@ def _ensure_runner(
 	except FileExistsError:
 		return None
 	with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-		json.dump({"pid": None, "status": "starting", "startedAt": _now()}, handle)
+		startup_token = uuid4().hex
+		json.dump({"pid": None, "status": "starting", "startedAt": _now(), "startupToken": startup_token, "starterPid": os.getpid()}, handle)
 		handle.write("\n")
 	try:
 		process = popen(
@@ -291,7 +391,9 @@ def _ensure_runner(
 			start_new_session=True,
 			close_fds=True,
 		)
-		_atomic_json(store.runner_path, {"pid": process.pid, "status": "running", "startedAt": _now()})
+		current = store.runner() or {}
+		if current.get("startupToken") == startup_token:
+			_atomic_json(store.runner_path, {"pid": process.pid, "status": "running", "startedAt": current.get("startedAt") or _now()})
 		return int(process.pid)
 	except Exception:
 		store.release_runner(0)
@@ -313,6 +415,9 @@ def enqueue(
 	if retry_of:
 		job["retryOf"] = retry_of
 	with store.enqueue_lock():
+		original = store.load(retry_of) if retry_of else None
+		if original is not None and (original.get("status") != "failed" or not original.get("retryable")):
+			raise ValueError("Only a retryable failed import can be queued again.")
 		if action == "playlist_update_combined":
 			manifest = load_manifest(ManagedPaths(root))
 			pending = ((manifest.get("playlists", {}).get(job["source"]["id"]) or {}).get("pending_update") or {})
@@ -322,10 +427,11 @@ def enqueue(
 				job["resumeUpdate"] = True
 		existing_jobs = store.list()
 		for existing in existing_jobs:
+			existing_source = existing.get("source") if isinstance(existing.get("source"), dict) else {}
 			if (
 				existing.get("status") in ACTIVE_STATES
-				and existing.get("source", {}).get("type") == job["source"]["type"]
-				and existing.get("source", {}).get("id") == job["source"]["id"]
+				and existing_source.get("type") == job["source"]["type"]
+				and existing_source.get("id") == job["source"]["id"]
 			):
 				raise ValueError("This Spotify source is already queued or running.")
 		job["queueSequence"] = max((int(existing.get("queueSequence") or 0) for existing in existing_jobs), default=0) + 1
@@ -343,18 +449,29 @@ def enqueue(
 				existing["notification"] = {"pending": False, "notifiedAt": (existing.get("notification") or {}).get("notifiedAt")}
 				store.save(existing)
 		store.save(job)
-	try:
-		job["runnerPid"] = _ensure_runner(store, popen=popen)
-		store.save(job)
-	except Exception:
-		job["status"] = "failed"
-		job["phase"] = "failed"
-		job["finishedAt"] = _now()
-		job["errorSummary"] = "Could not start the import runner."
-		job["retryable"] = True
-		job["notification"] = {"pending": True, "notifiedAt": None}
-		store.save(job)
-		raise
+		try:
+			runner_pid = _ensure_runner(store, popen=popen)
+			latest = store.load(str(job["jobId"]))
+			latest["runnerPid"] = runner_pid
+			job.clear()
+			job.update(store.save(latest))
+		except Exception:
+			latest = store.load(str(job["jobId"]))
+			latest["status"] = "failed"
+			latest["phase"] = "failed"
+			latest["finishedAt"] = _now()
+			latest["errorSummary"] = "Could not start the import runner."
+			latest["retryable"] = True
+			latest["notification"] = {"pending": True, "notifiedAt": None}
+			job.clear()
+			job.update(store.save(latest))
+			raise
+		if original is not None:
+			original["status"] = "superseded"
+			original["phase"] = "superseded"
+			original["retryable"] = False
+			original["supersededBy"] = job["jobId"]
+			store.save(original)
 	return job
 
 
@@ -373,6 +490,34 @@ def _delete_managed_file(root: Path, relative_path: str) -> bool:
 	return True
 
 
+def _record_cancellation_cleanup(
+	job: dict[str, Any],
+	store: JobStore,
+	key: str,
+	*,
+	initial: dict[str, Any] | None = None,
+	step: str | None = None,
+) -> dict[str, Any]:
+	"""Durably authorize and checkpoint one cancellation cleanup step."""
+	job_id = str(job["jobId"])
+	def update(current: dict[str, Any]) -> bool:
+		if current.get("status") not in {"cancelling", "failed"}:
+			raise ValueError("Cancellation cleanup lost its durable job reservation.")
+		cleanup = current.setdefault("cancellationCleanup", {})
+		checkpoint = cleanup.setdefault(key, {})
+		if initial:
+			for field, value in initial.items():
+				if field in checkpoint and checkpoint[field] != value:
+					raise ValueError("Cancellation cleanup provenance changed while resuming.")
+				checkpoint.setdefault(field, value)
+		if step:
+			checkpoint.setdefault(step, _now() if step.endswith("At") else True)
+		return True
+	updated = store.update(job_id, update)
+	job["cancellationCleanup"] = updated.get("cancellationCleanup") or {}
+	return job["cancellationCleanup"].get(key) or {}
+
+
 def _delete_source_progress(
 	job: dict[str, Any],
 	store: JobStore,
@@ -381,63 +526,202 @@ def _delete_source_progress(
 	exact_lookup: Callable[[str], dict[str, Any] | None] = lookup_music_track,
 ) -> dict[str, int]:
 	paths = ManagedPaths(store.root)
-	manifest = load_manifest(paths)
 	source = job.get("source") or {}
 	source_type = str(source.get("type") or "")
 	source_id = str(source.get("id") or "")
+	if source_type not in {"album", "playlist"} or not source_id:
+		raise ValueError("Cancellation cleanup has no valid saved source identity.")
 	collection_name = "albums" if source_type == "album" else "playlists"
+	manifest = load_manifest(paths)
 	collection = manifest.get(collection_name) or {}
-	source_value = collection.pop(source_id, None)
+	source_value = collection.get(source_id)
 	if not isinstance(source_value, dict):
 		return {"recordings": 0, "files": 0, "music_tracks": 0, "cache_entries": 0}
 	baseline = job.get("stateBaseline") or {}
 	baseline_captured = baseline.get("captured") is True
 	protected_ids = {str(value) for value in baseline.get("persistentIds") or [] if str(value)}
-
 	deleted_files = 0
-	if source_type == "playlist" and source_value.get("m3u8_managed_by_crate"):
-		deleted_files += int(_delete_managed_file(store.root, str(source_value.get("m3u8_relative_path") or "")))
-	affected_ids = {str(item.get("recording_id") or "") for item in source_value.get("items") or []}
 	deleted_recordings = 0
 	deleted_music_tracks = 0
-	cache_ids_to_remove: set[str] = set()
-	for recording_id in affected_ids:
+	removed_cache_entries = 0
+	remove_recording_ids: set[str] = set()
+	cleanup_map = job.get("cancellationCleanup") if isinstance(job.get("cancellationCleanup"), dict) else {}
+	if source_type == "playlist" and source_value.get("m3u8_managed_by_crate"):
+		relative_path = str(source_value.get("m3u8_relative_path") or "")
+		if not relative_path:
+			raise ValueError("The saved playlist file has no managed path.")
+		checkpoint = _record_cancellation_cleanup(job, store, "__source_playlist_file__", initial={
+			"sourceType": source_type, "sourceId": source_id, "managedByCrate": True, "relativePath": relative_path,
+		})
+		playlist_path = (store.root / relative_path).resolve()
+		try:
+			playlist_path.relative_to(store.root.resolve())
+		except ValueError as exc:
+			raise ValueError("The saved playlist file is outside the managed directory.") from exc
+		if playlist_path.exists():
+			_record_cancellation_cleanup(job, store, "__source_playlist_file__", step="fileDeleteStartedAt")
+			deleted_files += int(_delete_managed_file(store.root, relative_path))
+			_record_cancellation_cleanup(job, store, "__source_playlist_file__", step="fileDeleted")
+		elif not checkpoint.get("fileDeleteStartedAt") and not checkpoint.get("fileDeleted"):
+			raise ValueError("The saved playlist file is missing without an authorized deletion checkpoint.")
+		else:
+			_record_cancellation_cleanup(job, store, "__source_playlist_file__", step="fileDeleted")
+	affected_ids = {str(item.get("recording_id") or "") for item in source_value.get("items") or [] if isinstance(item, dict)}
+	pending_ids = list(affected_ids)
+	processed_ids: set[str] = set()
+	while pending_ids:
+		recording_id = pending_ids.pop()
+		if recording_id in processed_ids:
+			continue
+		processed_ids.add(recording_id)
+		# Refresh immediately before each external deletion. A newer source reference
+		# protects the shared recording even when this cancellation began from an older snapshot.
+		manifest = load_manifest(paths)
+		current_source = (manifest.get(collection_name) or {}).get(source_id)
+		if not isinstance(current_source, dict):
+			continue
+		current_ids = {
+			str(item.get("recording_id") or "")
+			for item in current_source.get("items") or []
+			if isinstance(item, dict) and item.get("recording_id")
+		}
+		for current_id in current_ids - affected_ids:
+			affected_ids.add(current_id)
+			pending_ids.append(current_id)
+		if recording_id not in current_ids:
+			continue
 		recording = manifest.get("recordings", {}).get(recording_id)
 		if not isinstance(recording, dict):
+			checkpoint = cleanup_map.get(recording_id) if isinstance(cleanup_map.get(recording_id), dict) else {}
+			if not checkpoint.get("recordingRemoved"):
+				raise ValueError("A missing recording has no durable cancellation cleanup proof.")
 			continue
-		memberships = recording.setdefault(f"{source_type}_memberships", {})
-		memberships.pop(source_id, None)
-		if recording.get("album_memberships") or recording.get("playlist_memberships"):
+		staging_root = paths.staging.resolve()
+		staging_target = (paths.staging / recording_id).resolve()
+		try:
+			staging_target.relative_to(staging_root)
+		except ValueError as exc:
+			raise ValueError("The saved staging path is outside the managed staging directory.") from exc
+		if staging_target == staging_root:
+			raise ValueError("The saved staging path does not identify a recording directory.")
+		source_membership_key = f"{source_type}_memberships"
+		other_references = any(
+			(key, membership_id) != (source_membership_key, source_id)
+			for key in ("album_memberships", "playlist_memberships")
+			for membership_id, values in ((recording.get(key) if isinstance(recording.get(key), dict) else {}).items())
+			if values
+		)
+		if other_references:
 			continue
 		persistent_id = music_binding_id(recording)
 		if persistent_id in protected_ids:
 			continue
-		managed = recording.get("managed_file") or {}
-		managed_path = (store.root / str(managed.get("relative_path") or "")).resolve()
+		managed = recording.get("managed_file") if isinstance(recording.get("managed_file"), dict) else {}
+		relative_path = str(managed.get("relative_path") or "")
+		managed_path = (store.root / relative_path).resolve() if relative_path else None
+		if managed_path is not None:
+			try:
+				managed_path.relative_to(store.root.resolve())
+			except ValueError as exc:
+				raise ValueError("The saved managed file is outside the managed directory.") from exc
+		checkpoint = cleanup_map.get(recording_id) if isinstance(cleanup_map.get(recording_id), dict) else {}
+		initial = {
+			"sourceType": source_type,
+			"sourceId": source_id,
+			"persistentId": persistent_id,
+			"relativePath": relative_path,
+			"sha256": str(managed.get("sha256") or ""),
+			"managedByCrate": bool(managed.get("managed_by_crate")),
+			"baselineCaptured": baseline_captured,
+		}
+		checkpoint = _record_cancellation_cleanup(job, store, recording_id, initial=initial)
+		cleanup_map = job.get("cancellationCleanup") or {}
+		if (
+			checkpoint.get("relativePath") != relative_path
+			or checkpoint.get("sha256") != str(managed.get("sha256") or "")
+			or checkpoint.get("managedByCrate") != bool(managed.get("managed_by_crate"))
+		):
+			raise ValueError("Cancellation cleanup provenance changed while resuming.")
 		managed_proven = bool(
-			managed.get("managed_by_crate")
+			managed_path is not None
+			and managed.get("managed_by_crate")
 			and managed.get("sha256")
-			and managed_path.is_file()
-			and file_sha256(managed_path) == str(managed.get("sha256") or "")
 		)
+		if managed_proven and managed_path.is_file():
+			if file_sha256(managed_path) != str(managed.get("sha256") or ""):
+				raise ValueError("The managed file no longer matches its saved hash; cancellation stopped for review.")
+		elif managed_path is not None and not managed_path.exists() and not (checkpoint.get("fileDeleteStartedAt") or checkpoint.get("fileDeleted")):
+			# Do not mistake an unrelated missing file for this cancellation's deletion.
+			raise ValueError("The managed file is missing without an authorized cancellation deletion checkpoint.")
+		elif managed_path is not None and not managed_proven:
+			continue
+
 		if persistent_id and baseline_captured and managed_proven:
 			track = exact_lookup(persistent_id)
 			track_path = Path(str((track or {}).get("location") or "")).resolve() if (track or {}).get("location") else None
-			if track_path == managed_path:
-				deleted_music_tracks += int(delete_music(persistent_id, managed_path))
-				cache_ids_to_remove.add(persistent_id)
-		if managed_proven:
-			deleted_files += int(_delete_managed_file(store.root, str(managed.get("relative_path") or "")))
-		elif managed.get("relative_path"):
+			if checkpoint.get("musicDeleteStartedAt"):
+				if track is not None and track_path != managed_path:
+					raise ValueError("The exact Music item moved after cancellation deletion began; cancellation stopped for review.")
+				if track is not None and checkpoint.get("musicDeleted"):
+					raise ValueError("The exact Music item reappeared after cancellation deletion was checkpointed.")
+				if track is not None:
+					deleted_music_tracks += int(delete_music(persistent_id, managed_path))
+					if exact_lookup(persistent_id) is not None:
+						raise ValueError("Music did not confirm deletion of the exact managed track.")
+				elif not checkpoint.get("musicDeleted"):
+					deleted_music_tracks += 1
+				_record_cancellation_cleanup(job, store, recording_id, step="musicDeleted")
+				checkpoint = (job.get("cancellationCleanup") or {}).get(recording_id) or {}
+				if persistent_id and not checkpoint.get("cacheRemoved"):
+					removed_cache_entries += remove_music_cache_tracks(paths, {persistent_id})
+					_record_cancellation_cleanup(job, store, recording_id, step="cacheRemoved")
+			else:
+				if track is not None and track_path == managed_path:
+					_record_cancellation_cleanup(job, store, recording_id, step="musicDeleteStartedAt")
+					deleted_music_tracks += int(delete_music(persistent_id, managed_path))
+					if exact_lookup(persistent_id) is not None:
+						raise ValueError("Music did not confirm deletion of the exact managed track.")
+					_record_cancellation_cleanup(job, store, recording_id, step="musicDeleted")
+					if not ((job.get("cancellationCleanup") or {}).get(recording_id) or {}).get("cacheRemoved"):
+						removed_cache_entries += remove_music_cache_tracks(paths, {persistent_id})
+						_record_cancellation_cleanup(job, store, recording_id, step="cacheRemoved")
+		if managed_path is not None and managed_proven:
+			checkpoint = (job.get("cancellationCleanup") or {}).get(recording_id) or {}
+			if managed_path.exists():
+				if file_sha256(managed_path) != str(managed.get("sha256") or ""):
+					raise ValueError("The managed file no longer matches its saved hash; cancellation stopped for review.")
+				if not checkpoint.get("fileDeleteStartedAt"):
+					_record_cancellation_cleanup(job, store, recording_id, step="fileDeleteStartedAt")
+				deleted_files += int(_delete_managed_file(store.root, relative_path))
+				_record_cancellation_cleanup(job, store, recording_id, step="fileDeleted")
+			elif checkpoint.get("fileDeleteStartedAt") or checkpoint.get("fileDeleted"):
+				if checkpoint.get("fileDeleteStartedAt") and not checkpoint.get("fileDeleted"):
+					deleted_files += 1
+				_record_cancellation_cleanup(job, store, recording_id, step="fileDeleted")
+		if managed_path is not None and not (job.get("cancellationCleanup", {}).get(recording_id) or {}).get("fileDeleted"):
 			continue
-		staging = paths.staging / recording_id
-		if staging.is_dir():
-			shutil.rmtree(staging)
-		manifest.get("manual_youtube_overrides", {}).pop(recording_id, None)
-		manifest["recordings"].pop(recording_id, None)
+		if staging_target.is_dir():
+			shutil.rmtree(staging_target)
+		remove_recording_ids.add(recording_id)
+		_record_cancellation_cleanup(job, store, recording_id, step="recordingRemoved")
 		deleted_recordings += 1
-	save_manifest(paths, manifest)
-	removed_cache_entries = remove_music_cache_tracks(paths, cache_ids_to_remove) if cache_ids_to_remove else 0
+	def finalize(manifest: dict[str, Any]) -> None:
+		collection = manifest.get(collection_name) or {}
+		collection.pop(source_id, None)
+		for recording_id in affected_ids:
+			recording = manifest.get("recordings", {}).get(recording_id)
+			if not isinstance(recording, dict):
+				continue
+			(recording.get(f"{source_type}_memberships") or {}).pop(source_id, None)
+			if recording_id not in remove_recording_ids:
+				continue
+			if recording.get("album_memberships") or recording.get("playlist_memberships"):
+				continue
+			if music_binding_id(recording) in protected_ids:
+				continue
+			manifest.get("manual_youtube_overrides", {}).pop(recording_id, None)
+			manifest["recordings"].pop(recording_id, None)
+	update_manifest(paths, finalize)
 	return {
 		"recordings": deleted_recordings,
 		"files": deleted_files,
@@ -460,55 +744,90 @@ def cancel_incomplete(
 	exact_lookup: Callable[[str], dict[str, Any] | None] = lookup_music_track,
 ) -> dict[str, Any]:
 	store = JobStore(root)
-	job = store.load(job_id)
-	if job.get("status") == "complete":
-		raise ValueError("A completed import cannot be cancelled or have its progress removed.")
-	if job.get("status") in {"cancelled", "superseded"}:
-		raise ValueError("This import is no longer active or resumable.")
 	with store.enqueue_lock():
 		job = store.load(job_id)
-		if job.get("status") == "running":
-			pid = int(job.get("pid") or 0)
-			runner_pid = int((store.runner() or {}).get("pid") or 0)
-			if pid and runner_pid and pid != runner_pid:
-				raise ValueError("The running import no longer matches the active importer process.")
-			if pid and _pid_running(pid):
-				try:
-					terminate(pid)
-				except ProcessLookupError:
-					pass
-				for _ in range(40):
-					if not _pid_running(pid):
-						break
-					time.sleep(0.05)
-				if _pid_running(pid):
-					raise ValueError("The running import did not stop; its saved progress was kept.")
+		if job.get("status") == "complete":
+			raise ValueError("A completed import cannot be cancelled or have its progress removed.")
+		if job.get("status") in {"cancelled", "cancelling", "superseded"}:
+			raise ValueError("This import is no longer active or resumable.")
+		pid = _safe_pid(job.get("pid")) if job.get("status") == "running" else 0
+		runner_pid = _safe_pid((store.runner() or {}).get("pid"))
+		if pid and runner_pid and pid != runner_pid:
+			raise ValueError("The running import no longer matches the active importer process.")
+		if not pid:
+			job["status"] = "cancelling"
+			job["phase"] = "cancelling"
+			job["cancellationOwnerPid"] = os.getpid()
+			job["notification"] = {"pending": False, "notifiedAt": (job.get("notification") or {}).get("notifiedAt")}
+			store.save(job)
+
+	if pid and _pid_running(pid):
+		try:
+			terminate(pid)
+		except ProcessLookupError:
+			pass
+		for _ in range(40):
+			if not _pid_running(pid):
+				break
+			time.sleep(0.05)
+		if _pid_running(pid):
+			raise ValueError("The running import did not stop; its saved progress was kept.")
+
+	if pid:
+		with store.enqueue_lock():
+			job = store.load(job_id)
+			if job.get("status") == "complete":
+				raise ValueError("A completed import cannot be cancelled or have its progress removed.")
+			if job.get("status") in {"cancelled", "superseded"}:
+				raise ValueError("This import is no longer active or resumable.")
+			job["status"] = "cancelling"
+			job["phase"] = "cancelling"
+			job["cancellationOwnerPid"] = os.getpid()
+			job["pid"] = None
+			job["notification"] = {"pending": False, "notifiedAt": (job.get("notification") or {}).get("notifiedAt")}
+			store.save(job)
 			store.release_runner(pid)
 
-		job["status"] = "cancelled"
-		job["phase"] = "cancelled"
-		job["finishedAt"] = _now()
-		job["notification"] = {"pending": False, "notifiedAt": None}
-		store.save(job)
-		removed = (
-			{"recordings": 0, "files": 0, "music_tracks": 0, "cache_entries": 0}
-			if job.get("action") == "playlist_update_combined"
-			else _delete_source_progress(job, store, delete_music=delete_music, exact_lookup=exact_lookup)
-		)
+	try:
+		with music_operation_lock():
+			removed = (
+				{"recordings": 0, "files": 0, "music_tracks": 0, "cache_entries": 0}
+				if job.get("action") == "playlist_update_combined"
+				else _delete_source_progress(job, store, delete_music=delete_music, exact_lookup=exact_lookup)
+			)
 		removed_job_ids: list[str] = []
-		for existing in store.list():
-			if existing.get("status") == "complete" or not _same_source(existing, job):
-				continue
-			log_path = Path(str(existing.get("logPath") or ""))
-			if log_path.name and log_path.parent.resolve() == store.logs_dir.resolve() and log_path.is_file():
-				log_path.unlink()
+		with store.enqueue_lock():
+			job["status"] = "cancelled"
+			job["phase"] = "cancelled"
+			job.pop("cancellationOwnerPid", None)
+			job["finishedAt"] = _now()
+			for existing in store.list():
+				if existing.get("jobId") == job_id or existing.get("status") == "complete" or not _same_source(existing, job):
+					continue
+				log_path = Path(str(existing.get("logPath") or ""))
+				if log_path.name and log_path.parent.resolve() == store.logs_dir.resolve() and log_path.is_file():
+					log_path.unlink()
+				try:
+					store.job_path(str(existing["jobId"])).unlink()
+				except FileNotFoundError:
+					pass
+				removed_job_ids.append(str(existing["jobId"]))
+			if any(existing.get("status") == "queued" for existing in store.list()):
+				_ensure_runner(store, popen=popen)
 			try:
-				store.job_path(str(existing["jobId"])).unlink()
+				store.job_path(job_id).unlink()
 			except FileNotFoundError:
 				pass
-			removed_job_ids.append(str(existing["jobId"]))
-		if any(existing.get("status") == "queued" for existing in store.list()):
-			_ensure_runner(store, popen=popen)
+	except Exception as exc:
+		with store.enqueue_lock():
+			current = store.load(job_id)
+			current["status"] = "failed"
+			current["phase"] = "failed"
+			current["finishedAt"] = _now()
+			current["errorSummary"] = f"Cancellation cleanup failed: {str(exc)[:400]}"
+			current["retryable"] = True
+			store.save(current)
+		raise
 	return {
 		**job,
 		"removedJobIds": removed_job_ids,
@@ -536,14 +855,8 @@ def cancel_source_progress(
 	if source_type not in {"album", "playlist"}:
 		raise ValueError("The source type must be album or playlist.")
 	store = JobStore(root)
-	with store.enqueue_lock():
-		matching_jobs = [
-			job for job in store.list()
-			if (job.get("source") or {}).get("type") == source_type
-			and (job.get("source") or {}).get("id") == source_id
-		]
-		if any(job.get("status") in ACTIVE_STATES for job in matching_jobs):
-			raise ValueError("This import became active. Cancel it from the Active & Queued section instead.")
+	reservation_id = uuid4().hex
+	with music_operation_lock():
 		paths = ManagedPaths(root)
 		manifest = load_manifest(paths)
 		collection = manifest.get("albums", {}) if source_type == "album" else manifest.get("playlists", {})
@@ -558,37 +871,70 @@ def cancel_source_progress(
 			if not isinstance(recording, dict):
 				return False
 			return bool(music_binding_id(recording))
-		fully_imported = bool(items) and all(item_fully_imported(item) for item in items)
-		if fully_imported:
+		if bool(items) and all(item_fully_imported(item) for item in items):
 			raise ValueError("A completed import cannot be cancelled or have its progress removed.")
-		baseline_values = [job.get("stateBaseline") or {} for job in matching_jobs]
-		job_like = {
-			"source": {
-				"type": source_type,
-				"id": source_id,
-				"name": str(source_value.get("name") or "Spotify source"),
-				"url": str(source_value.get("spotify_url") or ""),
-			},
-			"stateBaseline": {
-				"captured": any(value.get("captured") is True for value in baseline_values),
-				"persistentIds": sorted({
-					str(persistent_id)
-					for value in baseline_values
-					for persistent_id in value.get("persistentIds") or []
-					if str(persistent_id)
-				}),
-			},
-		}
-		removed = _delete_source_progress(job_like, store, delete_music=delete_music, exact_lookup=exact_lookup)
-		removed_job_ids: list[str] = []
-		for job in matching_jobs:
-			if job.get("status") == "complete":
-				continue
-			try:
-				store.job_path(str(job["jobId"])).unlink()
-			except FileNotFoundError:
-				pass
-			removed_job_ids.append(str(job["jobId"]))
+		with store.enqueue_lock():
+			matching_jobs = [
+				job for job in store.list()
+				if isinstance(job.get("source"), dict)
+				and job["source"].get("type") == source_type
+				and job["source"].get("id") == source_id
+			]
+			if any(job.get("status") in ACTIVE_STATES for job in matching_jobs):
+				raise ValueError("This import became active. Cancel it from the Active & Queued section instead.")
+			baseline_values = [job.get("stateBaseline") or {} for job in matching_jobs]
+			cleanup_values = [job.get("cancellationCleanup") for job in matching_jobs if isinstance(job.get("cancellationCleanup"), dict)]
+			job_like = {
+				"jobId": reservation_id,
+				"status": "cancelling",
+				"cancellationOwnerPid": os.getpid(),
+				"createdAt": _now(),
+				"source": {
+					"type": source_type,
+					"id": source_id,
+					"name": str(source_value.get("name") or "Spotify source"),
+					"url": str(source_value.get("spotify_url") or ""),
+				},
+				"stateBaseline": {
+					"captured": any(value.get("captured") is True for value in baseline_values),
+					"persistentIds": sorted({
+						str(persistent_id)
+						for value in baseline_values
+						for persistent_id in value.get("persistentIds") or []
+						if str(persistent_id)
+					}),
+				},
+				"cancellationCleanup": cleanup_values[-1] if cleanup_values else {},
+			}
+			store.save(job_like)
+		try:
+			removed = _delete_source_progress(job_like, store, delete_music=delete_music, exact_lookup=exact_lookup)
+			removed_job_ids: list[str] = []
+			with store.enqueue_lock():
+				for job in matching_jobs:
+					if job.get("status") == "complete":
+						continue
+					try:
+						store.job_path(str(job["jobId"])).unlink()
+					except FileNotFoundError:
+						pass
+					removed_job_ids.append(str(job["jobId"]))
+				try:
+					store.job_path(reservation_id).unlink()
+				except FileNotFoundError:
+					pass
+		except Exception as exc:
+			with store.enqueue_lock():
+				current = store.load(reservation_id)
+				current["status"] = "failed"
+				current["phase"] = "failed"
+				current["cancellationOwnerPid"] = None
+				current["finishedAt"] = _now()
+				current["errorSummary"] = f"Cancellation cleanup failed: {str(exc)[:400]}"
+				current["retryable"] = False
+				current["notification"] = {"pending": True, "notifiedAt": None}
+				store.save(current)
+			raise
 	return {
 		"sourceType": source_type,
 		"sourceId": source_id,
@@ -625,25 +971,28 @@ def retry_job(
 		},
 		state_baseline=original.get("stateBaseline") or {"captured": False, "persistentIds": []},
 	)
-	original["status"] = "superseded"
-	original["phase"] = "superseded"
-	original["retryable"] = False
-	original["supersededBy"] = retried["jobId"]
-	store.save(original)
 	return retried
 
 
 def acknowledge_notification(job_id: str, *, root: Path = MANAGED_ROOT) -> dict[str, Any]:
 	store = JobStore(root)
-	job = store.load(job_id)
-	notification = job.setdefault("notification", {})
-	notification["pending"] = False
-	notification["notifiedAt"] = _now()
-	return store.save(job)
+	def acknowledge(job: dict[str, Any]) -> None:
+		notification = job.setdefault("notification", {})
+		notification["pending"] = False
+		notification["notifiedAt"] = _now()
+	return store.update(job_id, acknowledge)
 
 
 def _source_from_manifest(job: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any] | None:
-	source = job["source"]
+	source = job.get("source")
+	if (
+		not isinstance(source, dict)
+		or not isinstance(source.get("type"), str)
+		or source.get("type") not in {"album", "playlist"}
+		or not isinstance(source.get("id"), str)
+		or not source.get("id")
+	):
+		return None
 	collection = manifest.get("albums", {}) if source["type"] == "album" else manifest.get("playlists", {})
 	value = collection.get(source["id"])
 	return value if isinstance(value, dict) else None
@@ -679,15 +1028,49 @@ def _track_state(recording: dict[str, Any], *, current_id: str | None, current_s
 	return "not_started"
 
 
-def sync_from_manifest(job: dict[str, Any], store: JobStore) -> dict[str, Any]:
-	before = json.dumps({
-		"source": job.get("source"),
-		"currentTrack": job.get("currentTrack"),
-		"tracks": job.get("tracks"),
-		"counts": job.get("counts"),
-	}, sort_keys=True)
+def _persist_progress(job: dict[str, Any], store: JobStore) -> None:
+	job_id = str(job.get("jobId") or "")
+	if not job_id:
+		return
+	def merge(current: dict[str, Any]) -> bool:
+		if current.get("status") in {"cancelled", "cancelling", "superseded", "complete", "failed", "needs_attention"}:
+			return False
+		changed = False
+		if current.get("status") == "queued":
+			current["status"] = "running"
+			current["pid"] = int(job.get("pid") or os.getpid())
+			current["startedAt"] = current.get("startedAt") or _now()
+			changed = True
+		if current.get("phase") != job.get("phase"):
+			current["phase"] = job.get("phase")
+			changed = True
+		if current.get("currentTrack") != job.get("currentTrack"):
+			current["currentTrack"] = job.get("currentTrack")
+			changed = True
+		if job.get("trackProgress") is not None and current.get("trackProgress") != job.get("trackProgress"):
+			current["trackProgress"] = job.get("trackProgress")
+			changed = True
+		source = current.setdefault("source", {})
+		for field in ("name", "total"):
+			value = (job.get("source") or {}).get(field)
+			if source.get(field) != value:
+				source[field] = value
+				changed = True
+		return changed
+	updated = store.update(job_id, merge)
+	for key in ("phase", "currentTrack", "trackProgress", "source"):
+		if key in updated:
+			job[key] = updated[key]
+
+
+def sync_from_manifest(
+	job: dict[str, Any],
+	store: JobStore,
+	manifest: dict[str, Any] | None = None,
+) -> dict[str, Any]:
 	try:
-		manifest = load_manifest(ManagedPaths(store.root))
+		if manifest is None:
+			manifest = load_manifest(ManagedPaths(store.root))
 	except (OSError, ValueError):
 		return job
 	source_value = _source_from_manifest(job, manifest)
@@ -698,12 +1081,23 @@ def sync_from_manifest(job: dict[str, Any], store: JobStore) -> dict[str, Any]:
 		pending = source_value.get("pending_update")
 		if not isinstance(pending, dict):
 			if job.get("status") == "running":
-				for track in job.get("tracks") or []:
-					track["state"] = "complete"
-				count = len(job.get("tracks") or [])
-				job["counts"] = {key: 0 for key in job.get("counts") or {}}
-				job["counts"].update({"total": count, "complete": count, "ready": count})
-				return store.save(job)
+				tracks = [dict(track, state="complete") for track in job.get("tracks") or []]
+				count = len(tracks)
+				counts = {key: 0 for key in job.get("counts") or {}}
+				counts.update({"total": count, "complete": count, "ready": count})
+				def complete_pending(current: dict[str, Any]) -> bool:
+					if current.get("status") != "running":
+						return False
+					if current.get("tracks") == tracks and current.get("counts") == counts:
+						return False
+					current["tracks"] = tracks
+					current["counts"] = counts
+					return True
+				updated = store.update(str(job["jobId"]), complete_pending)
+				for key in ("tracks", "counts"):
+					if key in updated:
+						job[key] = updated[key]
+				return job
 			return job
 		items = list(pending.get("addition_items") or []) + [
 			{
@@ -817,13 +1211,30 @@ def sync_from_manifest(job: dict[str, Any], store: JobStore) -> dict[str, Any]:
 		})
 	job["tracks"] = tracks
 	job["counts"] = counts
-	after = json.dumps({
-		"source": job.get("source"),
-		"currentTrack": job.get("currentTrack"),
-		"tracks": job.get("tracks"),
-		"counts": job.get("counts"),
-	}, sort_keys=True)
-	return store.save(job) if after != before else job
+	job_id = str(job.get("jobId") or "")
+	if job_id:
+		def merge(current: dict[str, Any]) -> bool:
+			if current.get("status") in {"cancelled", "cancelling", "superseded"}:
+				return False
+			new_source = dict(current.get("source") or {})
+			new_source.update({"name": job["source"]["name"], "total": job["source"]["total"]})
+			if (
+				new_source == current.get("source")
+				and current.get("currentTrack") == job.get("currentTrack")
+				and current.get("tracks") == tracks
+				and current.get("counts") == counts
+			):
+				return False
+			current["source"] = new_source
+			current["currentTrack"] = job.get("currentTrack")
+			current["tracks"] = tracks
+			current["counts"] = counts
+			return True
+		updated = store.update(job_id, merge)
+		for key in ("source", "currentTrack", "tracks", "counts"):
+			if key in updated:
+				job[key] = updated[key]
+	return job
 
 
 def _set_current_track(job: dict[str, Any], store: JobStore, label: str, phase: str) -> None:
@@ -838,6 +1249,7 @@ def _set_current_track(job: dict[str, Any], store: JobStore, label: str, phase: 
 	)
 	job["currentTrack"] = dict(match) if match else {"title": label.strip(), "artists": "", "recordingId": None}
 	job["currentTrack"]["state"] = phase
+	_persist_progress(job, store)
 	sync_from_manifest(job, store)
 
 
@@ -916,6 +1328,7 @@ def update_structured_progress(job: dict[str, Any], store: JobStore, event: dict
 		}
 		if event.get("recording_id"):
 			job.setdefault("trackProgress", {})[str(event["recording_id"])] = phase
+	_persist_progress(job, store)
 	sync_from_manifest(job, store)
 
 
@@ -977,17 +1390,22 @@ def run_job(
 ) -> dict[str, Any]:
 	store.logs_dir.mkdir(parents=True, exist_ok=True)
 	log_path = store.logs_dir / f"import-{job['source']['type']}-{job['jobId'][:10]}.log"
-	job.update({
-		"status": "running",
-		"phase": "loading_metadata",
-		"pid": os.getpid(),
-		"startedAt": job.get("startedAt") or _now(),
-		"finishedAt": None,
-		"logPath": str(log_path),
-		"errorSummary": None,
-		"retryable": False,
-	})
-	store.save(job)
+	with store.transaction_lock():
+		current = store.load(str(job["jobId"]))
+		if current.get("status") in {"cancelled", "cancelling", "superseded", "complete"}:
+			return current
+		current.update({
+			"status": "running",
+			"phase": "loading_metadata",
+			"pid": os.getpid(),
+			"startedAt": current.get("startedAt") or _now(),
+			"finishedAt": None,
+			"logPath": str(log_path),
+			"errorSummary": None,
+			"retryable": False,
+		})
+		job.clear()
+		job.update(store.save(current))
 	code = 0
 	try:
 		with log_path.open("a", encoding="utf-8") as log_handle:
@@ -1031,7 +1449,15 @@ def run_job(
 	elif status == "failed" and not job.get("errorSummary"):
 		job["errorSummary"] = "The import stopped before completion."
 	job["notification"] = {"pending": True, "notifiedAt": None}
-	store.save(job)
+	with store.transaction_lock():
+		current = store.load(str(job["jobId"]))
+		if current.get("status") in {"cancelled", "cancelling", "superseded", "complete"}:
+			job.clear()
+			job.update(current)
+			return job
+		current.update(job)
+		job.clear()
+		job.update(store.save(current))
 	try:
 		notifier(str(job["jobId"]))
 	except Exception:
@@ -1040,21 +1466,82 @@ def run_job(
 	return job
 
 
-def recover_interrupted(store: JobStore) -> None:
-	for job in store.list():
-		if job.get("status") != "running":
+def recover_interrupted(store: JobStore, jobs: list[dict[str, Any]] | None = None) -> None:
+	job_rows = store.list() if jobs is None else jobs
+	# A newly written startup marker carries the PID that owns its bounded
+	# startup lease. If that process died before publishing a runner PID, make
+	# its queued work retryable on a read/poll; do not launch imports here.
+	marker = store.runner()
+	starter_pid = _safe_pid((marker or {}).get("starterPid"))
+	if marker and marker.get("status") == "starting" and starter_pid > 0 and not _pid_running(starter_pid):
+		with store.transaction_lock():
+			latest_marker = store.runner() or {}
+			if latest_marker.get("status") == "starting" and latest_marker.get("startupToken") == marker.get("startupToken") and _safe_pid(latest_marker.get("starterPid")) == starter_pid and not _pid_running(starter_pid):
+				for row in job_rows:
+					if row.get("malformedRecord") or row.get("status") != "queued":
+						continue
+					job_id = str(row.get("jobId") or "")
+					try:
+						current = store.load(job_id)
+					except (OSError, ValueError, json.JSONDecodeError):
+						continue
+					if current.get("status") != "queued":
+						continue
+					current["status"] = "failed"
+					current["phase"] = "failed"
+					current["pid"] = None
+					current["finishedAt"] = _now()
+					current["errorSummary"] = "The queue runner stopped during startup. Retry this import."
+					current["retryable"] = True
+					current["notification"] = {"pending": True, "notifiedAt": None}
+					row.clear()
+					row.update(store.save(current))
+				try:
+					store.runner_path.unlink()
+				except FileNotFoundError:
+					pass
+	for job in job_rows:
+		if job.get("malformedRecord"):
 			continue
-		pid = int(job.get("pid") or 0)
+		if job.get("status") not in {"running", "cancelling"}:
+			continue
+		pid = _safe_pid(job.get("pid"))
+		if job.get("status") == "cancelling":
+			owner_pid = _safe_pid(job.get("cancellationOwnerPid"))
+			if owner_pid and _pid_running(owner_pid):
+				continue
+			def recover_cancellation(current: dict[str, Any]) -> bool:
+				if current.get("status") != "cancelling" or _safe_pid(current.get("cancellationOwnerPid")) != owner_pid:
+					return False
+				current["status"] = "failed"
+				current["phase"] = "failed"
+				current["pid"] = None
+				current.pop("cancellationOwnerPid", None)
+				current["finishedAt"] = _now()
+				current["errorSummary"] = "Cancellation cleanup stopped before it finished. Review this source before resuming."
+				current["retryable"] = False
+				current["notification"] = {"pending": True, "notifiedAt": None}
+				return True
+			recovered = store.update(str(job["jobId"]), recover_cancellation)
+			job.clear()
+			job.update(recovered)
+			continue
 		if _pid_running(pid):
 			continue
-		job["status"] = "failed"
-		job["phase"] = "failed"
-		job["pid"] = None
-		job["finishedAt"] = _now()
-		job["errorSummary"] = "The previous runner stopped. Retry this import."
-		job["retryable"] = True
-		job["notification"] = {"pending": True, "notifiedAt": None}
-		store.save(job)
+		def recover(current: dict[str, Any]) -> bool:
+			if current.get("status") != "running" or _safe_pid(current.get("pid")) != pid:
+				return False
+			current["status"] = "failed"
+			current["phase"] = "failed"
+			current["pid"] = None
+			current["finishedAt"] = _now()
+			current["errorSummary"] = "The previous runner stopped. Retry this import."
+			current["retryable"] = True
+			current["notification"] = {"pending": True, "notifiedAt": None}
+			return True
+		recovered = store.update(str(job["jobId"]), recover)
+		job.clear()
+		job.update(recovered)
 
 
 def run_queue(*, root: Path = MANAGED_ROOT, engine: Callable[[list[str]], int] = cli.run, notifier: Callable[[str], None] = notify_raycast) -> None:
@@ -1070,32 +1557,40 @@ def _run_queue(
 	notifier: Callable[[str], None] = notify_raycast,
 ) -> None:
 	store = JobStore(root)
-	with store.worker_lock() as acquired:
-		if not acquired:
-			return
-		try:
+	while True:
+		with store.worker_lock() as acquired:
+			if not acquired:
+				return
 			recover_interrupted(store)
 			while True:
-				queued = sorted(
-					(job for job in store.list() if job.get("status") == "queued"),
-					key=lambda job: (int(job.get("queueSequence") or 0), str(job.get("createdAt") or "")),
-				)
-				if not queued:
-					break
-				try:
-					queued_job = store.load(str(queued[0]["jobId"]))
-				except ValueError:
-					continue
-				if queued_job.get("status") != "queued":
-					continue
+				with store.transaction_lock():
+					queued = sorted(
+						(job for job in store.list() if job.get("status") == "queued"),
+						key=lambda job: (int(job.get("queueSequence") or 0), str(job.get("createdAt") or "")),
+					)
+					if not queued:
+						break
+					try:
+						queued_job = store.load(str(queued[0]["jobId"]))
+					except ValueError:
+						continue
+					if queued_job.get("status") != "queued":
+						continue
+					queued_job.update(status="running", phase="loading_metadata", pid=os.getpid(), startedAt=queued_job.get("startedAt") or _now())
+					store.save(queued_job)
 				run_job(queued_job, store, engine=engine, notifier=notifier)
-		finally:
+		# Drop the worker lock before checking idle state. If enqueue arrives in
+		# this gap it sees our live runner marker; this check then reacquires work.
+		with store.transaction_lock():
+			if any(job.get("status") == "queued" for job in store.list()):
+				continue
 			store.release_runner(os.getpid())
+			return
 
 
 def _same_source(left: dict[str, Any], right: dict[str, Any]) -> bool:
-	left_source = left.get("source") or {}
-	right_source = right.get("source") or {}
+	left_source = left.get("source") if isinstance(left.get("source"), dict) else {}
+	right_source = right.get("source") if isinstance(right.get("source"), dict) else {}
 	return left_source.get("type") == right_source.get("type") and left_source.get("id") == right_source.get("id")
 
 
@@ -1105,59 +1600,102 @@ def public_job(job: dict[str, Any]) -> dict[str, Any]:
 	value.pop("stateBaseline", None)
 	value.pop("cacheBaseline", None)
 	value.pop("runnerPid", None)
+	value.pop("cancellationOwnerPid", None)
+	value.pop("cancellationCleanup", None)
+	value.pop("cancellationCleanup", None)
 	value.pop("queueSequence", None)
 	return value
 
 
-def reconcile_terminal_jobs(store: JobStore) -> list[dict[str, Any]]:
-	"""Clear resolved attention rows and retire older attempts for the same source."""
+def reconcile_terminal_jobs(store: JobStore, manifest: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+	"""Clear resolved attention rows and retire older attempts using one snapshot."""
+	if manifest is None:
+		try:
+			manifest = load_manifest(ManagedPaths(store.root))
+		except (OSError, ValueError):
+			manifest = None
 	jobs = store.list()
-	for job in sorted(jobs, key=lambda value: str(value.get("createdAt") or "")):
-		if job.get("status") not in {"needs_attention", "ready_to_continue", "failed"}:
-			continue
-		newer = next(
-			(
-				candidate for candidate in jobs
-				if str(candidate.get("createdAt") or "") > str(job.get("createdAt") or "")
-				and candidate.get("status") in {"queued", "running", "complete", "needs_attention", "ready_to_continue", "failed"}
-				and _same_source(job, candidate)
-			),
-			None,
+	recover_interrupted(store, jobs)
+	eligible = {"queued", "running", "complete", "needs_attention", "ready_to_continue", "failed"}
+	by_source: dict[tuple[Any, Any], list[dict[str, Any]]] = {}
+	for candidate in jobs:
+		source = candidate.get("source") if isinstance(candidate.get("source"), dict) else {}
+		by_source.setdefault((source.get("type"), source.get("id")), []).append(candidate)
+	newest_by_source = {
+		source_key: max(
+			(attempt for attempt in attempts if attempt.get("status") in eligible),
+			key=lambda value: (str(value.get("createdAt") or ""), str(value.get("jobId") or "")),
+			default=None,
 		)
-		if not newer:
-			continue
-		job["status"] = "superseded"
-		job["phase"] = "superseded"
-		job["supersededBy"] = newer.get("jobId")
-		job["retryable"] = False
-		job["notification"] = {"pending": False, "notifiedAt": (job.get("notification") or {}).get("notifiedAt")}
-		store.save(job)
-	jobs = store.list()
+		for source_key, attempts in by_source.items()
+	}
 	for job in jobs:
 		if job.get("status") not in {"needs_attention", "ready_to_continue", "failed"}:
 			continue
-		job = sync_from_manifest(job, store)
+		source = job.get("source") if isinstance(job.get("source"), dict) else {}
+		newer = newest_by_source.get((source.get("type"), source.get("id")))
+		if newer and str(newer.get("createdAt") or "") <= str(job.get("createdAt") or ""):
+			newer = None
+		if not newer:
+			continue
+		job_id = str(job["jobId"])
+		def retire(current: dict[str, Any]) -> bool:
+			if current.get("status") not in {"needs_attention", "ready_to_continue", "failed"}:
+				return False
+			current["status"] = "superseded"
+			current["phase"] = "superseded"
+			current["supersededBy"] = newer.get("jobId")
+			current["retryable"] = False
+			current["notification"] = {"pending": False, "notifiedAt": (current.get("notification") or {}).get("notifiedAt")}
+			return True
+		job.update(store.update(job_id, retire))
+	for job in jobs:
+		if job.get("status") not in {"needs_attention", "ready_to_continue", "failed"}:
+			continue
+		job = sync_from_manifest(job, store, manifest)
 		if job.get("status") == "failed":
 			continue
 		counts = job.get("counts") or {}
 		if counts.get("review") or counts.get("failed"):
 			if job.get("status") == "ready_to_continue":
-				job["status"] = "needs_attention"
-				job["phase"] = "needs_attention"
-				store.save(job)
+				def attention(current: dict[str, Any]) -> bool:
+					if current.get("status") != "ready_to_continue":
+						return False
+					current["status"] = "needs_attention"
+					current["phase"] = "needs_attention"
+					return True
+				job.update(store.update(str(job["jobId"]), attention))
 			continue
-		job["status"] = "complete" if counts.get("total") and counts.get("complete") == counts.get("total") else "ready_to_continue"
-		job["phase"] = job["status"]
-		job["errorSummary"] = None
-		job["retryable"] = False
-		job["notification"] = {"pending": False, "notifiedAt": (job.get("notification") or {}).get("notifiedAt")}
-		store.save(job)
-	return store.list()
+		target_status = "complete" if counts.get("total") and counts.get("complete") == counts.get("total") else "ready_to_continue"
+		def resolve(current: dict[str, Any]) -> bool:
+			if current.get("status") not in {"needs_attention", "ready_to_continue"}:
+				return False
+			if current.get("status") == target_status and not current.get("errorSummary") and not current.get("retryable") and not (current.get("notification") or {}).get("pending"):
+				return False
+			current["status"] = target_status
+			current["phase"] = target_status
+			current["errorSummary"] = None
+			current["retryable"] = False
+			current["notification"] = {"pending": False, "notifiedAt": (current.get("notification") or {}).get("notifiedAt")}
+			return True
+		job.update(store.update(str(job["jobId"]), resolve))
+	return jobs
 
 
-def jobs_snapshot(*, root: Path = MANAGED_ROOT) -> dict[str, Any]:
+def jobs_snapshot(
+	*,
+	root: Path = MANAGED_ROOT,
+	manifest: dict[str, Any] | None = None,
+	jobs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
 	store = JobStore(root)
-	jobs = reconcile_terminal_jobs(store)
+	if jobs is None:
+		if manifest is None:
+			try:
+				manifest = load_manifest(ManagedPaths(root))
+			except (OSError, ValueError):
+				manifest = None
+		jobs = reconcile_terminal_jobs(store, manifest)
 	visible = [job for job in jobs if job.get("status") in {"queued", "running", "needs_attention", "ready_to_continue", "failed"}]
 	visible.extend(job for job in jobs if job.get("status") == "complete")
 	return {

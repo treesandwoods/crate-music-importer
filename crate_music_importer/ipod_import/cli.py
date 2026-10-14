@@ -15,11 +15,11 @@ from crate_music_importer.ipod_import.manifest import ManagedPaths, backfill_pla
 from crate_music_importer.ipod_import.media import check_tools
 from crate_music_importer.ipod_import.music import load_music_fixture, lookup_music_track, music_binding_id, scan_music_library_for_health, verify_music_tracks
 from crate_music_importer.ipod_import.music_cache import (
+	MusicCacheSession,
+	cache_rebuild_lock,
 	load_music_cache,
 	music_cache_tracks,
-	remove_music_cache_tracks,
 	refresh_music_cache,
-	upsert_music_cache_track,
 )
 from crate_music_importer.ipod_import.pipeline import (
 	apply_album_to_music,
@@ -70,7 +70,9 @@ def _parser() -> argparse.ArgumentParser:
 	apply.add_argument("playlist", help="Spotify playlist ID, Spotify URL, or exact saved playlist name")
 	apply.add_argument("--confirm-music-write", action="store_true", required=True)
 
-	subparsers.add_parser("saved-playlists", help="List saved imported playlists and stored Spotify links.").add_argument("--json", action="store_true")
+	saved = subparsers.add_parser("saved-playlists", help="List saved imported playlists and stored Spotify links.")
+	saved.add_argument("--json", action="store_true")
+	saved.add_argument("--cached", action="store_true", help=argparse.SUPPRESS)
 	update_preview = subparsers.add_parser("playlist-update-preview", help="Preview an exact Spotify-order sync for a saved playlist.")
 	update_preview.add_argument("playlist")
 	update_preview.add_argument("--spotify-fixture", type=Path, help=argparse.SUPPRESS)
@@ -397,6 +399,10 @@ def run(argv: list[str] | None = None, *, on_progress: Callable[[dict[str, Any]]
 			return 1
 	from crate_music_importer.ipod_import.dependency_lock import dependency_lock
 	with dependency_lock():
+		if arguments[:1] in (["apply"], ["album-apply"], ["playlist-update-apply"]):
+			from crate_music_importer.ipod_import.music_lock import music_operation_lock
+			with music_operation_lock():
+				return _run(arguments, on_progress=on_progress)
 		return _run(arguments, on_progress=on_progress)
 
 
@@ -417,8 +423,9 @@ def _run(
 		from crate_music_importer.ipod_import.health import build_health_report, failed_health_report, save_health_report
 		try:
 			manifest = load_manifest(paths)
-			music_tracks = scan_music_library_for_health()
-			refresh_music_cache(paths, music_tracks)
+			with cache_rebuild_lock(paths):
+				music_tracks = scan_music_library_for_health()
+				refresh_music_cache(paths, music_tracks)
 			result = build_health_report(paths, manifest, music_tracks, on_progress=on_progress, deep_all=args.deep_all)
 		except Exception as exc:
 			result = failed_health_report(str(exc))
@@ -428,8 +435,7 @@ def _run(
 	manifest = load_manifest(paths)
 	if args.command == "saved-playlists":
 		update_manifest(paths, backfill_playlist_urls)
-		manifest = load_manifest(paths)
-		resolved_covers = refresh_playlist_covers(manifest, fetch_playlist_cover)
+		resolved_covers = {} if args.cached else refresh_playlist_covers(manifest, fetch_playlist_cover)
 		if resolved_covers:
 
 			def cache_resolved_covers(latest: dict[str, Any]) -> None:
@@ -446,9 +452,13 @@ def _run(
 	if args.command == "playlist-link-set":
 		playlist_id = _find_playlist_id(manifest, args.playlist)
 		_, canonical = parse_playlist_url(args.url)
-		manifest["playlists"][playlist_id]["spotify_url"] = canonical
-		manifest["playlists"][playlist_id]["updated_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-		save_manifest(paths, manifest)
+		def set_link(latest: dict[str, Any]) -> None:
+			playlist = latest["playlists"].get(playlist_id)
+			if not isinstance(playlist, dict):
+				raise ValueError("The saved playlist no longer exists.")
+			playlist["spotify_url"] = canonical
+			playlist["updated_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+		update_manifest(paths, set_link)
 		print(json.dumps({"playlist_id": playlist_id, "spotify_url": canonical}, ensure_ascii=False))
 		return 0
 	if args.command == "playlist-artwork-refresh":
@@ -460,7 +470,7 @@ def _run(
 		if not cover_url:
 			raise ValueError("Spotify did not return a playlist image. Try again later.")
 		_save_playlist_cover(paths, playlist_id, url, cover_url)
-		print(json.dumps({"playlist_id": playlist_id, "cover_url": cover_url}, ensure_ascii=False) if args.json else cover_url)
+		print(json.dumps({"playlist_id": playlist_id, "cover_url": cover_url, "spotify_url": url}, ensure_ascii=False) if args.json else cover_url)
 		return 0
 	if args.command == "playlist-update-preview":
 		playlist_id = _find_playlist_id(manifest, args.playlist)
@@ -496,14 +506,15 @@ def _run(
 		return 2 if statuses & {"review_required", "failed", "review_music"} else 0
 	if args.command == "playlist-update-apply":
 		playlist_id = _find_playlist_id(manifest, args.playlist)
+		cache_session = MusicCacheSession(paths)
 		result = apply_playlist_update(
 			manifest,
 			playlist_id,
 			paths,
-			music_cache_tracks(load_music_cache(paths)),
+			cache_session.tracks(),
 			exact_lookup=lookup_music_track,
-			cache_updater=lambda track: upsert_music_cache_track(paths, track),
-			cache_remover=lambda persistent_ids: remove_music_cache_tracks(paths, persistent_ids),
+			cache_updater=cache_session.upsert,
+			cache_remover=cache_session.remove,
 			on_progress=on_progress,
 		)
 		print(f"Playlist update complete: {result['additions']} additions; {result['removals']} removals; {result['reorders']} Spotify position changes; {result['music_repairs']} Music repairs; {result['deleted']} permanently deleted.")
@@ -553,7 +564,8 @@ def _run(
 		album_id = _find_album_id(manifest, args.album)
 		album = manifest.get("albums", {}).get(album_id) or {}
 		_progress(on_progress, "checking_music_ids", source_type="album", source_id=album_id, name=album.get("name"), total=len(album.get("items") or []))
-		music_tracks = music_cache_tracks(load_music_cache(paths))
+		cache_session = MusicCacheSession(paths)
+		music_tracks = cache_session.tracks()
 		result = apply_album_to_music(
 			manifest,
 			album_id,
@@ -561,8 +573,8 @@ def _run(
 			music_tracks,
 			on_progress=on_progress,
 			exact_lookup=lookup_music_track,
-			cache_updater=lambda track: upsert_music_cache_track(paths, track),
-			cache_remover=lambda persistent_ids: remove_music_cache_tracks(paths, persistent_ids),
+			cache_updater=cache_session.upsert,
+			cache_remover=cache_session.remove,
 			verify_music=verify_music_tracks,
 			verify_music_final=lambda persistent_ids: verify_music_tracks(persistent_ids, settle_seconds=10.0),
 		)
@@ -594,15 +606,16 @@ def _run(
 		return 0 if not statuses.get("failed") and not statuses.get("review_required") else 2
 	if args.command == "apply":
 		playlist_id = _find_playlist_id(manifest, args.playlist)
+		cache_session = MusicCacheSession(paths)
 		_progress(on_progress, "checking_music_ids", source_type="playlist", source_id=playlist_id)
 		result = apply_to_music(
 			manifest,
 			playlist_id,
 			paths,
-			music_cache_tracks(load_music_cache(paths)),
+			cache_session.tracks(),
 			on_progress=on_progress,
 			exact_lookup=lookup_music_track,
-			cache_updater=lambda track: upsert_music_cache_track(paths, track),
+			cache_updater=cache_session.upsert,
 		)
 		print(f"Music playlist updated: {result['track_count']} ordered entries; {result['new_imports']} new managed MP3 imports.")
 		print("Finder/iPod sync settings were not touched. Use the normal whole-library sync later; the iPod need not be connected now.")
@@ -623,7 +636,7 @@ def _run(
 				playlist_id = _find_playlist_id(manifest, args.playlist)
 		rows = _review_rows(manifest, playlist_id, album_id)
 		if args.json:
-			snapshot = resolver_snapshot(paths)
+			snapshot = resolver_snapshot(paths, manifest=manifest)
 			if playlist_id or album_id:
 				source_type = "playlist" if playlist_id else "album"
 				source_id = playlist_id or album_id

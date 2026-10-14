@@ -36,6 +36,7 @@ export function PlaylistBatchUpdatePreviewView() {
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
     async function load() {
       setLoading(true);
       setEntries([]);
@@ -43,10 +44,15 @@ export function PlaylistBatchUpdatePreviewView() {
       setTotal(0);
       setError(undefined);
       try {
-        const playlists = await loadSavedPlaylists();
+        const playlists = await loadSavedPlaylists(false, controller.signal);
         if (cancelled) return;
         setTotal(playlists.length);
-        const next = await loadPlaylistBatch(playlists, previewPlaylistUpdate, setCompleted, () => cancelled);
+        const next = await loadPlaylistBatch(
+          playlists,
+          (id) => previewPlaylistUpdate(id, controller.signal),
+          setCompleted,
+          () => cancelled,
+        );
         if (!cancelled) setEntries(next);
       } catch (caught) {
         if (!cancelled) setError(caught instanceof Error ? caught.message : String(caught));
@@ -57,6 +63,7 @@ export function PlaylistBatchUpdatePreviewView() {
     void load();
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [revision]);
 
