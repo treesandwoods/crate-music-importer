@@ -25,6 +25,7 @@ import type {
 import {
   activityReadySources,
   hasVisibleItems,
+  hasPendingLibraryCleanup,
   jobPhaseLabel,
   jobProgressSummary,
   jobStageSummary,
@@ -464,7 +465,8 @@ function ProblemActions({ problem, refresh }: { problem: ResolverProblem; refres
 
 function jobIcon(job: ImportJob): { source: Icon; tintColor: Color } {
   if (job.status === "complete") return { source: Icon.CheckCircle, tintColor: Color.Green };
-  if (job.status === "needs_attention") return { source: Icon.ExclamationMark, tintColor: Color.Orange };
+  if (job.status === "needs_attention" || hasPendingLibraryCleanup(job))
+    return { source: Icon.ExclamationMark, tintColor: Color.Orange };
   if (job.status === "failed") return { source: Icon.XMarkCircle, tintColor: Color.Red };
   if (job.status === "queued") return { source: Icon.List, tintColor: Color.SecondaryText };
   return { source: Icon.Clock, tintColor: Color.Blue };
@@ -476,21 +478,32 @@ function jobDetail(job: ImportJob): string {
     : "";
   const tracks = job.tracks.length
     ? job.tracks
-        .map((track) =>
-          job.status === "complete"
-            ? `${track.position}. ${markdownText(track.artists)} — ${markdownText(track.title)}`
-            : `${track.position}. **${trackStateLabel(track.state).toUpperCase()}** — ${markdownText(track.artists)} — ${markdownText(track.title)}`,
-        )
+        .map((track) => {
+          const name = markdownText(track.artists ? `${track.artists} — ${track.title}` : track.title);
+          if (job.mode === "update") {
+            if (job.status === "complete") return `- ${name}`;
+            const state =
+              hasPendingLibraryCleanup(job) && track.recordingId === job.failedRemovalId && track.state === "failed"
+                ? "Library cleanup pending"
+                : trackStateLabel(track.state);
+            return `- **${state}** — ${name}`;
+          }
+          return job.status === "complete"
+            ? `${track.position}. ${name}`
+            : `${track.position}. **${trackStateLabel(track.state).toUpperCase()}** — ${name}`;
+        })
         .join("\n")
     : "Track details will appear after Spotify metadata loads.";
   const error = job.errorSummary ? `\n\n### Attention\n\n${markdownText(job.errorSummary)}` : "";
   const progress = jobProgressSummary(job);
   const summary = job.status === "complete" || !progress ? "" : `\n\n${progress}`;
+  const kind = job.mode === "update" ? "Playlist Update" : job.source.type === "album" ? "Album" : "Playlist";
+  const heading = hasPendingLibraryCleanup(job) ? jobPhaseLabel(job) : `${kind} · ${jobPhaseLabel(job)}`;
   return `# ${markdownText(job.source.name)}
 
-**${job.mode === "update" ? "Playlist Update" : job.source.type === "album" ? "Album" : "Playlist"} · ${jobPhaseLabel(job)}**${summary}${current}
+**${heading}**${summary}${current}
 
-### Tracks
+### ${job.mode === "update" ? "Changes" : "Tracks"}
 
 ${tracks}${error}`;
 }
@@ -558,44 +571,53 @@ function CancelSourceProgressAction({ source, refresh }: { source: SourceReferen
 }
 
 function JobActions({ job, refresh }: { job: ImportJob; refresh: () => Promise<void> }) {
+  const cleanup = hasPendingLibraryCleanup(job);
+  const retryTitle = cleanup ? "Retry Library Cleanup" : "Retry Download + Add to Music";
+  const retry =
+    job.status === "failed" && job.retryable ? (
+      <Action
+        title={retryTitle}
+        icon={Icon.ArrowClockwise}
+        onAction={async () => {
+          const confirmed = await confirmAlert({
+            title: cleanup ? "Retry library cleanup?" : "Retry this import?",
+            message: cleanup
+              ? "Crate will check the saved playlist and ask Music to remove the verified library copy again."
+              : "Resume saved work, download remaining tracks, then update Music only when every track is ready.",
+            primaryAction: { title: retryTitle },
+            dismissAction: { title: "Cancel", style: Alert.ActionStyle.Cancel },
+          });
+          if (!confirmed) return;
+          const toast = await showCompactToast(
+            Toast.Style.Animated,
+            cleanup ? "Queueing library cleanup" : "Queueing import",
+          );
+          try {
+            const retried = await retryJob(job.jobId);
+            updateCompactToast(
+              toast,
+              Toast.Style.Success,
+              cleanup ? "Library cleanup queued" : `${job.source.type === "album" ? "Album" : "Playlist"} queued`,
+              cleanup ? job.source.name : `${retried.source.total || job.counts.total} tracks`,
+            );
+            await refresh();
+          } catch (error) {
+            updateCompactToast(
+              toast,
+              Toast.Style.Failure,
+              cleanup ? "Could not queue library cleanup" : "Could not queue import",
+              error instanceof Error ? error.message : String(error),
+            );
+          }
+        }}
+      />
+    ) : null;
   return (
     <ActionPanel>
+      {cleanup ? retry : null}
       <Action title="Refresh Activity" icon={Icon.ArrowClockwise} onAction={refresh} />
       {job.status !== "complete" ? <CancelProgressAction job={job} refresh={refresh} /> : null}
-      {job.status === "failed" && job.retryable ? (
-        <Action
-          title="Retry Download + Add to Music"
-          icon={Icon.ArrowClockwise}
-          onAction={async () => {
-            const confirmed = await confirmAlert({
-              title: "Retry this import?",
-              message:
-                "Resume saved work, download remaining tracks, then update Music only when every track is ready.",
-              primaryAction: { title: "Retry Download + Add to Music" },
-              dismissAction: { title: "Cancel", style: Alert.ActionStyle.Cancel },
-            });
-            if (!confirmed) return;
-            const toast = await showCompactToast(Toast.Style.Animated, "Queueing import");
-            try {
-              const retried = await retryJob(job.jobId);
-              updateCompactToast(
-                toast,
-                Toast.Style.Success,
-                `${job.source.type === "album" ? "Album" : "Playlist"} queued`,
-                `${retried.source.total || job.counts.total} tracks`,
-              );
-              await refresh();
-            } catch (error) {
-              updateCompactToast(
-                toast,
-                Toast.Style.Failure,
-                "Could not queue import",
-                error instanceof Error ? error.message : String(error),
-              );
-            }
-          }}
-        />
-      ) : null}
+      {cleanup ? null : retry}
       <Action.OpenInBrowser title="Open in Spotify" url={job.source.url} />
       {job.logPath ? <Action.ShowInFinder title="Show Job Log in Finder" path={job.logPath} /> : null}
     </ActionPanel>

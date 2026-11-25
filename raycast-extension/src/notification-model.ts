@@ -1,5 +1,7 @@
 import type { ImportJob } from "./types";
 
+import { hasPendingLibraryCleanup } from "./view-model";
+
 export const TOAST_TITLE_LIMIT = 32;
 export const TOAST_MESSAGE_LIMIT = 48;
 
@@ -54,7 +56,7 @@ export function jobToast(job: ImportJob): {
       ),
     };
   }
-  if (job.status === "failed" && job.mode === "update" && job.failedRemovalId) {
+  if (hasPendingLibraryCleanup(job)) {
     return { style: "failure", ...compactToast("Playlist synced", namedDetail(sourceName, "Cleanup pending")) };
   }
   if (job.status === "needs_attention") {

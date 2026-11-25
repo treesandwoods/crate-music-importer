@@ -59,7 +59,12 @@ export function sameSnapshot<T>(current: T | undefined, next: T): boolean {
   return current !== undefined && JSON.stringify(current) === JSON.stringify(next);
 }
 
+export function hasPendingLibraryCleanup(job: ImportJob): boolean {
+  return job.mode === "update" && job.status === "failed" && Boolean(job.failedRemovalId);
+}
+
 export function jobPhaseLabel(job: ImportJob): string {
+  if (hasPendingLibraryCleanup(job)) return "Playlist synced";
   const labels: Record<string, string> = {
     queued: "Queued — not started",
     loading_metadata: "Loading track names",
@@ -103,6 +108,7 @@ export function trackStateLabel(state: ImportJob["tracks"][number]["state"]): st
 }
 
 export function jobProgressSummary(job: ImportJob): string {
+  if (hasPendingLibraryCleanup(job)) return "Library cleanup pending";
   const counts = job.counts;
   const stages: Array<[string, number]> = [
     ["Not started", counts.notStarted || 0],
