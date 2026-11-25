@@ -15,6 +15,7 @@ const host = (name) => (props) => require("react").createElement(name, props, pr
 const Action = host("Action"), ActionPanel = host("ActionPanel"), List = host("List"), Form = host("Form");
 List.Section = host("Section"); List.Item = host("Item"); List.Item.Detail = host("Detail"); List.EmptyView = host("EmptyView");
 for (const name of ["CopyToClipboard", "ShowInFinder", "OpenInBrowser"]) Action[name] = host(name);
+Action.Style = {};
 const Alert = {ActionStyle:{}}, Color = {}, Icon = {}, Toast = {Style:{}}, confirmAlert = async () => false, useNavigation = () => ({});
 `,
   )
@@ -32,7 +33,7 @@ const bundled = buildSync({
   format: "cjs",
   external: ["react", "react/jsx-runtime"],
 }).outputFiles[0].text;
-test("mount replay replaces aborted refresh and renders every completed job", async () => {
+test("mount replay shows completed history and separates a synced playlist from its pending cleanup", async () => {
   const signals: AbortSignal[] = [];
   const history = Array.from({ length: 87 }, (_, i) => ({
     jobId: `history-${i}`,
@@ -59,7 +60,27 @@ test("mount replay replaces aborted refresh and renders every completed job", as
           );
         return Promise.resolve({
           resolver: { problems: [], sources: [], readySources: [] },
-          jobs: { jobs: history, pendingNotifications: [] },
+          jobs: {
+            jobs: [
+              ...history,
+              {
+                ...history[0],
+                jobId: "cleanup",
+                source: { type: "playlist", name: "Test playlist", id: "test", url: "url", total: 2 },
+                mode: "update",
+                status: "failed",
+                phase: "failed",
+                retryable: true,
+                failedRemovalId: "removed",
+                counts: { total: 2, complete: 1, failed: 1 },
+                tracks: [
+                  { position: 45, recordingId: "added", state: "complete", title: "Addition", artists: "Artist" },
+                  { position: 44, recordingId: "removed", state: "failed", title: "Removal", artists: "Artist" },
+                ],
+              },
+            ],
+            pendingNotifications: [],
+          },
         });
       },
     },
@@ -76,6 +97,13 @@ test("mount replay replaces aborted refresh and renders every completed job", as
       .find((row) => row.props.title === "Recently Completed");
     assert.ok(section);
     assert.equal(section.findAllByType("Item" as ElementType).length, 87);
+    const cleanup = view.root.findAllByType("Item" as ElementType).find((row) => row.props.title === "Test playlist");
+    assert.ok(cleanup);
+    assert.equal(cleanup.props.subtitle, "Playlist synced · Library cleanup pending");
+    const detail = cleanup.findByType("Detail" as ElementType).props.markdown;
+    assert.match(detail, /Library cleanup pending\*\* — Artist — Removal/);
+    assert.doesNotMatch(detail, /Failed|^\d+\./im);
+    assert.equal(cleanup.findAllByType("Action" as ElementType)[0].props.title, "Retry Library Cleanup");
     assert.equal(view.root.findByType("List" as ElementType).props.isLoading, false);
   } finally {
     if (view) await act(async () => view.unmount());
