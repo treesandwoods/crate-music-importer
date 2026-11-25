@@ -28,6 +28,7 @@ from crate_music_importer.ipod_import.jobs import (
 )
 from crate_music_importer.ipod_import.manifest import ManagedPaths, load_manifest, new_manifest, save_manifest, set_album, upsert_recording, update_manifest
 from crate_music_importer.ipod_import.music_cache import build_full_cache, load_music_cache, save_music_cache, upsert_music_cache_track
+from crate_music_importer.ipod_import.playlist_update import PlaylistCleanupError
 from crate_music_importer.ipod_import.resolver import resolve_youtube
 
 
@@ -473,6 +474,34 @@ class DurableJobTests(unittest.TestCase):
 			polled = sync_from_manifest(store.load(job["jobId"]), store)
 			self.assertEqual([t["state"] for t in polled["tracks"]], ["complete", "adding_to_music"])
 			self.assertEqual(polled["counts"]["complete"], 1)
+
+	def test_playlist_cleanup_error_marks_the_removal_and_preserves_completed_addition(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = Path(directory)
+			paths = ManagedPaths(root)
+			manifest = new_manifest(paths)
+			added, recording = upsert_recording(manifest, {"title": "Added", "artists": "Artist", "duration_ms": 180000})
+			recording["music_binding"] = {"persistent_id": "ADDED"}
+			removed, _ = upsert_recording(manifest, {"title": "Removed", "artists": "Artist", "duration_ms": 180000})
+			key = PLAYLIST_URL.rsplit("/", 1)[1]
+			manifest["playlists"][key] = {"name": "Saved", "items": [], "pending_update": {
+				"addition_items": [{"recording_id": added, "position": 1}],
+				"removals": [{"recording_id": removed, "action": "delete", "title": "Removed"}],
+				"music_checkpoint": {"applied_at": "now"},
+			}}
+			save_manifest(paths, manifest)
+			store = JobStore(root)
+			job = enqueue("playlist_update_combined", PLAYLIST_URL, root=root, popen=lambda *_a, **_kw: SimpleNamespace(pid=os.getpid()))
+			def engine(command):
+				if command[0] == "playlist-update-prepare":
+					return 0
+				update_structured_progress(job, store, {"phase": "complete", "recording_id": added})
+				raise PlaylistCleanupError(removed, "Removed", "Artist")
+			finished = run_job(job, store, engine=engine, notifier=lambda _: None)
+			self.assertEqual([row["state"] for row in finished["tracks"]], ["complete", "failed"])
+			self.assertEqual(finished["counts"]["failed"], 1)
+			self.assertIn("Artist — Removed", finished["errorSummary"])
+			self.assertNotIn("last_error", load_manifest(paths)["recordings"][added])
 
 	def test_unverified_music_binding_is_not_counted_as_complete(self):
 		with tempfile.TemporaryDirectory() as directory:

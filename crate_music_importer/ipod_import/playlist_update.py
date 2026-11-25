@@ -37,6 +37,13 @@ CacheTrackUpdater = Callable[[dict[str, Any]], None]
 CacheTrackRemover = Callable[[set[str]], int]
 
 
+class PlaylistCleanupError(MusicAutomationError):
+	def __init__(self, recording_id: str, title: str, artists: str):
+		self.recording_id = recording_id
+		label = f"{artists} — {title}" if artists else title
+		super().__init__(f"The playlist is in Spotify order. Music still lists “{label}” after Crate asked to delete it. Crate kept its audio file so cleanup can be retried.")
+
+
 def _now() -> str:
 	return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -349,6 +356,16 @@ def build_playlist_update_preview(
 	if status == "COLLISION":
 		return _blocked_preview(manifest, playlist_id, source, "playlist_collision", f"A different Music playlist now uses this name ({found_id or 'unknown ID'}). Update refused.")
 
+	previous = saved.get("pending_update") or {}
+	applied = (previous.get("music_checkpoint") or {}).get("applied_at")
+	if applied:
+		# A crash can occur between confirming Music's order and saving the new items.
+		items, snapshot = _updated_playlist_items(
+			previous.get("saved_items", saved.get("items") or []),
+			previous.get("addition_items") or [],
+			previous["spotify_snapshot"],
+		)
+		saved = dict(saved, items=items, spotify_occurrence_snapshot=snapshot, spotify_occurrence_counts=_occurrence_counts(snapshot))
 	baseline, baseline_complete, backfilled = _baseline(saved, manifest)
 	if not baseline_complete:
 		warning = "The saved Spotify occurrence baseline is incomplete, so an exact full-playlist sync cannot be proven safe. Reimport the playlist before updating it."
@@ -419,6 +436,17 @@ def build_playlist_update_preview(
 			"artists": artists,
 			"action": _delete_kind(manifest, playlist_id, recording_id, surviving_ids),
 		})
+	# An applied removal can still have a library entry or file to clean up.
+	# Reconfirm it only if the latest playlist and ownership still allow deletion.
+	planned_deletions = {row["recording_id"] for row in removals if row["action"] == "delete"}
+	for removal in previous.get("removals") or []:
+		key = removal["recording_id"]
+		if removal["action"] != "delete" or not (applied or removal.get("cleanup_only")) or key in planned_deletions:
+			continue
+		# Even a missing recording needs its saved deletion proof validated at apply.
+		if key not in surviving_ids and (key not in manifest["recordings"] or _delete_kind(manifest, playlist_id, key, surviving_ids) == "delete"):
+			removals.append(dict(removal, cleanup_only=True))
+			planned_deletions.add(key)
 	addition_positions = {int(item.get("spotify_position") or 0) for item in addition_items}
 	reorders = _spotify_reorders(manifest, current_links, addition_positions)
 	target_ids = [_recording_persistent_id(planned, str(row.get("recording_id") or "")) for row in current_links]
@@ -429,7 +457,12 @@ def build_playlist_update_preview(
 
 def save_pending_update(preview: PlaylistUpdatePreview, paths: ManagedPaths) -> dict[str, Any]:
 	playlist = preview.manifest["playlists"][preview.playlist_id]
+	prior_proofs = (playlist.get("pending_update") or {}).get("deletion_checkpoints") or {}
 	playlist["pending_update"] = {
+		"deletion_checkpoints": {
+			row["recording_id"]: copy.deepcopy(prior_proofs[row["recording_id"]])
+			for row in preview.removals if row.get("cleanup_only") and row["recording_id"] in prior_proofs
+		},
 		"created_at": _now(),
 		"spotify_url": preview.source["url"],
 		"cover_url": preview.source.get("cover_url"),
@@ -820,6 +853,7 @@ def apply_playlist_update(
 	for recording_id, values in positions.items():
 		manifest["recordings"][recording_id].setdefault("playlist_memberships", {})[playlist_id] = values
 	save_manifest(paths, manifest)
+	write_playlist_m3u8(manifest, playlist_id, paths)
 
 	deleted = 0
 	for removal in pending.get("removals") or []:
@@ -863,7 +897,7 @@ def apply_playlist_update(
 				music_deleter(persistent_id, managed_path)
 				remaining = exact_lookup(persistent_id)
 				if remaining is not None:
-					raise MusicAutomationError("Music did not confirm deletion of the exact managed track. Update stopped for attention.")
+					raise PlaylistCleanupError(recording_id, *_recording_title(manifest, recording_id))
 			delete_checkpoint["music_deleted"] = True
 			save_manifest(paths, manifest)
 		if not delete_checkpoint.get("cache_removed"):
@@ -895,7 +929,6 @@ def apply_playlist_update(
 	for recording in manifest.get("recordings", {}).values():
 		(recording.get("pending_playlist_memberships") or {}).pop(playlist_id, None)
 	playlist.pop("pending_update", None)
-	write_playlist_m3u8(manifest, playlist_id, paths)
 	save_manifest(paths, manifest)
 	return {
 		"track_count": len(playlist["items"]),

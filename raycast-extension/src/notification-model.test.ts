@@ -73,6 +73,17 @@ test("playlist update jobs use update language and change counts", () => {
   });
 });
 
+test("playlist cleanup failures distinguish the synced playlist in the HUD", () => {
+  const job = fixture("failed", "playlist");
+  job.mode = "update";
+  job.failedRemovalId = "removed";
+  assert.deepEqual(jobToast(job), {
+    style: "failure",
+    title: "Playlist synced",
+    message: "A very long source name · Cleanup pending",
+  });
+});
+
 test("long names truncate without cutting off the event count", () => {
   const job = fixture("needs_attention");
   job.source.name = "A name made deliberately much longer than the toast message can display without truncation";
