@@ -25,6 +25,7 @@ from crate_music_importer.ipod_import.manifest import ManagedPaths, file_sha256,
 from crate_music_importer.ipod_import.music import delete_managed_music_track, lookup_music_track, music_binding_id
 from crate_music_importer.ipod_import.music_cache import remove_music_cache_tracks
 from crate_music_importer.ipod_import.music_lock import music_operation_lock
+from crate_music_importer.ipod_import.playlist_update import PlaylistCleanupError
 from crate_music_importer.ipod_import.spotify import parse_source_url
 
 
@@ -1104,6 +1105,9 @@ def sync_from_manifest(
 				"position": int(removal.get("saved_position") or 0),
 				"recording_id": str(removal.get("recording_id") or ""),
 				"status": "removal",
+				"action": removal.get("action"),
+				"title": removal.get("title"),
+				"artists": removal.get("artists"),
 			}
 			for removal in pending.get("removals") or []
 		] + [
@@ -1155,6 +1159,8 @@ def sync_from_manifest(
 		if job.get("action") == "playlist_update_combined" and item.get("status") in {"removal", "reorder", "music_change"}:
 			checkpoint = (source_value.get("pending_update") or {}).get("music_checkpoint") or {}
 			state = "complete" if checkpoint.get("applied_at") else "not_started"
+			if item.get("action") == "delete" and recording:
+				state = "failed" if job.get("failedRemovalId") == item["recording_id"] else "not_started"
 		else:
 			state = _track_state(recording, current_id=current_id, current_state=current_state)
 			completed = (job.get("trackProgress") or {}).get(str(item.get("recording_id") or "")) == "complete" or job.get("status") == "complete"
@@ -1427,7 +1433,9 @@ def run_job(
 		job["errorSummary"] = str(exc)[:500]
 		job["retryable"] = True
 		current_id = str((job.get("currentTrack") or {}).get("recordingId") or "")
-		if current_id:
+		if isinstance(exc, PlaylistCleanupError):
+			job["failedRemovalId"] = exc.recording_id
+		elif current_id and job["currentTrack"].get("state") != "complete":
 			def record_failure(manifest: dict[str, Any]) -> None:
 				recording = manifest.get("recordings", {}).get(current_id)
 				if recording is not None:

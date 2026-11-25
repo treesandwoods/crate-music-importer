@@ -54,6 +54,9 @@ export function jobToast(job: ImportJob): {
       ),
     };
   }
+  if (job.status === "failed" && job.mode === "update" && job.failedRemovalId) {
+    return { style: "failure", ...compactToast("Playlist synced", namedDetail(sourceName, "Cleanup pending")) };
+  }
   if (job.status === "needs_attention") {
     const count = job.counts.review + job.counts.failed;
     return {

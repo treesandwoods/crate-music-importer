@@ -545,6 +545,38 @@ class PlaylistUpdateTests(unittest.TestCase):
 		self.assertTrue(managed_path.exists())
 		self.assertEqual(resumed["recordings"][b_id]["music_binding"]["persistent_id"], "PID-B")
 
+	def test_refresh_after_music_keeps_deleted_song_preserves_order_and_cleanup_proof(self):
+		paths, manifest, music = self.fixture(("a", "b", "c"))
+		b_id = manifest["playlists"]["saved"]["items"][1]["recording_id"]
+		file = paths.root / "b.mp3"
+		file.write_bytes(b"managed")
+		manifest["recordings"][b_id]["managed_file"] = {"relative_path": file.name, "audio_sha256": "proof", "managed_by_crate": True}
+		music[1]["location"] = str(file)
+		first = self.preview(manifest, music, ("c", "a"))
+		save_pending_update(first, paths)
+		options = dict(
+			exact_lookup=lambda pid: next((row for row in music if row["persistent_id"] == pid), None),
+			cache_updater=lambda row: None, cache_remover=lambda ids: None,
+			membership_reader=lambda *_: ["PID-A", "PID-B", "PID-C"], membership_editor=lambda *_: ["PID-C", "PID-A"],
+			music_deleter=lambda *_: True, status_checker=lambda _, pid: ("FOUND", pid), audio_hasher=lambda _: "proof",
+		)
+		with self.assertRaisesRegex(MusicAutomationError, "Music still lists.*Artist — b"):
+			apply_playlist_update(first.manifest, "saved", paths, music, **options)
+		self.assertTrue(file.is_file())
+		recovered = load_manifest(paths)
+		second = self.preview(recovered, music, ("a", "c", "a"))
+		self.assertEqual([row["spotify_id"] for row in second.additions], ["a"])
+		self.assertEqual([row["recording_id"] for row in second.removals], [b_id])
+		proof = recovered["playlists"]["saved"]["pending_update"]["deletion_checkpoints"][b_id]
+		self.assertEqual(save_pending_update(second, paths)["deletion_checkpoints"][b_id], proof)
+		restored = self.preview(recovered, music, ("c", "b", "a"))
+		self.assertFalse(restored.removals)
+		options.update(membership_reader=lambda *_: ["PID-C", "PID-A"], membership_editor=lambda *_: ["PID-A", "PID-C", "PID-A"])
+		music[:] = [row for row in music if row["persistent_id"] != "PID-B"]
+		apply_playlist_update(second.manifest, "saved", paths, music, **options)
+		self.assertEqual([row["spotify_id"] for row in second.manifest["playlists"]["saved"]["items"]], ["a", "c", "a"])
+		self.assertFalse(file.exists())
+
 	def test_unknown_missing_recording_without_complete_checkpoint_is_refused(self):
 		from crate_music_importer.ipod_import.playlist_update import _validate_permanent_deletions
 		paths, manifest, music = self.fixture(("a", "b"))

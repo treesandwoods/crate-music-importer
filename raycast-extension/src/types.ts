@@ -274,6 +274,7 @@ export interface ImportJob {
   counts: JobCounts;
   tracks: ImportJobTrack[];
   errorSummary?: string | null;
+  failedRemovalId?: string;
   retryable: boolean;
   logPath?: string | null;
   notification?: { pending: boolean; notifiedAt?: string | null };
