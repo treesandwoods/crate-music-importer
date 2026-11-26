@@ -89,6 +89,7 @@ export function jobPhaseLabel(job: ImportJob): string {
 
 export function trackStateLabel(state: ImportJob["tracks"][number]["state"]): string {
   const labels: Record<string, string> = {
+    kept_in_library: "Still in Music library",
     not_started: "Not started",
     checking_music_ids: "Checking Music IDs",
     searching_youtube: "Searching YouTube",

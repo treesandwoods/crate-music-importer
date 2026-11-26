@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from crate_music_importer.ipod_import.manifest import ManagedPaths, load_manifest, new_manifest, save_manifest, set_album, set_playlist, upsert_recording
 from crate_music_importer.ipod_import.music import MusicAutomationError
@@ -560,9 +560,29 @@ class PlaylistUpdateTests(unittest.TestCase):
 			membership_reader=lambda *_: ["PID-A", "PID-B", "PID-C"], membership_editor=lambda *_: ["PID-C", "PID-A"],
 			music_deleter=lambda *_: True, status_checker=lambda _, pid: ("FOUND", pid), audio_hasher=lambda _: "proof",
 		)
-		with self.assertRaisesRegex(MusicAutomationError, "Music still lists.*Artist — b"):
+		with patch.dict(options, music_deleter=Mock(side_effect=RuntimeError("interrupted"))), self.assertRaisesRegex(RuntimeError, "interrupted"):
 			apply_playlist_update(first.manifest, "saved", paths, music, **options)
-		self.assertTrue(file.is_file())
+		checkpoint = paths.manifest.read_bytes()
+		options["membership_reader"] = lambda *_: ["PID-C", "PID-A"]
+		for missing_file in (False, True):
+			with self.subTest(missing_file=missing_file):
+				paths.manifest.write_bytes(checkpoint)
+				if missing_file:
+					file.unlink()
+					music[1]["location"] = None
+				deleter = Mock(return_value=True)
+				with patch.dict(options, music_deleter=deleter):
+					result = apply_playlist_update(load_manifest(paths), "saved", paths, music, **options)
+				self.assertEqual(deleter.call_count, 0 if missing_file else 1)
+				self.assertEqual(result["kept_in_library"], ["Artist — b"])
+				self.assertEqual(result["deleted"], 0)
+				final = load_manifest(paths)
+				self.assertNotIn("pending_update", final["playlists"]["saved"])
+				self.assertIn(b_id, final["recordings"])
+				self.assertEqual(file.is_file(), not missing_file)
+		paths.manifest.write_bytes(checkpoint)
+		file.write_bytes(b"managed")
+		music[1]["location"] = str(file)
 		recovered = load_manifest(paths)
 		second = self.preview(recovered, music, ("a", "c", "a"))
 		self.assertEqual([row["spotify_id"] for row in second.additions], ["a"])
