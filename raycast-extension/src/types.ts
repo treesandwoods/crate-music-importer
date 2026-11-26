@@ -3,6 +3,7 @@ export type SourceState = ProblemState | "ready" | "complete";
 export type JobStatus =
   "queued" | "running" | "complete" | "needs_attention" | "ready_to_continue" | "failed" | "cancelled" | "superseded";
 export type JobTrackState =
+  | "kept_in_library"
   | "not_started"
   | "checking_music_ids"
   | "searching_youtube"

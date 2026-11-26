@@ -65,6 +65,13 @@ test("mount replay shows completed history and separates a synced playlist from 
               ...history,
               {
                 ...history[0],
+                jobId: "updated",
+                source: { type: "playlist", name: "Finished playlist", id: "done", url: "url", total: 1 },
+                mode: "update",
+                tracks: [{ position: 1, recordingId: "kept", state: "kept_in_library", title: "Left behind" }],
+              },
+              {
+                ...history[0],
                 jobId: "cleanup",
                 source: { type: "playlist", name: "Test playlist", id: "test", url: "url", total: 2 },
                 mode: "update",
@@ -96,14 +103,22 @@ test("mount replay shows completed history and separates a synced playlist from 
       .findAllByType("Section" as ElementType)
       .find((row) => row.props.title === "Recently Completed");
     assert.ok(section);
-    assert.equal(section.findAllByType("Item" as ElementType).length, 87);
+    assert.equal(section.findAllByType("Item" as ElementType).length, 88);
+    const finished = section
+      .findAllByType("Item" as ElementType)
+      .find((row) => row.props.title === "Finished playlist");
+    assert.ok(finished);
+    assert.match(
+      finished.findByType("Detail" as ElementType).props.markdown,
+      /Still in Music library\*\* — Left behind/i,
+    );
     const cleanup = view.root.findAllByType("Item" as ElementType).find((row) => row.props.title === "Test playlist");
     assert.ok(cleanup);
     assert.equal(cleanup.props.subtitle, "Playlist synced · Library cleanup pending");
     const detail = cleanup.findByType("Detail" as ElementType).props.markdown;
     assert.match(detail, /Library cleanup pending\*\* — Artist — Removal/);
     assert.doesNotMatch(detail, /Failed|^\d+\./im);
-    assert.equal(cleanup.findAllByType("Action" as ElementType)[0].props.title, "Retry Library Cleanup");
+    assert.equal(cleanup.findAllByType("Action" as ElementType)[0].props.title, "Retry Playlist Update");
     assert.equal(view.root.findByType("List" as ElementType).props.isLoading, false);
   } finally {
     if (view) await act(async () => view.unmount());

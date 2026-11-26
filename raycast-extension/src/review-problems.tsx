@@ -481,7 +481,7 @@ function jobDetail(job: ImportJob): string {
         .map((track) => {
           const name = markdownText(track.artists ? `${track.artists} — ${track.title}` : track.title);
           if (job.mode === "update") {
-            if (job.status === "complete") return `- ${name}`;
+            if (job.status === "complete" && track.state !== "kept_in_library") return `- ${name}`;
             const state =
               hasPendingLibraryCleanup(job) && track.recordingId === job.failedRemovalId && track.state === "failed"
                 ? "Library cleanup pending"
@@ -571,8 +571,8 @@ function CancelSourceProgressAction({ source, refresh }: { source: SourceReferen
 }
 
 function JobActions({ job, refresh }: { job: ImportJob; refresh: () => Promise<void> }) {
-  const cleanup = hasPendingLibraryCleanup(job);
-  const retryTitle = cleanup ? "Retry Library Cleanup" : "Retry Download + Add to Music";
+  const update = job.mode === "update";
+  const retryTitle = update ? "Retry Playlist Update" : "Retry Download + Add to Music";
   const retry =
     job.status === "failed" && job.retryable ? (
       <Action
@@ -580,9 +580,9 @@ function JobActions({ job, refresh }: { job: ImportJob; refresh: () => Promise<v
         icon={Icon.ArrowClockwise}
         onAction={async () => {
           const confirmed = await confirmAlert({
-            title: cleanup ? "Retry library cleanup?" : "Retry this import?",
-            message: cleanup
-              ? "Crate will check the saved playlist and ask Music to remove the verified library copy again."
+            title: update ? "Retry playlist update?" : "Retry this import?",
+            message: update
+              ? "Resume the saved playlist update."
               : "Resume saved work, download remaining tracks, then update Music only when every track is ready.",
             primaryAction: { title: retryTitle },
             dismissAction: { title: "Cancel", style: Alert.ActionStyle.Cancel },
@@ -590,22 +590,22 @@ function JobActions({ job, refresh }: { job: ImportJob; refresh: () => Promise<v
           if (!confirmed) return;
           const toast = await showCompactToast(
             Toast.Style.Animated,
-            cleanup ? "Queueing library cleanup" : "Queueing import",
+            update ? "Queueing playlist update" : "Queueing import",
           );
           try {
             const retried = await retryJob(job.jobId);
             updateCompactToast(
               toast,
               Toast.Style.Success,
-              cleanup ? "Library cleanup queued" : `${job.source.type === "album" ? "Album" : "Playlist"} queued`,
-              cleanup ? job.source.name : `${retried.source.total || job.counts.total} tracks`,
+              `${job.source.type === "album" ? "Album" : "Playlist"} queued`,
+              update ? job.source.name : `${retried.source.total || job.counts.total} tracks`,
             );
             await refresh();
           } catch (error) {
             updateCompactToast(
               toast,
               Toast.Style.Failure,
-              cleanup ? "Could not queue library cleanup" : "Could not queue import",
+              update ? "Could not queue playlist update" : "Could not queue import",
               error instanceof Error ? error.message : String(error),
             );
           }
@@ -614,10 +614,10 @@ function JobActions({ job, refresh }: { job: ImportJob; refresh: () => Promise<v
     ) : null;
   return (
     <ActionPanel>
-      {cleanup ? retry : null}
+      {update ? retry : null}
       <Action title="Refresh Activity" icon={Icon.ArrowClockwise} onAction={refresh} />
       {job.status !== "complete" ? <CancelProgressAction job={job} refresh={refresh} /> : null}
-      {cleanup ? null : retry}
+      {update ? null : retry}
       <Action.OpenInBrowser title="Open in Spotify" url={job.source.url} />
       {job.logPath ? <Action.ShowInFinder title="Show Job Log in Finder" path={job.logPath} /> : null}
     </ActionPanel>

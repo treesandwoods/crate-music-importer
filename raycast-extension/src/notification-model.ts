@@ -48,11 +48,12 @@ export function jobToast(job: ImportJob): {
   const tracks = `${job.counts.total || job.source.total || 0} ${job.mode === "update" ? "changes" : "tracks"}`;
   const sourceName = job.source.name || kind;
   if (job.status === "complete") {
+    const kept = job.tracks?.filter((track) => track.state === "kept_in_library").length;
     return {
       style: "success",
       ...compactToast(
         job.mode === "update" ? "Playlist update complete" : `${kind} added to Music`,
-        namedDetail(sourceName, tracks),
+        namedDetail(sourceName, kept ? `${kept} still in library` : tracks),
       ),
     };
   }

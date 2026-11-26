@@ -25,7 +25,6 @@ from crate_music_importer.ipod_import.manifest import ManagedPaths, file_sha256,
 from crate_music_importer.ipod_import.music import delete_managed_music_track, lookup_music_track, music_binding_id
 from crate_music_importer.ipod_import.music_cache import remove_music_cache_tracks
 from crate_music_importer.ipod_import.music_lock import music_operation_lock
-from crate_music_importer.ipod_import.playlist_update import PlaylistCleanupError
 from crate_music_importer.ipod_import.spotify import parse_source_url
 
 
@@ -1082,10 +1081,14 @@ def sync_from_manifest(
 		pending = source_value.get("pending_update")
 		if not isinstance(pending, dict):
 			if job.get("status") == "running":
-				tracks = [dict(track, state="complete") for track in job.get("tracks") or []]
+				progress = job.get("trackProgress") or {}
+				tracks = [
+					dict(track, state="kept_in_library" if progress.get(track.get("recordingId")) == "kept_in_library" else "complete")
+					for track in job.get("tracks") or []
+				]
 				count = len(tracks)
 				counts = {key: 0 for key in job.get("counts") or {}}
-				counts.update({"total": count, "complete": count, "ready": count})
+				counts.update({"total": count, "complete": sum(track["state"] == "complete" for track in tracks), "ready": count})
 				def complete_pending(current: dict[str, Any]) -> bool:
 					if current.get("status") != "running":
 						return False
@@ -1433,9 +1436,7 @@ def run_job(
 		job["errorSummary"] = str(exc)[:500]
 		job["retryable"] = True
 		current_id = str((job.get("currentTrack") or {}).get("recordingId") or "")
-		if isinstance(exc, PlaylistCleanupError):
-			job["failedRemovalId"] = exc.recording_id
-		elif current_id and job["currentTrack"].get("state") != "complete":
+		if current_id and job["currentTrack"].get("state") not in {"complete", "kept_in_library"}:
 			def record_failure(manifest: dict[str, Any]) -> None:
 				recording = manifest.get("recordings", {}).get(current_id)
 				if recording is not None:

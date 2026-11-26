@@ -518,6 +518,8 @@ def _run(
 			on_progress=on_progress,
 		)
 		print(f"Playlist update complete: {result['additions']} additions; {result['removals']} removals; {result['reorders']} Spotify position changes; {result['music_repairs']} Music repairs; {result['deleted']} permanently deleted.")
+		for label in result["kept_in_library"]:
+			print(f"Still in the Music library: {label}")
 		print("Finder/iPod sync settings were not touched.")
 		return 0
 	if args.command == "status":

@@ -28,7 +28,6 @@ from crate_music_importer.ipod_import.jobs import (
 )
 from crate_music_importer.ipod_import.manifest import ManagedPaths, load_manifest, new_manifest, save_manifest, set_album, upsert_recording, update_manifest
 from crate_music_importer.ipod_import.music_cache import build_full_cache, load_music_cache, save_music_cache, upsert_music_cache_track
-from crate_music_importer.ipod_import.playlist_update import PlaylistCleanupError
 from crate_music_importer.ipod_import.resolver import resolve_youtube
 
 
@@ -475,7 +474,7 @@ class DurableJobTests(unittest.TestCase):
 			self.assertEqual([t["state"] for t in polled["tracks"]], ["complete", "adding_to_music"])
 			self.assertEqual(polled["counts"]["complete"], 1)
 
-	def test_playlist_cleanup_error_marks_the_removal_and_preserves_completed_addition(self):
+	def test_completed_playlist_records_retained_library_item_and_completed_addition(self):
 		with tempfile.TemporaryDirectory() as directory:
 			root = Path(directory)
 			paths = ManagedPaths(root)
@@ -496,11 +495,14 @@ class DurableJobTests(unittest.TestCase):
 				if command[0] == "playlist-update-prepare":
 					return 0
 				update_structured_progress(job, store, {"phase": "complete", "recording_id": added})
-				raise PlaylistCleanupError(removed, "Removed", "Artist")
+				update_structured_progress(job, store, {"phase": "kept_in_library", "recording_id": removed})
+				update_manifest(paths, lambda m: m["playlists"][key].pop("pending_update"))
+				return 0
 			finished = run_job(job, store, engine=engine, notifier=lambda _: None)
-			self.assertEqual([row["state"] for row in finished["tracks"]], ["complete", "failed"])
-			self.assertEqual(finished["counts"]["failed"], 1)
-			self.assertIn("Artist — Removed", finished["errorSummary"])
+			self.assertEqual(finished["status"], "complete")
+			self.assertEqual([row["state"] for row in finished["tracks"]], ["complete", "kept_in_library"])
+			self.assertEqual(finished["counts"]["failed"], 0)
+			self.assertEqual(finished["counts"]["complete"], 1)
 			self.assertNotIn("last_error", load_manifest(paths)["recordings"][added])
 
 	def test_unverified_music_binding_is_not_counted_as_complete(self):

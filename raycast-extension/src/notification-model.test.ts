@@ -71,6 +71,16 @@ test("playlist update jobs use update language and change counts", () => {
     title: "Playlist update complete",
     message: "A very long source name · 12 changes",
   });
+  job.tracks.push({
+    position: 1,
+    trackNumber: 1,
+    discNumber: 1,
+    recordingId: "kept",
+    title: "Removal",
+    artists: "Artist",
+    state: "kept_in_library",
+  });
+  assert.equal(jobToast(job).message, "A very long source name · 1 still in library");
 });
 
 test("playlist cleanup failures distinguish the synced playlist in the HUD", () => {
